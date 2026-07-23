@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible defect in openiwan
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Do not include credentials, tokens,
+        private controller responses, packet captures, or vulnerability details.
+        Security issues must follow SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: openiwan version
+      placeholder: "0.1.0 or commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide minimal commands or a synthetic test case.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      render: text
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Authorization and privacy
+      options:
+        - label: I am authorized to test the endpoint involved.
+          required: true
+        - label: I removed credentials, tokens, private data, and packet contents.
+          required: true

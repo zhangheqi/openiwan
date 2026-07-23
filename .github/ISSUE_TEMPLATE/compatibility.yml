@@ -1,0 +1,58 @@
+name: Compatibility report
+description: Document behavior observed with an authorized iWAN endpoint
+title: "compat: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility evidence improves the protocol reference. Share only
+        information you are authorized to disclose, and redact all private data.
+  - type: input
+    id: client
+    attributes:
+      label: Reference client version
+      placeholder: "Application version and build number"
+    validations:
+      required: true
+  - type: input
+    id: openiwan
+    attributes:
+      label: openiwan version
+      placeholder: "0.1.0 or commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Evidence level
+      description: See docs/REVERSE_ENGINEERING.md.
+      options:
+        - Static analysis (S)
+        - Independent cross-check (C)
+        - Synthetic local endpoint (L)
+        - Authorized real endpoint (R)
+    validations:
+      required: true
+  - type: textarea
+    id: observation
+    attributes:
+      label: Observation
+      description: State the smallest specific behavior that was observed.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction or synthetic example
+    validations:
+      required: true
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Authorization and privacy
+      options:
+        - label: I was authorized to perform the described testing.
+          required: true
+        - label: I removed credentials, tokens, private responses, and identifying packet data.
+          required: true

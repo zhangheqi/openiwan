@@ -1,0 +1,24 @@
+version = 1
+id = "ustc"
+display_name = "USTC iWAN"
+require_auth_verify_echo = false
+xor_key_bytes = 8
+
+[oidc]
+issuer = "https://auth.ivpn.ustc.edu.cn"
+client_id = "afc6479ffb531d71daef"
+redirect_uri = "com.panabit.mobile://oauth2redirect"
+scopes = ["openid", "profile", "email", "offline_access"]
+username_claims = ["name", "displayName", "preferred_username", "sub"]
+token_request_format = "json"
+
+[controller]
+base_url = "https://crtl.ivpn.ustc.edu.cn"
+domain = "iwan.ustc"
+app_id = "controller-ustc"
+app_secret = "ca6a3532abd2986a03b86b3a"
+auth_path = "/m/auth"
+keepalive_path = "/m/keepalive"
+config_path = "/m/config"
+device_type = "android"
+oem_name = "panabit"

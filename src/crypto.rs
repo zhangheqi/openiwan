@@ -85,17 +85,26 @@ impl DataCipher for NoCipher {
 #[derive(Clone)]
 pub struct XorCipher {
     key: [u8; KEY_LEN],
+    key_bytes: u8,
 }
 
 impl XorCipher {
     pub const fn new(key: [u8; KEY_LEN]) -> Self {
-        Self { key }
+        Self {
+            key,
+            key_bytes: KEY_LEN as u8,
+        }
+    }
+
+    pub(crate) const fn with_key_bytes(key: [u8; KEY_LEN], key_bytes: u8) -> Self {
+        debug_assert!(matches!(key_bytes, 8 | 16));
+        Self { key, key_bytes }
     }
 
     fn apply(&self, input: &[u8]) -> Vec<u8> {
         input
             .iter()
-            .zip(self.key.iter().cycle())
+            .zip(self.key[..usize::from(self.key_bytes)].iter().cycle())
             .map(|(byte, key)| byte ^ key)
             .collect()
     }
@@ -103,7 +112,11 @@ impl XorCipher {
 
 impl std::fmt::Debug for XorCipher {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("XorCipher([REDACTED])")
+        formatter
+            .debug_struct("XorCipher")
+            .field("key", &"[REDACTED]")
+            .field("key_bytes", &self.key_bytes)
+            .finish()
     }
 }
 
@@ -190,9 +203,21 @@ pub fn create_cipher(
     username: &str,
     password: &str,
 ) -> Box<dyn DataCipher> {
+    create_cipher_with_xor_key_bytes(method, username, password, KEY_LEN as u8)
+}
+
+pub(crate) fn create_cipher_with_xor_key_bytes(
+    method: EncryptionMethod,
+    username: &str,
+    password: &str,
+    xor_key_bytes: u8,
+) -> Box<dyn DataCipher> {
     match method {
         EncryptionMethod::None => Box::new(NoCipher),
-        EncryptionMethod::Xor => Box::new(XorCipher::new(derive_session_key(username, password))),
+        EncryptionMethod::Xor => Box::new(XorCipher::with_key_bytes(
+            derive_session_key(username, password),
+            xor_key_bytes,
+        )),
         EncryptionMethod::Aes => Box::new(AesCipher::new(derive_session_key(username, password))),
     }
 }
@@ -215,9 +240,24 @@ mod tests {
     #[test]
     fn xor_round_trip() {
         let cipher = XorCipher::new([0x5a; KEY_LEN]);
-        assert_eq!(format!("{cipher:?}"), "XorCipher([REDACTED])");
+        assert_eq!(
+            format!("{cipher:?}"),
+            "XorCipher { key: \"[REDACTED]\", key_bytes: 16 }"
+        );
         let ciphertext = cipher.encrypt(b"openiwan").unwrap();
         assert_eq!(cipher.decrypt(&ciphertext).unwrap(), b"openiwan");
+    }
+
+    #[test]
+    fn xor_compatibility_key_repeats_after_eight_bytes() {
+        let key = [
+            0, 1, 2, 3, 4, 5, 6, 7, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+        ];
+        let cipher = XorCipher::with_key_bytes(key, 8);
+        assert_eq!(
+            cipher.encrypt(&[0_u8; 16]).unwrap(),
+            [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]
+        );
     }
 
     #[test]

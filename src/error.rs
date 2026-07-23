@@ -65,6 +65,18 @@ pub enum Error {
 
     #[error("external command failed: {program}: {message}")]
     CommandFailed { program: String, message: String },
+
+    #[error("managed-provider error: {0}")]
+    ManagedProvider(String),
+
+    #[error("HTTP operation failed: {0}")]
+    Http(String),
+
+    #[error("OIDC authentication failed: {0}")]
+    Oidc(String),
+
+    #[error("controller operation failed: {0}")]
+    Controller(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

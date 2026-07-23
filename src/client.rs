@@ -149,7 +149,13 @@ impl Client {
                             return Err(parse_rejection(&decoded.body));
                         }
                         PacketType::OpenAck => {
-                            let info = parse_open_ack(&decoded, peer, nonce, self.config.mtu)?;
+                            let info = parse_open_ack(
+                                &decoded,
+                                peer,
+                                nonce,
+                                self.config.mtu,
+                                self.config.require_auth_verify_echo,
+                            )?;
                             if info.encryption != self.config.encryption {
                                 return Err(Error::InvalidConfig(format!(
                                     "server selected {} but client requested {}",
@@ -158,10 +164,11 @@ impl Client {
                             }
                             socket.set_read_timeout(Some(self.config.receive_poll()))?;
                             socket.set_write_timeout(Some(self.config.auth_timeout()))?;
-                            let cipher = crypto::create_cipher(
+                            let cipher = crypto::create_cipher_with_xor_key_bytes(
                                 info.encryption,
                                 &self.credentials.username,
                                 &self.credentials.password,
+                                self.config.xor_key_bytes,
                             );
                             info!(
                                 peer = %peer,
@@ -414,6 +421,7 @@ impl ConnectedSession {
                         );
                         continue;
                     }
+                    trace_session_packet(&decoded);
                     match self.process_packet(
                         &decoded,
                         device.as_ref(),
@@ -429,7 +437,7 @@ impl ConnectedSession {
                             break 'receive SessionEnd::TransportFailure;
                         }
                         Err(error) => {
-                            warn!(%error, "dropping invalid session datagram");
+                            warn_invalid_session_datagram(&decoded, &error);
                         }
                     }
                 }
@@ -488,18 +496,24 @@ impl ConnectedSession {
                 }
             }
             PacketType::EchoResponse => {
-                let (sent_at, current, minimum, maximum) =
-                    protocol::parse_echo_response(&packet.body)?;
+                let response = protocol::parse_echo_response(&packet.body)?;
                 *last_echo
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
-                debug!(
-                    sent_at,
-                    current_delay_micros = current,
-                    min_delay_micros = minimum,
-                    max_delay_micros = maximum,
-                    "heartbeat response"
-                );
+                if let Some(stats) = response.delay_stats {
+                    debug!(
+                        sent_at = response.timestamp_micros,
+                        current_delay_micros = stats.current_micros,
+                        min_delay_micros = stats.minimum_micros,
+                        max_delay_micros = stats.maximum_micros,
+                        "heartbeat response"
+                    );
+                } else {
+                    debug!(
+                        sent_at = response.timestamp_micros,
+                        "compact heartbeat response"
+                    );
+                }
             }
             PacketType::EchoRequest => {
                 if packet.body.len() < 8 {
@@ -562,6 +576,23 @@ enum WorkerFailure {
     Transport(std::io::Error),
 }
 
+fn warn_invalid_session_datagram(packet: &DecodedPacket, error: &Error) {
+    warn!(
+        packet_type = %packet.header.packet_type,
+        body_length = packet.body.len(),
+        %error,
+        "dropping invalid session datagram"
+    );
+}
+
+fn trace_session_packet(packet: &DecodedPacket) {
+    trace!(
+        packet_type = %packet.header.packet_type,
+        body_length = packet.body.len(),
+        "received session packet"
+    );
+}
+
 fn spawn_packet_sender(
     socket: Arc<UdpSocket>,
     device: Arc<dyn PacketDevice>,
@@ -621,9 +652,17 @@ fn spawn_packet_sender(
                     },
                 };
                 let datagram = protocol::encode_data(info.header(packet_type), &payload);
-                if let Err(error) = socket.send(&datagram) {
-                    let _ = failures.send(WorkerFailure::Transport(error));
-                    break;
+                match socket.send(&datagram) {
+                    Ok(length) => trace!(
+                        packet_type = %packet_type,
+                        inner_length = inner.len(),
+                        datagram_length = length,
+                        "sent TUN packet"
+                    ),
+                    Err(error) => {
+                        let _ = failures.send(WorkerFailure::Transport(error));
+                        break;
+                    }
                 }
             }
         })
@@ -698,6 +737,7 @@ fn parse_open_ack(
     peer: SocketAddr,
     expected_nonce: u32,
     requested_mtu: u16,
+    require_auth_verify_echo: bool,
 ) -> Result<SessionInfo> {
     if packet.header.session_id == 0 {
         return Err(Error::InvalidConfig(
@@ -705,11 +745,14 @@ fn parse_open_ack(
         ));
     }
     let attributes = Tlv::parse_all(&packet.body)?;
-    let auth_echo = protocol::find_tlv(&attributes, TlvType::AuthVerify)
-        .ok_or(Error::MissingTlv("AUTH_VERIFY"))?
-        .as_u32()?;
-    if auth_echo != expected_nonce {
-        return Err(Error::AuthenticationVerifyMismatch);
+    if let Some(attribute) = protocol::find_tlv(&attributes, TlvType::AuthVerify) {
+        if attribute.as_u32()? != expected_nonce {
+            return Err(Error::AuthenticationVerifyMismatch);
+        }
+    } else if require_auth_verify_echo {
+        return Err(Error::MissingTlv("AUTH_VERIFY"));
+    } else {
+        debug!("OPENACK omitted optional AUTH_VERIFY echo");
     }
     if let Some(attribute) = protocol::find_tlv(&attributes, TlvType::Encrypt) {
         let advertised = EncryptionMethod::try_from(attribute.as_u8()?)?;
@@ -891,6 +934,31 @@ mod tests {
         let debug = format!("{client:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("very-secret"));
+    }
+
+    #[test]
+    fn auth_verify_echo_can_be_optional_but_never_mismatched() {
+        let header = PacketHeader::new(
+            PacketType::OpenAck,
+            EncryptionMethod::Xor,
+            0x1234,
+            0x5060_7080,
+        );
+        let without_echo = protocol::decode_packet(&encode_control(header, &[])).unwrap();
+        let peer = "127.0.0.1:6001".parse().unwrap();
+        assert!(matches!(
+            parse_open_ack(&without_echo, peer, 0x0102_0304, 1400, true),
+            Err(Error::MissingTlv("AUTH_VERIFY"))
+        ));
+        assert!(parse_open_ack(&without_echo, peer, 0x0102_0304, 1400, false).is_ok());
+
+        let mut body = Vec::new();
+        Tlv::auth_verify(0xaabb_ccdd).encode(&mut body).unwrap();
+        let mismatched = protocol::decode_packet(&encode_control(header, &body)).unwrap();
+        assert!(matches!(
+            parse_open_ack(&mismatched, peer, 0x0102_0304, 1400, false),
+            Err(Error::AuthenticationVerifyMismatch)
+        ));
     }
 
     #[test]

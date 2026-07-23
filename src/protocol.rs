@@ -571,19 +571,49 @@ pub fn build_echo_response(
     )
 }
 
-pub fn parse_echo_response(body: &[u8]) -> Result<(u64, u32, u32, u32)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EchoDelayStats {
+    pub current_micros: u32,
+    pub minimum_micros: u32,
+    pub maximum_micros: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EchoResponse {
+    pub timestamp_micros: u64,
+    pub delay_stats: Option<EchoDelayStats>,
+}
+
+pub fn parse_echo_response(body: &[u8]) -> Result<EchoResponse> {
+    if body.len() < 8 {
+        return Err(Error::PacketTooShort {
+            minimum: 8,
+            actual: body.len(),
+        });
+    }
+
+    let timestamp = u64::from_be_bytes(body[0..8].try_into().expect("length checked"));
+    if body.len() == 8 {
+        return Ok(EchoResponse {
+            timestamp_micros: timestamp,
+            delay_stats: None,
+        });
+    }
     if body.len() < 20 {
         return Err(Error::PacketTooShort {
             minimum: 20,
             actual: body.len(),
         });
     }
-    Ok((
-        u64::from_be_bytes(body[0..8].try_into().expect("length checked")),
-        u32::from_be_bytes(body[8..12].try_into().expect("length checked")),
-        u32::from_be_bytes(body[12..16].try_into().expect("length checked")),
-        u32::from_be_bytes(body[16..20].try_into().expect("length checked")),
-    ))
+
+    Ok(EchoResponse {
+        timestamp_micros: timestamp,
+        delay_stats: Some(EchoDelayStats {
+            current_micros: u32::from_be_bytes(body[8..12].try_into().expect("length checked")),
+            minimum_micros: u32::from_be_bytes(body[12..16].try_into().expect("length checked")),
+            maximum_micros: u32::from_be_bytes(body[16..20].try_into().expect("length checked")),
+        }),
+    })
 }
 
 pub fn build_ping_request() -> Vec<u8> {
@@ -650,6 +680,46 @@ mod tests {
         assert!(matches!(
             decode_packet(&packet),
             Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn echo_response_accepts_compact_and_extended_forms() {
+        let timestamp = 0x0102_0304_0506_0708_u64;
+        assert_eq!(
+            parse_echo_response(&timestamp.to_be_bytes()).unwrap(),
+            EchoResponse {
+                timestamp_micros: timestamp,
+                delay_stats: None,
+            }
+        );
+
+        let response = build_echo_response(
+            PacketHeader::new(PacketType::EchoRequest, EncryptionMethod::Xor, 1, 2),
+            timestamp,
+            10,
+            5,
+            20,
+        );
+        let decoded = decode_packet(&response).unwrap();
+        assert_eq!(
+            parse_echo_response(&decoded.body).unwrap(),
+            EchoResponse {
+                timestamp_micros: timestamp,
+                delay_stats: Some(EchoDelayStats {
+                    current_micros: 10,
+                    minimum_micros: 5,
+                    maximum_micros: 20,
+                }),
+            }
+        );
+
+        assert!(matches!(
+            parse_echo_response(&[0_u8; 12]),
+            Err(Error::PacketTooShort {
+                minimum: 20,
+                actual: 12
+            })
         ));
     }
 

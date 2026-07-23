@@ -9,6 +9,8 @@ contribution policy.
 
 - [Architecture](ARCHITECTURE.md) — crate layout, session lifecycle, trust
   boundaries, and extension points
+- [Managed Providers](MANAGED_PROVIDERS.md) — OIDC, controller profiles,
+  encrypted state, and managed CLI usage
 - [iWAN 2.3.0 Client Wire Protocol](IWAN_PROTOCOL_2_3_0.md) — packet, TLV,
   authentication, encryption, heartbeat, and fragmentation formats
 - [Reverse-Engineering Evidence and Limitations](REVERSE_ENGINEERING.md) —

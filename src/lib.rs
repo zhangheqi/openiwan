@@ -10,6 +10,8 @@ pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod fragment;
+#[cfg(feature = "managed")]
+pub mod managed;
 pub mod protocol;
 pub mod tun;
 

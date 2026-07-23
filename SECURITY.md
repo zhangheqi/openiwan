@@ -46,6 +46,8 @@ Reports are especially useful for:
 - route or interface cleanup failures
 - session validation bypasses
 - command invocation or privilege-boundary problems
+- OIDC callback, token, JWKS, or controller-signature validation failures
+- managed provider or encrypted-state permission bypasses
 
 The use of MD5, repeating XOR, and AES-ECB is a known property of the legacy
 iWAN compatibility protocol. A report should demonstrate an implementation
@@ -60,3 +62,15 @@ security properties that are absent from the wire protocol.
 
 Use the project only on authorized networks and prefer a stronger protocol when
 the endpoint supports one.
+
+## Managed Credentials
+
+Managed provider files contain controller application material and must be
+private to their owner. On Unix, `openiwan` rejects provider files accessible by
+group or other users. Managed state is written atomically with mode `0600` and
+contains only the encrypted line password returned by the controller.
+
+OIDC access tokens and decrypted line passwords stay in memory, are redacted
+from debug output, and are zeroized when their owners are dropped. Do not attach
+provider files, managed state, callback URLs, tokens, or controller responses to
+public reports.

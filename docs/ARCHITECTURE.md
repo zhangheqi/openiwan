@@ -5,10 +5,12 @@ that protocol code can be tested without privileged access to a TUN device.
 
 ## Scope
 
-The implemented compatibility target is the traditional single-path UDP
-protocol observed in macOS iWAN client `2.3.0 (230)`. Controller APIs,
-organization-specific OIDC flows, DNS policy, and SEGRT/SR multipath are outside
-the current implementation boundary.
+The data-plane compatibility target is the traditional single-path UDP protocol
+observed in macOS iWAN client `2.3.0 (230)`. The optional managed layer supports
+configuration-driven OIDC providers and the compatible Panabit mobile
+controller flow. It does not claim compatibility with controllers that use a
+different signing, response, or password-wrapping scheme. DNS relay, operating
+system policy management, and SEGRT/SR multipath remain outside the boundary.
 
 ## Crate Layout
 
@@ -19,12 +21,29 @@ the current implementation boundary.
 | `client` | Authentication, session validation, heartbeat, packet exchange, and reconnection |
 | `fragment` | Strict fragment parsing, bounded reassembly, and inner IP validation |
 | `config` | Serializable client and reconnect configuration |
+| `managed` | Provider validation, OIDC/JWKS, controller signing, encrypted line state |
 | `tun` | Linux TUN, macOS utun, interface configuration, routes, and cleanup |
 | `error` | Public error model |
 | `bin/openiwan` | CLI, secret input, signals, logging, and command dispatch |
 
 The `PacketDevice` trait is the boundary between protocol/session logic and a
 TUN interface or userspace IP stack.
+
+## Managed Provider Lifecycle
+
+The default-enabled `managed` feature keeps organization parameters outside the
+binary in a protected provider TOML file. A managed fetch:
+
+1. loads and validates the provider and its file permissions
+2. performs OIDC discovery and creates a PKCE S256 request with state and nonce
+3. validates the callback, exchanges the code, and verifies the ID token through
+   the advertised JWKS
+4. signs the exact controller request bytes and calls auth, keepalive, and config
+5. atomically stores only the encrypted line records
+
+At connect time, only the selected line password is authenticated and decrypted.
+It is passed directly into the normal `Client` lifecycle and zeroized on drop.
+OAuth tokens and plaintext line passwords are never persisted.
 
 ## Session Lifecycle
 
@@ -65,7 +84,8 @@ OPENACK validation includes:
 
 - a valid control signature
 - a nonzero session ID
-- a matching AUTH_VERIFY nonce
+- a matching AUTH_VERIFY nonce when present, with provider-controlled handling
+  for deployments known to omit the echo
 - consistency between requested, header, and advertised encryption
 - bounded MTU and correctly sized address attributes
 
@@ -102,6 +122,10 @@ consecutive-failure budget.
 `TunDevice` implements native Linux and macOS packet framing. `RouteGuard`
 configures the interface and explicit routes, then removes them on drop,
 including rollback after partial configuration.
+
+CIDR, IP, and one-time domain targets share one resolver. It rejects invalid
+targets, default routes, duplicates, and routes that would contain the active
+iWAN endpoint before changing the host network.
 
 Default routes are intentionally rejected. A future full-tunnel implementation
 must first pin the control endpoint to the physical uplink and provide

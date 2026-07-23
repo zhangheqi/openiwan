@@ -21,7 +21,9 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - Native Linux `/dev/net/tun` and macOS `utun` support
 - Strict packet validation, bounded fragment queues, route cleanup, and
   credential zeroization
-- A reusable Rust library plus `ping`, `auth`, `connect`, and `decode` commands
+- Config-driven OIDC/JWKS login and controller-managed line discovery
+- A reusable Rust library plus `ping`, `auth`, `connect`, `decode`, and
+  `managed` commands
 
 ## Status
 
@@ -33,7 +35,8 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 | IPv4 and IPv6 | Implemented |
 | IPFRAG and IPFRAG6 receive-side reassembly | Implemented |
 | Heartbeat, CLOSE, failure detection, and reconnection | Implemented |
-| Controller and organization-specific OIDC flows | Out of scope |
+| Config-driven OIDC and compatible Panabit controller flows | Implemented |
+| USTC managed login profile | Example included; authorized live validation required |
 | SEGRT/SR multipath | Recognized and safely discarded; not implemented |
 | DNS relay and operating-system policy management | Out of scope |
 
@@ -92,10 +95,44 @@ sudo openiwan connect \
   --route 2001:db8::/32
 ```
 
-`--route` accepts CIDR values and passes them to platform tools as separate
-arguments, never through a shell. The client rejects `0.0.0.0/0` and `::/0`
-because a full-tunnel setup must first pin the iWAN control endpoint to the
-physical uplink.
+`--route` accepts CIDRs, `--route-ip` creates host routes, and `--route-domain`
+resolves a domain once before connecting. Values are passed to platform tools
+as separate arguments, never through a shell. The client rejects default
+routes and any route containing the active iWAN endpoint.
+
+### Managed login and connection
+
+Managed providers are external TOML files so the authentication and controller
+parameters can be updated without recompiling. Install the included USTC
+example as a protected file:
+
+```bash
+install -d -m 700 "$HOME/.config/openiwan/providers"
+install -m 600 examples/providers/ustc.toml \
+  "$HOME/.config/openiwan/providers/ustc.toml"
+```
+
+Fetch and list encrypted line configuration without elevated privileges:
+
+```bash
+openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" fetch
+openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" list
+```
+
+Select a line and connect:
+
+```bash
+sudo openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  connect --route-domain example.edu --route 10.0.0.0/8
+```
+
+Use `all` in place of `fetch` or `connect` to perform the complete flow. The
+access token and decrypted line password are never written to disk. See
+[Managed Providers](docs/MANAGED_PROVIDERS.md) for the provider schema, state
+layout, and security model.
 
 Configuration can also be loaded from TOML:
 
@@ -105,6 +142,8 @@ mtu = 1400
 encryption = "xor"
 auth_timeout_ms = 3000
 auth_attempts = 3
+require_auth_verify_echo = true
+xor_key_bytes = 16
 heartbeat_interval_ms = 5000
 heartbeat_timeout_ms = 30000
 receive_poll_ms = 250
@@ -128,7 +167,9 @@ Packet and TLV codecs live in `openiwan::protocol`; compatibility cryptography
 lives in `openiwan::crypto`. Applications that already own a TUN device,
 virtual interface, or userspace IP stack can implement `PacketDevice` and use
 `Client::authenticate`, `ConnectedSession::run`, or the bounded reconnect
-helpers.
+helpers. The default `managed` Cargo feature exposes typed provider, OIDC,
+controller, and encrypted-state APIs; disable default features for a
+protocol-only dependency.
 
 The public API documentation can be built locally with `cargo doc --open`.
 
@@ -137,6 +178,7 @@ The public API documentation can be built locally with `cargo doc --open`.
 - [Documentation index](docs/README.md)
 - [Wire protocol reference](docs/IWAN_PROTOCOL_2_3_0.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Managed providers](docs/MANAGED_PROVIDERS.md)
 - [Reverse-engineering evidence and limitations](docs/REVERSE_ENGINEERING.md)
 - [Security policy](SECURITY.md)
 

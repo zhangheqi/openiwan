@@ -127,10 +127,13 @@ plain_block  = first_16_bytes(password_utf8) || zero_padding
 PASSWORD     = AES-128-ECB-Encrypt(password_key, plain_block)
 ```
 
-OPENACK returns a nonzero session ID, a token, address configuration, and the
-same AUTH_VERIFY value. A client should reject an absent or mismatched
-AUTH_VERIFY value so that a stale OPENACK cannot be associated with the current
-request.
+OPENACK returns a nonzero session ID, a token, and address configuration.
+Some observed endpoints echo the same AUTH_VERIFY value, while current USTC
+endpoints omit the TLV. A client must reject a present but mismatched echo.
+`openiwan` keeps strict echo checking as the manual-client default and allows a
+managed provider to explicitly accept an absent echo for compatibility. In
+either mode, the UDP socket remains connected to the selected peer and the
+OPENACK control signature, session ID, token, and configuration are validated.
 
 The traditional data-plane session key is:
 
@@ -153,6 +156,15 @@ Repeating XOR applies:
 ```text
 cipher[i] = plain[i] XOR session_key[i mod 16]
 ```
+
+The USTC-compatible data endpoints repeat only the first 8 bytes:
+
+```text
+cipher[i] = plain[i] XOR session_key[i mod 8]
+```
+
+This width must be selected per deployment; it cannot be inferred from the
+OPENACK encryption identifier.
 
 The AES mode is AES-128-ECB without PKCS#7. The sender appends zero bytes until
 the body length is a multiple of 16; it does not append an extra block when the
@@ -178,7 +190,10 @@ minimum_delay_micros: u32
 maximum_delay_micros: u32
 ```
 
-All fields are big-endian. The response echoes the request timestamp.
+Some compatible servers, including the USTC deployment, return only the first
+8-byte `timestamp_micros` field and omit the three delay values. Receivers must
+accept both the compact 8-byte form and the extended 20-byte form. All present
+fields are big-endian. The response echoes the request timestamp.
 
 ## IPFRAG and IPFRAG6
 

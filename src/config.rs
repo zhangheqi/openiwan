@@ -15,6 +15,14 @@ fn default_auth_attempts() -> u32 {
     3
 }
 
+const fn default_require_auth_verify_echo() -> bool {
+    true
+}
+
+const fn default_xor_key_bytes() -> u8 {
+    16
+}
+
 fn default_heartbeat_interval_ms() -> u64 {
     5_000
 }
@@ -78,6 +86,17 @@ pub struct ClientConfig {
     pub auth_timeout_ms: u64,
     #[serde(default = "default_auth_attempts")]
     pub auth_attempts: u32,
+    /// Require OPENACK to echo the `AUTH_VERIFY` nonce sent in OPEN.
+    ///
+    /// Some compatible deployments omit the echo. A present echo is always
+    /// validated, regardless of this setting.
+    #[serde(default = "default_require_auth_verify_echo")]
+    pub require_auth_verify_echo: bool,
+    /// Number of derived session-key bytes repeated by the XOR data cipher.
+    ///
+    /// The traditional client uses 16; some compatible deployments use 8.
+    #[serde(default = "default_xor_key_bytes")]
+    pub xor_key_bytes: u8,
     #[serde(default = "default_heartbeat_interval_ms")]
     pub heartbeat_interval_ms: u64,
     #[serde(default = "default_heartbeat_timeout_ms")]
@@ -96,6 +115,8 @@ impl ClientConfig {
             encryption: EncryptionMethod::default(),
             auth_timeout_ms: default_auth_timeout_ms(),
             auth_attempts: default_auth_attempts(),
+            require_auth_verify_echo: default_require_auth_verify_echo(),
+            xor_key_bytes: default_xor_key_bytes(),
             heartbeat_interval_ms: default_heartbeat_interval_ms(),
             heartbeat_timeout_ms: default_heartbeat_timeout_ms(),
             receive_poll_ms: default_receive_poll_ms(),
@@ -118,6 +139,11 @@ impl ClientConfig {
         if self.auth_timeout_ms == 0 {
             return Err(Error::InvalidConfig(
                 "auth_timeout_ms must be greater than zero".into(),
+            ));
+        }
+        if !matches!(self.xor_key_bytes, 8 | 16) {
+            return Err(Error::InvalidConfig(
+                "xor_key_bytes must be either 8 or 16".into(),
             ));
         }
         if self.heartbeat_interval_ms == 0 {
@@ -188,5 +214,12 @@ mod tests {
         config.reconnect.initial_delay_ms = 2;
         config.reconnect.max_delay_ms = 1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_config_defaults_to_strict_auth_verify() {
+        let config: ClientConfig = toml::from_str("server = \"127.0.0.1:6001\"").unwrap();
+        assert!(config.require_auth_verify_echo);
+        assert_eq!(config.xor_key_bytes, 16);
     }
 }

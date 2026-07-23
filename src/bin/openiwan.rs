@@ -1,7 +1,12 @@
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
+#[cfg(feature = "managed")]
+use openiwan::managed::{
+    ManagedClient, ManagedServer, ManagedState, ProviderConfig, default_state_path, load_state,
+    new_device_id, save_state, select_server,
+};
 use openiwan::protocol::{self, Tlv};
-use openiwan::tun::{RouteGuard, TunDevice};
+use openiwan::tun::{RouteGuard, TunDevice, resolve_route_targets};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
 use std::fs;
 use std::io::{BufRead, Write};
@@ -33,6 +38,9 @@ enum Command {
     Connect(ConnectArgs),
     /// Decode one hexadecimal iWAN datagram without network access.
     Decode(DecodeArgs),
+    /// Log in through a configured controller, manage lines, and connect.
+    #[cfg(feature = "managed")]
+    Managed(ManagedArgs),
 }
 
 #[derive(Debug, Args)]
@@ -73,15 +81,72 @@ struct ConnectArgs {
     connection: ConnectionArgs,
     #[arg(long, default_value = "openiwan0")]
     tun: String,
+    #[command(flatten)]
+    routes: RouteArgs,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct RouteArgs {
     /// CIDR routed through iWAN. Repeat for multiple routes.
-    #[arg(long = "route")]
+    #[arg(long = "route", value_delimiter = ',')]
     routes: Vec<String>,
+    /// IP address routed through iWAN as a host route. Repeat as needed.
+    #[arg(long = "route-ip", value_delimiter = ',')]
+    route_ips: Vec<String>,
+    /// Domain resolved once and routed through iWAN. Repeat as needed.
+    #[arg(long = "route-domain", value_delimiter = ',')]
+    route_domains: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 struct DecodeArgs {
     /// Datagram bytes as hexadecimal; whitespace, ':' and '-' are ignored.
     hex: String,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ManagedArgs {
+    /// Protected provider TOML file describing OIDC and controller parameters.
+    #[arg(long)]
+    provider: PathBuf,
+    /// Override the managed state directory.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    action: ManagedCommand,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Subcommand)]
+enum ManagedCommand {
+    /// Log in through OIDC and save the encrypted line configuration.
+    Fetch,
+    /// List saved lines without network access or password decryption.
+    List,
+    /// Select a saved line and connect.
+    Connect(ManagedConnectArgs),
+    /// Fetch, list, select, and connect.
+    All(ManagedConnectArgs),
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ManagedConnectArgs {
+    /// Select a line by one-based index instead of prompting.
+    #[arg(long, conflicts_with = "line_name")]
+    line_index: Option<usize>,
+    /// Select a line by its unique exact name instead of prompting.
+    #[arg(long, conflicts_with = "line_index")]
+    line_name: Option<String>,
+    #[arg(long, default_value = "openiwan0")]
+    tun: String,
+    #[arg(long)]
+    mtu: Option<u16>,
+    #[arg(long)]
+    encryption: Option<EncryptionMethod>,
+    #[command(flatten)]
+    routes: RouteArgs,
 }
 
 fn main() {
@@ -111,17 +176,32 @@ fn run() -> Result<()> {
         }
         Command::Connect(arguments) => connect(arguments)?,
         Command::Decode(arguments) => decode(&arguments.hex)?,
+        #[cfg(feature = "managed")]
+        Command::Managed(arguments) => managed(arguments)?,
     }
     Ok(())
 }
 
 fn connect(arguments: ConnectArgs) -> Result<()> {
     let client = build_client(&arguments.connection)?;
+    run_client(client, &arguments.tun, &arguments.routes)
+}
+
+fn run_client(client: Client, tun: &str, route_arguments: &RouteArgs) -> Result<()> {
     let session = client.authenticate()?;
     print_session(session.info());
 
-    let device = Arc::new(TunDevice::open(&arguments.tun)?);
-    let _routes = RouteGuard::configure(device.name(), session.info(), &arguments.routes)?;
+    let routes = resolve_route_targets(
+        &route_arguments.routes,
+        &route_arguments.route_ips,
+        &route_arguments.route_domains,
+        Some(session.info().peer.ip()),
+    )?;
+    let device = Arc::new(TunDevice::open(tun)?);
+    let _routes = RouteGuard::configure(device.name(), session.info(), &routes)?;
+    for route in &routes {
+        println!("route {route} -> {}", device.name());
+    }
     println!("TUN {} is active; press Ctrl-C to stop", device.name());
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -132,6 +212,119 @@ fn connect(arguments: ConnectArgs) -> Result<()> {
     let end = client.run_reconnecting_from(session, device, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn managed(arguments: ManagedArgs) -> Result<()> {
+    let provider = ProviderConfig::load(&arguments.provider)?;
+    let state_path = default_state_path(&provider.id, arguments.state_dir.as_deref())?;
+    let client = ManagedClient::new(provider);
+    match arguments.action {
+        ManagedCommand::Fetch => {
+            let state = managed_fetch(&client, &state_path)?;
+            print_servers(&state);
+        }
+        ManagedCommand::List => {
+            let state = load_managed_state(&client, &state_path)?;
+            print_servers(&state);
+        }
+        ManagedCommand::Connect(connect) => {
+            let state = load_managed_state(&client, &state_path)?;
+            print_servers(&state);
+            managed_connect(&client, &state, &connect)?;
+        }
+        ManagedCommand::All(connect) => {
+            let state = managed_fetch(&client, &state_path)?;
+            print_servers(&state);
+            managed_connect(&client, &state, &connect)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn managed_fetch(client: &ManagedClient, state_path: &Path) -> Result<ManagedState> {
+    let device_id = if state_path.exists() {
+        let state = load_managed_state(client, state_path)?;
+        state.device_id
+    } else {
+        new_device_id()
+    };
+    let pending = client.begin_authorization()?;
+    println!(
+        "Open this URL in a browser and complete authentication:\n\n{}\n",
+        pending.authorization_url()
+    );
+    let redirect = prompt_line("Paste the complete callback URL: ")?;
+    let state = client.fetch(&pending, &redirect, &device_id)?;
+    save_state(state_path, &state)?;
+    println!(
+        "saved {} line(s) to {}",
+        state.servers.len(),
+        state_path.display()
+    );
+    Ok(state)
+}
+
+#[cfg(feature = "managed")]
+fn load_managed_state(client: &ManagedClient, state_path: &Path) -> Result<ManagedState> {
+    let state = load_state(state_path)?;
+    state.validate_for(&client.provider().id, &client.provider().controller.domain)?;
+    Ok(state)
+}
+
+#[cfg(feature = "managed")]
+fn managed_connect(
+    client: &ManagedClient,
+    state: &ManagedState,
+    arguments: &ManagedConnectArgs,
+) -> Result<()> {
+    let selected = select_server(state, arguments.line_index, arguments.line_name.as_deref())?
+        .map_or_else(|| prompt_for_server(state), Ok)?;
+    println!("connecting to {} ({})", selected.name, selected.endpoint());
+
+    let mut config = ClientConfig::new(selected.endpoint());
+    if let Some(mtu) = arguments.mtu {
+        config.mtu = mtu;
+    }
+    if let Some(encryption) = arguments.encryption {
+        config.encryption = encryption;
+    }
+    let iwan_client = client.build_client(state, selected, config)?;
+    run_client(iwan_client, &arguments.tun, &arguments.routes)
+}
+
+#[cfg(feature = "managed")]
+fn print_servers(state: &ManagedState) {
+    for (index, server) in state.servers.iter().enumerate() {
+        println!("{:>2}. {:30} {}", index + 1, server.name, server.endpoint());
+    }
+}
+
+#[cfg(feature = "managed")]
+fn prompt_for_server(state: &ManagedState) -> Result<&ManagedServer> {
+    loop {
+        let value = prompt_line(&format!("Select line [1-{}]: ", state.servers.len()))?;
+        if let Ok(index) = value.parse::<usize>() {
+            if let Ok(Some(server)) = select_server(state, Some(index), None) {
+                return Ok(server);
+            }
+        }
+        eprintln!("invalid line selection");
+    }
+}
+
+#[cfg(feature = "managed")]
+fn prompt_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut value = String::new();
+    std::io::stdin().read_line(&mut value)?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        return Err(Error::InvalidConfig("input must not be empty".into()));
+    }
+    Ok(value)
 }
 
 fn build_client(arguments: &ConnectionArgs) -> Result<Client> {
@@ -363,5 +556,47 @@ mod tests {
     fn hex_decoder_accepts_capture_formats() {
         assert_eq!(decode_hex("11:22 aa-bb").unwrap(), [0x11, 0x22, 0xaa, 0xbb]);
         assert!(decode_hex("abc").is_err());
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn parses_managed_commands_and_rejects_conflicting_selectors() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "managed",
+            "--provider",
+            "provider.toml",
+            "connect",
+            "--line-index",
+            "2",
+            "--route-ip",
+            "192.0.2.10",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Managed(ManagedArgs {
+                action: ManagedCommand::Connect(ManagedConnectArgs {
+                    line_index: Some(2),
+                    ..
+                }),
+                ..
+            })
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "managed",
+                "--provider",
+                "provider.toml",
+                "connect",
+                "--line-index",
+                "1",
+                "--line-name",
+                "Education",
+            ])
+            .is_err()
+        );
     }
 }

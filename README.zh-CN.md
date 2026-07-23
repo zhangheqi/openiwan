@@ -18,7 +18,8 @@ iWAN 客户端协议的独立开源 Rust 实现。
 - IPv4、IPv6、心跳、CLOSE、有限重连和分片重组
 - Linux `/dev/net/tun` 与 macOS `utun`
 - 严格数据包校验、分片队列上限、路由清理和凭据内存清零
-- 可复用 Rust 库，以及 `ping`、`auth`、`connect`、`decode` 命令
+- 配置驱动的 OIDC/JWKS 登录和控制器线路获取
+- 可复用 Rust 库，以及 `ping`、`auth`、`connect`、`decode`、`managed` 命令
 
 ## 兼容状态
 
@@ -30,7 +31,8 @@ iWAN 客户端协议的独立开源 Rust 实现。
 | IPv4 与 IPv6 | 已实现 |
 | IPFRAG 与 IPFRAG6 下行重组 | 已实现 |
 | 心跳、CLOSE、故障检测和重连 | 已实现 |
-| 控制器和组织专用 OIDC 流程 | 不在项目范围内 |
+| 配置驱动的 OIDC 和兼容 Panabit 控制器流程 | 已实现 |
+| USTC 托管登录配置 | 已提供示例；仍需在授权环境中实测 |
 | SEGRT/SR 多路径 | 仅识别并安全丢弃；尚未实现 |
 | DNS relay 与操作系统策略管理 | 不在项目范围内 |
 
@@ -86,8 +88,41 @@ sudo openiwan connect \
   --route 2001:db8::/32
 ```
 
-`--route` 只接受 CIDR，并以独立参数调用系统工具，不经过 shell。客户端拒绝
-`0.0.0.0/0` 和 `::/0`，因为全隧道配置必须先把 iWAN 控制端点固定到物理出口。
+`--route` 接受 CIDR，`--route-ip` 创建主机路由，`--route-domain` 在连接前解析一次
+域名。所有参数都以独立参数调用系统工具，不经过 shell。客户端拒绝默认路由以及会覆盖
+当前 iWAN 数据端点的路由。
+
+### 统一认证并连接
+
+托管客户域使用外部 TOML 文件，因此认证和控制器参数变化时无需重新编译。先把仓库中的
+USTC 示例安装成仅当前用户可读的文件：
+
+```bash
+install -d -m 700 "$HOME/.config/openiwan/providers"
+install -m 600 examples/providers/ustc.toml \
+  "$HOME/.config/openiwan/providers/ustc.toml"
+```
+
+普通用户可完成登录、保存加密线路配置和离线查看：
+
+```bash
+openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" fetch
+openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" list
+```
+
+选择线路并连接：
+
+```bash
+sudo openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  connect --route-domain example.edu --route 10.0.0.0/8
+```
+
+将动作换成 `all` 可以一次完成登录、列出线路、选择和连接。access token 与解密后的线路
+密码不会写入磁盘。provider 结构、状态文件和安全模型参见
+[托管客户域文档](docs/MANAGED_PROVIDERS.md)。
 
 也可以使用 TOML 配置：
 
@@ -97,6 +132,8 @@ mtu = 1400
 encryption = "xor"
 auth_timeout_ms = 3000
 auth_attempts = 3
+require_auth_verify_echo = true
+xor_key_bytes = 16
 heartbeat_interval_ms = 5000
 heartbeat_timeout_ms = 30000
 receive_poll_ms = 250
@@ -120,6 +157,7 @@ openiwan auth --config openiwan.toml --username alice
 - [文档索引](docs/README.md)
 - [线协议参考](docs/IWAN_PROTOCOL_2_3_0.md)
 - [架构](docs/ARCHITECTURE.md)
+- [托管客户域](docs/MANAGED_PROVIDERS.md)
 - [逆向证据与限制](docs/REVERSE_ENGINEERING.md)
 - [安全策略](SECURITY.md)
 

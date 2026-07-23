@@ -2,7 +2,7 @@ use crate::client::{PacketDevice, SessionInfo};
 use crate::{Error, Result};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, RawFd};
 use std::process::{Command, Output};
 
@@ -299,6 +299,115 @@ impl RouteGuard {
     }
 }
 
+/// Resolve CIDR, IP-address, and domain route targets into validated CIDRs.
+///
+/// Domains are resolved once. Default routes and routes containing
+/// `excluded_peer` are rejected so the iWAN control socket cannot be routed
+/// into its own tunnel.
+pub fn resolve_route_targets(
+    cidrs: &[String],
+    addresses: &[String],
+    domains: &[String],
+    excluded_peer: Option<IpAddr>,
+) -> Result<Vec<String>> {
+    let mut routes = Vec::new();
+    for route in cidrs {
+        let route = route.trim();
+        validate_cidr(route)?;
+        push_route(&mut routes, route.to_owned(), excluded_peer)?;
+    }
+    for address in addresses {
+        let address = address
+            .trim()
+            .parse::<IpAddr>()
+            .map_err(|_| Error::InvalidConfig(format!("invalid route IP {address:?}")))?;
+        let route = match address {
+            IpAddr::V4(_) => format!("{address}/32"),
+            IpAddr::V6(_) => format!("{address}/128"),
+        };
+        push_route(&mut routes, route, excluded_peer)?;
+    }
+    for domain in domains {
+        let domain = domain.trim();
+        if domain.is_empty() {
+            return Err(Error::InvalidConfig(
+                "route domain must not be empty".into(),
+            ));
+        }
+        let resolved = (domain, 0)
+            .to_socket_addrs()
+            .map_err(|error| {
+                Error::InvalidConfig(format!(
+                    "failed to resolve route domain {domain:?}: {error}"
+                ))
+            })?
+            .map(|address| address.ip())
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return Err(Error::InvalidConfig(format!(
+                "route domain {domain:?} resolved to no addresses"
+            )));
+        }
+        for address in resolved {
+            let route = match address {
+                IpAddr::V4(_) => format!("{address}/32"),
+                IpAddr::V6(_) => format!("{address}/128"),
+            };
+            push_route(&mut routes, route, excluded_peer)?;
+        }
+    }
+    Ok(routes)
+}
+
+fn push_route(
+    routes: &mut Vec<String>,
+    route: String,
+    excluded_peer: Option<IpAddr>,
+) -> Result<()> {
+    if let Some(peer) = excluded_peer {
+        if cidr_contains(&route, peer)? {
+            return Err(Error::InvalidConfig(format!(
+                "route {route} contains the active iWAN endpoint; choose a narrower route"
+            )));
+        }
+    }
+    if !routes.iter().any(|existing| existing == &route) {
+        routes.push(route);
+    }
+    Ok(())
+}
+
+fn cidr_contains(cidr: &str, candidate: IpAddr) -> Result<bool> {
+    let (address, prefix) = cidr
+        .split_once('/')
+        .ok_or_else(|| Error::InvalidConfig(format!("route {cidr:?} must use CIDR notation")))?;
+    let address = address
+        .parse::<IpAddr>()
+        .map_err(|_| Error::InvalidConfig(format!("invalid route address {address:?}")))?;
+    let prefix = prefix
+        .parse::<u8>()
+        .map_err(|_| Error::InvalidConfig(format!("invalid route prefix {prefix:?}")))?;
+    Ok(match (address, candidate) {
+        (IpAddr::V4(network), IpAddr::V4(candidate)) if prefix <= 32 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(network) & mask == u32::from(candidate) & mask
+        }
+        (IpAddr::V6(network), IpAddr::V6(candidate)) if prefix <= 128 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            u128::from(network) & mask == u128::from(candidate) & mask
+        }
+        _ => false,
+    })
+}
+
 impl Drop for RouteGuard {
     fn drop(&mut self) {
         cleanup_interface(&self.device, &self.routes);
@@ -514,6 +623,29 @@ mod tests {
         assert!(validate_cidr("10.0.0.0;id/8").is_err());
         assert!(validate_cidr("0.0.0.0/0").is_err());
         assert!(validate_cidr("::/0").is_err());
+    }
+
+    #[test]
+    fn expands_and_deduplicates_route_targets() {
+        assert_eq!(
+            resolve_route_targets(
+                &["10.0.0.0/8".into(), "10.0.0.0/8".into()],
+                &["192.0.2.10".into(), "2001:db8::1".into()],
+                &[],
+                None,
+            )
+            .unwrap(),
+            ["10.0.0.0/8", "192.0.2.10/32", "2001:db8::1/128"]
+        );
+        assert!(
+            resolve_route_targets(
+                &["192.0.2.0/24".into()],
+                &[],
+                &[],
+                Some("192.0.2.10".parse().unwrap()),
+            )
+            .is_err()
+        );
     }
 
     #[test]

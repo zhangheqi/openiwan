@@ -285,7 +285,7 @@ mod tests {
                 keepalive_path: "/m/keepalive".into(),
                 config_path: "/m/config".into(),
                 device_type: "android".into(),
-                oem_name: "panabit".into(),
+                oem_name: "example-oem".into(),
             },
         }
     }

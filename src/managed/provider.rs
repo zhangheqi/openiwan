@@ -266,7 +266,7 @@ mod tests {
                 keepalive_path: "/m/keepalive".into(),
                 config_path: "/m/config".into(),
                 device_type: "android".into(),
-                oem_name: "panabit".into(),
+                oem_name: "example-oem".into(),
             },
         }
     }
@@ -283,18 +283,41 @@ mod tests {
     }
 
     #[test]
-    fn bundled_ustc_example_is_valid() {
-        let provider: ProviderConfig =
-            toml::from_str(include_str!("../../examples/providers/ustc.toml")).unwrap();
-        provider.validate().unwrap();
-        assert_eq!(provider.id, "ustc");
-        assert_eq!(provider.xor_key_bytes, 8);
+    fn bundled_provider_examples_are_valid_and_unique() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/providers");
+        let mut provider_ids = std::collections::HashSet::new();
+        let mut provider_count = 0;
+
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                continue;
+            }
+
+            let contents = fs::read_to_string(&path).unwrap();
+            let provider: ProviderConfig = toml::from_str(&contents)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            provider
+                .validate()
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+
+            let filename = path.file_stem().and_then(|stem| stem.to_str()).unwrap();
+            assert_eq!(provider.id, filename, "provider ID must match filename");
+            assert!(
+                provider_ids.insert(provider.id.clone()),
+                "duplicate provider ID: {}",
+                provider.id
+            );
+            provider_count += 1;
+        }
+
+        assert!(provider_count > 0, "no bundled provider examples found");
     }
 
     #[test]
     fn current_compatibility_fields_are_required() {
         for prefix in ["dns_servers", "require_auth_verify_echo", "xor_key_bytes"] {
-            let incomplete = include_str!("../../examples/providers/ustc.toml")
+            let incomplete = include_str!("../../examples/providers/example.toml")
                 .lines()
                 .filter(|line| !line.starts_with(prefix))
                 .collect::<Vec<_>>()
@@ -305,7 +328,7 @@ mod tests {
             );
         }
 
-        let without_dns = include_str!("../../examples/providers/ustc.toml")
+        let without_dns = include_str!("../../examples/providers/example.toml")
             .lines()
             .map(|line| {
                 if line.starts_with("dns_servers") {
@@ -355,7 +378,7 @@ auth_path = "/m/auth"
 keepalive_path = "/m/keepalive"
 config_path = "/m/config"
 device_type = "android"
-oem_name = "panabit"
+oem_name = "example-oem"
 "#;
         fs::write(&path, contents).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();

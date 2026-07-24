@@ -37,8 +37,13 @@ auth_path = "/m/auth"
 keepalive_path = "/m/keepalive"
 config_path = "/m/config"
 device_type = "android"
-oem_name = "panabit"
+oem_name = "example-oem"
 ```
+
+The repository also provides
+[`examples/providers/example.toml`](../examples/providers/example.toml) as a
+schema-complete template. Its values are documentation placeholders and will
+not connect to a real deployment. Replace every placeholder before use.
 
 The provider must use HTTPS and advertise PKCE S256 through OIDC Discovery.
 ID tokens must use an approved asymmetric algorithm and pass signature, issuer,
@@ -56,52 +61,14 @@ Resolver addresses must be unicast; provider addresses use DNS port 53.
 `require_auth_verify_echo` controls compatibility with data endpoints that omit
 the AUTH_VERIFY TLV from OPENACK. The client always sends AUTH_VERIFY and always
 rejects a present but mismatched echo. Set the option to `true` only when the
-deployment is known to echo it; the USTC example uses `false` because its
-current endpoints omit the echo.
+deployment is known to echo it.
 
 `xor_key_bytes` selects how many bytes of the 16-byte derived session key are
 repeated by the legacy XOR data cipher. The field is required and must be `8`
-or `16`; the USTC provider uses `8`.
+or `16`.
 
-## USTC
-
-The repository includes the currently observed USTC profile as an example, not
-as a vendor-supported built-in:
-
-```bash
-install -d -m 700 "$HOME/.config/openiwan/providers"
-install -m 600 examples/providers/ustc.toml \
-  "$HOME/.config/openiwan/providers/ustc.toml"
-```
-
-Fetch the available lines:
-
-```bash
-openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" fetch
-```
-
-The command prints an authorization URL. Open it, complete authentication, and
-paste the complete custom-scheme callback URL into the terminal. `openiwan`
-checks the redirect URI and state before exchanging the authorization code.
-
-List the saved lines without network access or password decryption:
-
-```bash
-openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" list
-```
-
-Connect interactively, by one-based index, or by a unique exact name:
-
-```bash
-sudo openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
-  connect --line-index 1 --route 10.0.0.0/8
-```
-
-Use `all` to fetch, list, select, and connect in one process. Fetch and list do
-not need elevated privileges; TUN creation normally does.
+Deployment-ready configurations and their operational notes are kept separate
+from this generic schema. See the [provider profile index](providers/README.md).
 
 ## State and Secrets
 
@@ -144,7 +111,7 @@ The `serve` managed action selects and decrypts a saved line exactly like
 
 ```bash
 openiwan managed \
-  --provider examples/providers/ustc.toml \
+  --provider "$HOME/.config/openiwan/providers/provider.toml" \
   serve --line-index 1 --upstream https://api.example.edu
 ```
 

@@ -1,0 +1,26 @@
+# Documentation template only. Replace every placeholder before use.
+version = 1
+id = "example"
+display_name = "Example iWAN"
+dns_servers = ["192.0.2.53"]
+require_auth_verify_echo = true
+xor_key_bytes = 16
+
+[oidc]
+issuer = "https://auth.example.com"
+client_id = "replace-with-provider-client-id"
+redirect_uri = "com.example.openiwan://oauth2redirect"
+scopes = ["openid", "profile", "email"]
+username_claims = ["name", "displayName", "preferred_username", "sub"]
+token_request_format = "json"
+
+[controller]
+base_url = "https://controller.example.com"
+domain = "iwan.example"
+app_id = "replace-with-provider-app-id"
+app_secret = "replace-with-provider-application-material"
+auth_path = "/m/auth"
+keepalive_path = "/m/keepalive"
+config_path = "/m/config"
+device_type = "replace-with-provider-device-type"
+oem_name = "example-oem"

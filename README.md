@@ -9,9 +9,9 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 `2.3.0 (230)`.
 
 > [!IMPORTANT]
-> This project is not affiliated with or endorsed by Panabit or the University
-> of Science and Technology of China. It is an interoperability project, not an
-> official specification or vendor-certified client.
+> This project is not affiliated with or endorsed by Panabit or any deployment
+> operator. It is an interoperability project, not an official specification or
+> vendor-certified client.
 
 ## Features
 
@@ -28,19 +28,24 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 
 ## Status
 
-| Capability | Status |
-|---|---|
-| Traditional single-path authentication and UDP tunnel | Implemented |
-| Plaintext and XOR data plane | Implemented |
-| Legacy AES-128 data plane | Implemented; real-server validation required |
-| IPv4 and IPv6 | Implemented |
-| IPFRAG and IPFRAG6 receive-side reassembly | Implemented |
-| Heartbeat, CLOSE, failure detection, and reconnection | Implemented |
-| Route-free local HTTP to HTTPS reverse proxy | Implemented; fixed HTTP/1.1 upstream |
-| Config-driven OIDC and compatible Panabit controller flows | Implemented |
-| USTC managed login profile | Example included; authorized live validation required |
-| SEGRT/SR multipath | Recognized and safely discarded; not implemented |
-| `serve` userspace DNS (UDP, TCP fallback, TTL cache) | Implemented |
+### Available
+
+- Traditional single-path authentication and UDP tunneling
+- Plaintext and repeating XOR data modes
+- IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths
+- Heartbeat, CLOSE, failure detection, and bounded reconnection
+- Route-free local HTTP/1.1 to HTTPS reverse proxy
+- Config-driven OIDC and compatible Panabit controller flows
+- `serve` userspace DNS with UDP, TCP fallback, and TTL caching
+
+### Requires deployment validation
+
+- Legacy AES-128 data mode is implemented but still requires validation against
+  an authorized real endpoint.
+
+### Not implemented
+
+- SEGRT/SR multipath packets are recognized and safely discarded.
 
 Production-oriented here means that the implementation has defensive parsing,
 resource limits, explicit error handling, credential hygiene, cleanup logic,
@@ -131,16 +136,17 @@ by default; repeat `--ca-cert organization-ca.pem` to add private roots.
 The default `--dns-mode auto` first queries organization resolvers advertised
 by OPENACK or configured by the managed provider through the iWAN userspace
 stack. It validates transactions and responses, follows CNAMEs, caches by TTL,
-and retries truncated UDP responses over DNS-over-TCP. Shadowrocket cannot see
-that inner DNS query or replace the answer with a Fake-IP. Every managed
-provider must explicitly declare its organization resolvers; use an empty list
-when the deployment relies only on OPENACK DNS attributes:
+and retries truncated UDP responses over DNS-over-TCP. Because these queries
+stay inside iWAN, host-side VPNs and proxies cannot observe them or substitute
+Fake-IP answers. Every managed provider must explicitly declare its
+organization resolvers; use an empty list when the deployment relies only on
+OPENACK DNS attributes:
 
 ```toml
 dns_servers = []
 ```
 
-Manual mode and temporary overrides can pass `--dns-server 202.38.64.1`.
+Manual mode and temporary overrides can pass `--dns-server 192.0.2.53`.
 `--dns-mode iwan` requires an iWAN resolver. `auto` uses host DNS only when no
 iWAN resolver is available; failure of a configured organization resolver is
 fail-closed and does not leak the hostname to the host resolver. Host answers
@@ -151,42 +157,45 @@ production use does not require pre-resolving API addresses.
 ### Managed login and connection
 
 Managed providers are external TOML files so the authentication and controller
-parameters can be updated without recompiling. Install the included USTC
-example as a protected file:
+parameters can be updated without recompiling. The schema-complete
+`examples/providers/example.toml` is a non-operational template; replace every
+placeholder or use a bundled profile before installing the provider as a
+protected file:
 
 ```bash
 install -d -m 700 "$HOME/.config/openiwan/providers"
-install -m 600 examples/providers/ustc.toml \
-  "$HOME/.config/openiwan/providers/ustc.toml"
+install -m 600 /path/to/provider.toml \
+  "$HOME/.config/openiwan/providers/provider.toml"
 ```
 
 Fetch and list encrypted line configuration without elevated privileges:
 
 ```bash
 openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" fetch
+  --provider "$HOME/.config/openiwan/providers/provider.toml" fetch
 openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" list
+  --provider "$HOME/.config/openiwan/providers/provider.toml" list
 ```
 
 Select a line and connect:
 
 ```bash
 sudo openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  --provider "$HOME/.config/openiwan/providers/provider.toml" \
   connect --route-domain example.edu --route 10.0.0.0/8
 ```
 
 Use `all` in place of `fetch` or `connect` to perform the complete flow. The
 access token and decrypted line password are never written to disk. See
 [Managed Providers](docs/MANAGED_PROVIDERS.md) for the provider schema, state
-layout, and security model.
+layout, and security model. Bundled configurations and deployment-specific
+instructions are listed under [Provider Profiles](docs/providers/README.md).
 
 An existing managed line can run the route-free proxy as well:
 
 ```bash
 openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  --provider "$HOME/.config/openiwan/providers/provider.toml" \
   serve --line-index 1 --upstream https://api.example.edu
 ```
 
@@ -240,6 +249,7 @@ The public API documentation can be built locally with `cargo doc --open`.
 - [Wire protocol reference](docs/IWAN_PROTOCOL_2_3_0.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Managed providers](docs/MANAGED_PROVIDERS.md)
+- [Provider profiles](docs/providers/README.md)
 - [Reverse-engineering evidence and limitations](docs/REVERSE_ENGINEERING.md)
 - [Security policy](SECURITY.md)
 

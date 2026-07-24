@@ -28,6 +28,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Isolated deployment-specific configuration and guidance from generic code,
+  examples, and documentation
 - Require AUTH_VERIFY policy, XOR key width, and managed-provider DNS settings
   explicitly in the current configuration schema
 - Replace the pre-release fixed-width cipher constructors with fallible APIs

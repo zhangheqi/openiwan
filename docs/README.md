@@ -11,6 +11,8 @@ contribution policy.
   boundaries, and extension points
 - [Managed Providers](MANAGED_PROVIDERS.md) — OIDC, controller profiles,
   encrypted state, and managed CLI usage
+- [Provider Profiles](providers/README.md) — deployment-specific bundled
+  configurations and operational notes
 - [iWAN 2.3.0 Client Wire Protocol](IWAN_PROTOCOL_2_3_0.md) — packet, TLV,
   authentication, encryption, heartbeat, and fragmentation formats
 - [Reverse-Engineering Evidence and Limitations](REVERSE_ENGINEERING.md) —
@@ -27,6 +29,8 @@ contribution policy.
 4. State compatibility boundaries prominently.
 5. Keep commands copyable and avoid environment-specific assumptions.
 6. Update the English source before updating translated README files.
+7. Isolate deployment-specific names and parameters in provider profiles,
+   evidence records, and release history.
 
 API documentation is generated from the Rust source:
 

@@ -8,7 +8,7 @@ iWAN 客户端协议的独立开源 Rust 实现。
 `2.3.0 (230)` 中的传统单链路 UDP 数据面。
 
 > [!IMPORTANT]
-> 本项目与 Panabit 或中国科学技术大学没有隶属或背书关系。它是用于互操作的社区项目，
+> 本项目与 Panabit 或任何部署运营方没有隶属或背书关系。它是用于互操作的社区项目，
 > 不是官方协议规范或经过厂商认证的客户端。
 
 ## 功能
@@ -24,19 +24,23 @@ iWAN 客户端协议的独立开源 Rust 实现。
 
 ## 兼容状态
 
-| 能力 | 状态 |
-|---|---|
-| 传统单链路认证和 UDP 隧道 | 已实现 |
-| 明文与 XOR 数据面 | 已实现 |
-| 传统 AES-128 数据面 | 已实现；仍需真实服务端验证 |
-| IPv4 与 IPv6 | 已实现 |
-| IPFRAG 与 IPFRAG6 下行重组 | 已实现 |
-| 心跳、CLOSE、故障检测和重连 | 已实现 |
-| 无路由本地 HTTP 到 HTTPS 反向代理 | 已实现；HTTP/1.1 固定上游 |
-| 配置驱动的 OIDC 和兼容 Panabit 控制器流程 | 已实现 |
-| USTC 托管登录配置 | 已提供示例；仍需在授权环境中实测 |
-| SEGRT/SR 多路径 | 仅识别并安全丢弃；尚未实现 |
-| `serve` 用户态 DNS（UDP、TCP 回退、TTL 缓存） | 已实现 |
+### 已实现
+
+- 传统单链路认证和 UDP 隧道
+- 明文与循环 XOR 数据模式
+- IPv4、IPv6、IPFRAG 与 IPFRAG6 下行路径
+- 心跳、CLOSE、故障检测和有限重连
+- 无路由的本地 HTTP/1.1 到 HTTPS 反向代理
+- 配置驱动的 OIDC 和兼容 Panabit 控制器流程
+- `serve` 用户态 DNS，包括 UDP、TCP 回退和 TTL 缓存
+
+### 仍需部署验证
+
+- 传统 AES-128 数据模式已经实现，但仍需在获得授权的真实端点上验证。
+
+### 尚未实现
+
+- SEGRT/SR 多路径数据包仅会被识别并安全丢弃。
 
 这里的“面向生产”表示实现包含防御性解析、资源上限、明确错误处理、凭据保护、清理逻辑、
 测试和 CI，并不表示已经获得厂商认证。部署前必须在获得授权的测试环境中验证互操作性。
@@ -119,15 +123,15 @@ TCP/IP 栈访问 `https://api.example.edu/v1/profile?full=true`。请求方法�
 
 默认 `--dns-mode auto` 会优先通过 iWAN 用户态栈查询 OPENACK 或托管 provider
 提供的组织 DNS。它校验 DNS 事务和响应、支持 CNAME、按 TTL 缓存，并在 UDP
-响应被截断时自动改用 DNS-over-TCP。这样 Shadowrocket 看不到内层 DNS 查询，
-也无法返回 Fake-IP。每个托管 provider 都必须显式声明组织 DNS；仅依赖 OPENACK
-DNS 属性时使用空列表：
+响应被截断时自动改用 DNS-over-TCP。由于查询始终位于 iWAN 内部，宿主机上的其他
+VPN 或代理无法观察查询或替换为 Fake-IP 答案。每个托管 provider 都必须显式声明
+组织 DNS；仅依赖 OPENACK DNS 属性时使用空列表：
 
 ```toml
 dns_servers = []
 ```
 
-手动模式或临时覆盖可使用 `--dns-server 202.38.64.1`。指定
+手动模式或临时覆盖可使用 `--dns-server 192.0.2.53`。指定
 `--dns-mode iwan` 可要求必须存在 iWAN DNS。`auto` 只有在没有任何 iWAN DNS
 配置时才使用系统解析；已经配置的组织 DNS 如果查询失败会直接失败，不会泄露域名到
 宿主机解析器。系统解析得到 `198.18.0.0/15` Fake-IP 时也会立即拒绝，而不是等待
@@ -136,41 +140,43 @@ dns_servers = []
 
 ### 统一认证并连接
 
-托管客户域使用外部 TOML 文件，因此认证和控制器参数变化时无需重新编译。先把仓库中的
-USTC 示例安装成仅当前用户可读的文件：
+托管客户域使用外部 TOML 文件，因此认证和控制器参数变化时无需重新编译。
+`examples/providers/example.toml` 是结构完整但不能直接部署的中性模板；替换全部
+占位值或选用预制 profile 后，再将 provider 安装成仅当前用户可读的文件：
 
 ```bash
 install -d -m 700 "$HOME/.config/openiwan/providers"
-install -m 600 examples/providers/ustc.toml \
-  "$HOME/.config/openiwan/providers/ustc.toml"
+install -m 600 /path/to/provider.toml \
+  "$HOME/.config/openiwan/providers/provider.toml"
 ```
 
 普通用户可完成登录、保存加密线路配置和离线查看：
 
 ```bash
 openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" fetch
+  --provider "$HOME/.config/openiwan/providers/provider.toml" fetch
 openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" list
+  --provider "$HOME/.config/openiwan/providers/provider.toml" list
 ```
 
 选择线路并连接：
 
 ```bash
 sudo openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  --provider "$HOME/.config/openiwan/providers/provider.toml" \
   connect --route-domain example.edu --route 10.0.0.0/8
 ```
 
 将动作换成 `all` 可以一次完成登录、列出线路、选择和连接。access token 与解密后的线路
 密码不会写入磁盘。provider 结构、状态文件和安全模型参见
-[托管客户域文档](docs/MANAGED_PROVIDERS.md)。
+[托管客户域文档](docs/MANAGED_PROVIDERS.md)；预制配置和部署专属说明参见
+[Provider Profiles](docs/providers/README.md)。
 
 也可以使用已经保存的托管线路启动无路由 HTTP 代理：
 
 ```bash
 openiwan managed \
-  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  --provider "$HOME/.config/openiwan/providers/provider.toml" \
   serve --line-index 1 --upstream https://api.example.edu
 ```
 
@@ -212,6 +218,7 @@ Rust API 在构造客户端或加密器时同样要求显式传入 AUTH_VERIFY �
 - [线协议参考](docs/IWAN_PROTOCOL_2_3_0.md)
 - [架构](docs/ARCHITECTURE.md)
 - [托管客户域](docs/MANAGED_PROVIDERS.md)
+- [Provider Profiles](docs/providers/README.md)
 - [逆向证据与限制](docs/REVERSE_ENGINEERING.md)
 - [安全策略](SECURITY.md)
 

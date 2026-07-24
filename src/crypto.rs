@@ -89,16 +89,9 @@ pub struct XorCipher {
 }
 
 impl XorCipher {
-    pub const fn new(key: [u8; KEY_LEN]) -> Self {
-        Self {
-            key,
-            key_bytes: KEY_LEN as u8,
-        }
-    }
-
-    pub(crate) const fn with_key_bytes(key: [u8; KEY_LEN], key_bytes: u8) -> Self {
-        debug_assert!(matches!(key_bytes, 8 | 16));
-        Self { key, key_bytes }
+    pub fn new(key: [u8; KEY_LEN], key_bytes: u8) -> Result<Self> {
+        validate_xor_key_bytes(key_bytes)?;
+        Ok(Self { key, key_bytes })
     }
 
     fn apply(&self, input: &[u8]) -> Vec<u8> {
@@ -202,23 +195,26 @@ pub fn create_cipher(
     method: EncryptionMethod,
     username: &str,
     password: &str,
-) -> Box<dyn DataCipher> {
-    create_cipher_with_xor_key_bytes(method, username, password, KEY_LEN as u8)
+    xor_key_bytes: u8,
+) -> Result<Box<dyn DataCipher>> {
+    validate_xor_key_bytes(xor_key_bytes)?;
+    Ok(match method {
+        EncryptionMethod::None => Box::new(NoCipher),
+        EncryptionMethod::Xor => Box::new(XorCipher {
+            key: derive_session_key(username, password),
+            key_bytes: xor_key_bytes,
+        }),
+        EncryptionMethod::Aes => Box::new(AesCipher::new(derive_session_key(username, password))),
+    })
 }
 
-pub(crate) fn create_cipher_with_xor_key_bytes(
-    method: EncryptionMethod,
-    username: &str,
-    password: &str,
-    xor_key_bytes: u8,
-) -> Box<dyn DataCipher> {
-    match method {
-        EncryptionMethod::None => Box::new(NoCipher),
-        EncryptionMethod::Xor => Box::new(XorCipher::with_key_bytes(
-            derive_session_key(username, password),
-            xor_key_bytes,
-        )),
-        EncryptionMethod::Aes => Box::new(AesCipher::new(derive_session_key(username, password))),
+fn validate_xor_key_bytes(key_bytes: u8) -> Result<()> {
+    if matches!(key_bytes, 8 | 16) {
+        Ok(())
+    } else {
+        Err(Error::InvalidConfig(
+            "xor_key_bytes must be either 8 or 16".into(),
+        ))
     }
 }
 
@@ -239,7 +235,7 @@ mod tests {
 
     #[test]
     fn xor_round_trip() {
-        let cipher = XorCipher::new([0x5a; KEY_LEN]);
+        let cipher = XorCipher::new([0x5a; KEY_LEN], 16).unwrap();
         assert_eq!(
             format!("{cipher:?}"),
             "XorCipher { key: \"[REDACTED]\", key_bytes: 16 }"
@@ -253,11 +249,17 @@ mod tests {
         let key = [
             0, 1, 2, 3, 4, 5, 6, 7, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
         ];
-        let cipher = XorCipher::with_key_bytes(key, 8);
+        let cipher = XorCipher::new(key, 8).unwrap();
         assert_eq!(
             cipher.encrypt(&[0_u8; 16]).unwrap(),
             [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]
         );
+    }
+
+    #[test]
+    fn rejects_invalid_xor_key_widths() {
+        assert!(XorCipher::new([0_u8; KEY_LEN], 7).is_err());
+        assert!(create_cipher(EncryptionMethod::None, "alice", "secret", 17).is_err());
     }
 
     #[test]

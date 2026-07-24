@@ -26,6 +26,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Explicit managed-provider compatibility for endpoints that omit AUTH_VERIFY
   from OPENACK, while still rejecting mismatched echoes
 
+### Changed
+
+- Require AUTH_VERIFY policy, XOR key width, and managed-provider DNS settings
+  explicitly in the current configuration schema
+- Replace the pre-release fixed-width cipher constructors with fallible APIs
+  that require an explicit 8- or 16-byte XOR key width
+
 ## [0.1.0] - 2026-07-23
 
 ### Added

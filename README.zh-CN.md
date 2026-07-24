@@ -120,11 +120,11 @@ TCP/IP 栈访问 `https://api.example.edu/v1/profile?full=true`。请求方法�
 默认 `--dns-mode auto` 会优先通过 iWAN 用户态栈查询 OPENACK 或托管 provider
 提供的组织 DNS。它校验 DNS 事务和响应、支持 CNAME、按 TTL 缓存，并在 UDP
 响应被截断时自动改用 DNS-over-TCP。这样 Shadowrocket 看不到内层 DNS 查询，
-也无法返回 Fake-IP。USTC provider 已配置校内 DNS；旧的本地副本需要重新安装，
-或在顶层加入：
+也无法返回 Fake-IP。每个托管 provider 都必须显式声明组织 DNS；仅依赖 OPENACK
+DNS 属性时使用空列表：
 
 ```toml
-dns_servers = ["202.38.64.1"]
+dns_servers = []
 ```
 
 手动模式或临时覆盖可使用 `--dns-server 202.38.64.1`。指定
@@ -174,7 +174,8 @@ openiwan managed \
   serve --line-index 1 --upstream https://api.example.edu
 ```
 
-也可以使用 TOML 配置：
+也可以使用 TOML 配置。`require_auth_verify_echo` 和 `xor_key_bytes` 的取值取决于
+具体部署，因此是必填项：
 
 ```toml
 server = "192.0.2.10:6001"
@@ -197,6 +198,9 @@ max_delay_ms = 30000
 ```bash
 openiwan auth --config openiwan.toml --username alice
 ```
+
+Rust API 在构造客户端或加密器时同样要求显式传入 AUTH_VERIFY 策略和 XOR 密钥宽度；
+加密器只接受 `8` 或 `16`，其他值返回错误。
 
 完整命令行参数请运行 `openiwan --help` 或 `openiwan <command> --help`。
 

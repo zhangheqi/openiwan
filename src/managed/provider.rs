@@ -9,10 +9,6 @@ use zeroize::Zeroize;
 
 pub const PROVIDER_VERSION: u32 = 1;
 
-const fn default_xor_key_bytes() -> u8 {
-    8
-}
-
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TokenRequestFormat {
@@ -76,11 +72,8 @@ pub struct ProviderConfig {
     pub version: u32,
     pub id: String,
     pub display_name: String,
-    #[serde(default)]
     pub dns_servers: Vec<IpAddr>,
-    #[serde(default)]
     pub require_auth_verify_echo: bool,
-    #[serde(default = "default_xor_key_bytes")]
     pub xor_key_bytes: u8,
     pub oidc: OidcConfig,
     pub controller: ControllerConfig,
@@ -299,14 +292,34 @@ mod tests {
     }
 
     #[test]
-    fn managed_provider_defaults_to_eight_byte_xor_compatibility() {
-        let without_width = include_str!("../../examples/providers/ustc.toml")
+    fn current_compatibility_fields_are_required() {
+        for prefix in ["dns_servers", "require_auth_verify_echo", "xor_key_bytes"] {
+            let incomplete = include_str!("../../examples/providers/ustc.toml")
+                .lines()
+                .filter(|line| !line.starts_with(prefix))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                toml::from_str::<ProviderConfig>(&incomplete).is_err(),
+                "{prefix} should be required"
+            );
+        }
+
+        let without_dns = include_str!("../../examples/providers/ustc.toml")
             .lines()
-            .filter(|line| !line.starts_with("xor_key_bytes"))
+            .map(|line| {
+                if line.starts_with("dns_servers") {
+                    "dns_servers = []"
+                } else {
+                    line
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        let parsed: ProviderConfig = toml::from_str(&without_width).unwrap();
-        assert_eq!(parsed.xor_key_bytes, 8);
+        toml::from_str::<ProviderConfig>(&without_dns)
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -323,6 +336,9 @@ mod tests {
 version = 1
 id = "test"
 display_name = "Test"
+dns_servers = []
+require_auth_verify_echo = false
+xor_key_bytes = 8
 [oidc]
 issuer = "https://auth.example.test"
 client_id = "client"

@@ -47,11 +47,11 @@ audience, expiry, and nonce validation against the advertised JWKS.
 Provider files contain controller application material. Copy them with mode
 `0600`; files readable by a Unix group or other users are rejected.
 
-`dns_servers` is an optional list of recursive resolver IP addresses reachable
-inside iWAN. `managed serve` queries them through the userspace iWAN stack, so
-another VPN cannot replace answers with Fake-IP records. The iWAN OPENACK DNS
-attributes are also used when present. Resolver addresses must be unicast;
-provider addresses use DNS port 53.
+`dns_servers` is a required list of recursive resolver IP addresses reachable
+inside iWAN. Use `[]` when a deployment relies only on DNS attributes from
+OPENACK. `managed serve` queries configured resolvers through the userspace
+iWAN stack, so another VPN cannot replace answers with Fake-IP records.
+Resolver addresses must be unicast; provider addresses use DNS port 53.
 
 `require_auth_verify_echo` controls compatibility with data endpoints that omit
 the AUTH_VERIFY TLV from OPENACK. The client always sends AUTH_VERIFY and always
@@ -60,9 +60,8 @@ deployment is known to echo it; the USTC example uses `false` because its
 current endpoints omit the echo.
 
 `xor_key_bytes` selects how many bytes of the 16-byte derived session key are
-repeated by the legacy XOR data cipher. Managed providers default to the
-widely-deployed 8-byte compatibility form; set `16` for endpoints known to use
-the full key. The USTC provider uses `8`.
+repeated by the legacy XOR data cipher. The field is required and must be `8`
+or `16`; the USTC provider uses `8`.
 
 ## USTC
 

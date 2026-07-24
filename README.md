@@ -132,12 +132,12 @@ The default `--dns-mode auto` first queries organization resolvers advertised
 by OPENACK or configured by the managed provider through the iWAN userspace
 stack. It validates transactions and responses, follows CNAMEs, caches by TTL,
 and retries truncated UDP responses over DNS-over-TCP. Shadowrocket cannot see
-that inner DNS query or replace the answer with a Fake-IP. The USTC provider
-includes its campus resolver; reinstall an older local copy or add this
-top-level setting:
+that inner DNS query or replace the answer with a Fake-IP. Every managed
+provider must explicitly declare its organization resolvers; use an empty list
+when the deployment relies only on OPENACK DNS attributes:
 
 ```toml
-dns_servers = ["202.38.64.1"]
+dns_servers = []
 ```
 
 Manual mode and temporary overrides can pass `--dns-server 202.38.64.1`.
@@ -190,7 +190,8 @@ openiwan managed \
   serve --line-index 1 --upstream https://api.example.edu
 ```
 
-Configuration can also be loaded from TOML:
+Configuration can also be loaded from TOML. `require_auth_verify_echo` and
+`xor_key_bytes` are required because their values depend on the deployment:
 
 ```toml
 server = "192.0.2.10:6001"
@@ -226,6 +227,10 @@ virtual interface, or userspace IP stack can implement `PacketDevice` and use
 helpers. The default `managed` Cargo feature exposes typed provider, OIDC,
 controller, and encrypted-state APIs; disable default features for a
 protocol-only dependency.
+
+Programmatic client and cipher construction requires an explicit
+`require_auth_verify_echo` policy and XOR key width. Cipher constructors return
+an error unless the width is `8` or `16`.
 
 The public API documentation can be built locally with `cargo doc --open`.
 

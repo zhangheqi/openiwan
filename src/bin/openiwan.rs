@@ -261,7 +261,7 @@ fn run() -> Result<()> {
     init_logging(cli.verbose);
     match cli.command {
         Command::Ping(arguments) => {
-            let address = ClientConfig::new(arguments.server).resolve_server()?;
+            let address = ClientConfig::new(arguments.server, true, 16).resolve_server()?;
             let elapsed = client::ping(address, Duration::from_millis(arguments.timeout_ms))?;
             println!(
                 "reply from {address}: {:.3} ms",
@@ -438,7 +438,11 @@ fn managed_connect(
         .map_or_else(|| prompt_for_server(state), Ok)?;
     println!("connecting to {} ({})", selected.name, selected.endpoint());
 
-    let mut config = ClientConfig::new(selected.endpoint());
+    let mut config = ClientConfig::new(
+        selected.endpoint(),
+        client.provider().require_auth_verify_echo,
+        client.provider().xor_key_bytes,
+    );
     if let Some(mtu) = arguments.mtu {
         config.mtu = mtu;
     }
@@ -459,7 +463,11 @@ fn managed_serve(
         .map_or_else(|| prompt_for_server(state), Ok)?;
     println!("connecting to {} ({})", selected.name, selected.endpoint());
 
-    let mut config = ClientConfig::new(selected.endpoint());
+    let mut config = ClientConfig::new(
+        selected.endpoint(),
+        client.provider().require_auth_verify_echo,
+        client.provider().xor_key_bytes,
+    );
     if let Some(mtu) = arguments.mtu {
         config.mtu = mtu;
     }
@@ -518,6 +526,8 @@ fn build_client(arguments: &ConnectionArgs) -> Result<Client> {
                 .server
                 .clone()
                 .ok_or_else(|| Error::InvalidConfig("--server or --config is required".into()))?,
+            true,
+            16,
         )
     };
     if let Some(server) = &arguments.server {

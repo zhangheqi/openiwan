@@ -165,12 +165,12 @@ impl Client {
                             }
                             socket.set_read_timeout(Some(self.config.receive_poll()))?;
                             socket.set_write_timeout(Some(self.config.auth_timeout()))?;
-                            let cipher = crypto::create_cipher_with_xor_key_bytes(
+                            let cipher = crypto::create_cipher(
                                 info.encryption,
                                 &self.credentials.username,
                                 &self.credentials.password,
                                 self.config.xor_key_bytes,
-                            );
+                            )?;
                             info!(
                                 peer = %peer,
                                 session_id = info.session_id,
@@ -933,8 +933,12 @@ mod tests {
 
     #[test]
     fn debug_output_redacts_password() {
-        let client =
-            Client::new(ClientConfig::new("127.0.0.1:6001"), "alice", "very-secret").unwrap();
+        let client = Client::new(
+            ClientConfig::new("127.0.0.1:6001", true, 16),
+            "alice",
+            "very-secret",
+        )
+        .unwrap();
         let debug = format!("{client:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("very-secret"));
@@ -1013,7 +1017,7 @@ mod tests {
             assert_eq!(close.header.token, 0x5060_7080);
         });
 
-        let mut config = ClientConfig::new(server_address.to_string());
+        let mut config = ClientConfig::new(server_address.to_string(), true, 16);
         config.auth_timeout_ms = 1_000;
         config.auth_attempts = 1;
         let session = Client::new(config, "alice", "secret")

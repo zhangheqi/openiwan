@@ -15,14 +15,6 @@ fn default_auth_attempts() -> u32 {
     3
 }
 
-const fn default_require_auth_verify_echo() -> bool {
-    true
-}
-
-const fn default_xor_key_bytes() -> u8 {
-    16
-}
-
 fn default_heartbeat_interval_ms() -> u64 {
     5_000
 }
@@ -90,12 +82,10 @@ pub struct ClientConfig {
     ///
     /// Some compatible deployments omit the echo. A present echo is always
     /// validated, regardless of this setting.
-    #[serde(default = "default_require_auth_verify_echo")]
     pub require_auth_verify_echo: bool,
     /// Number of derived session-key bytes repeated by the XOR data cipher.
     ///
     /// The traditional client uses 16; some compatible deployments use 8.
-    #[serde(default = "default_xor_key_bytes")]
     pub xor_key_bytes: u8,
     #[serde(default = "default_heartbeat_interval_ms")]
     pub heartbeat_interval_ms: u64,
@@ -108,15 +98,19 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn new(server: impl Into<String>) -> Self {
+    pub fn new(
+        server: impl Into<String>,
+        require_auth_verify_echo: bool,
+        xor_key_bytes: u8,
+    ) -> Self {
         Self {
             server: server.into(),
             mtu: default_mtu(),
             encryption: EncryptionMethod::default(),
             auth_timeout_ms: default_auth_timeout_ms(),
             auth_attempts: default_auth_attempts(),
-            require_auth_verify_echo: default_require_auth_verify_echo(),
-            xor_key_bytes: default_xor_key_bytes(),
+            require_auth_verify_echo,
+            xor_key_bytes,
             heartbeat_interval_ms: default_heartbeat_interval_ms(),
             heartbeat_timeout_ms: default_heartbeat_timeout_ms(),
             receive_poll_ms: default_receive_poll_ms(),
@@ -206,7 +200,7 @@ mod tests {
 
     #[test]
     fn rejects_incoherent_timeouts() {
-        let mut config = ClientConfig::new("127.0.0.1:6001");
+        let mut config = ClientConfig::new("127.0.0.1:6001", true, 16);
         config.auth_timeout_ms = 0;
         assert!(config.validate().is_err());
 
@@ -217,9 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_config_defaults_to_strict_auth_verify() {
-        let config: ClientConfig = toml::from_str("server = \"127.0.0.1:6001\"").unwrap();
-        assert!(config.require_auth_verify_echo);
-        assert_eq!(config.xor_key_bytes, 16);
+    fn current_compatibility_fields_are_required() {
+        let complete = r#"
+server = "127.0.0.1:6001"
+require_auth_verify_echo = true
+xor_key_bytes = 16
+"#;
+        assert!(toml::from_str::<ClientConfig>(complete).is_ok());
+        assert!(
+            toml::from_str::<ClientConfig>("server = \"127.0.0.1:6001\"\nxor_key_bytes = 16")
+                .is_err()
+        );
+        assert!(
+            toml::from_str::<ClientConfig>(
+                "server = \"127.0.0.1:6001\"\nrequire_auth_verify_echo = true"
+            )
+            .is_err()
+        );
     }
 }

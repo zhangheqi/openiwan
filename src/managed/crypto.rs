@@ -61,6 +61,7 @@ mod tests {
             version: PROVIDER_VERSION,
             id: "test".into(),
             display_name: "Test".into(),
+            dns_servers: Vec::new(),
             require_auth_verify_echo: false,
             xor_key_bytes: 16,
             oidc: OidcConfig {

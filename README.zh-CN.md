@@ -17,6 +17,7 @@ iWAN 客户端协议的独立开源 Rust 实现。
 - 明文、循环 XOR 和传统 AES-128-ECB 数据模式
 - IPv4、IPv6、心跳、CLOSE、有限重连和分片重组
 - Linux `/dev/net/tun` 与 macOS `utun`
+- 不创建 TUN、不修改主机路由的本地 HTTP 到内网 HTTPS 反向代理
 - 严格数据包校验、分片队列上限、路由清理和凭据内存清零
 - 配置驱动的 OIDC/JWKS 登录和控制器线路获取
 - 可复用 Rust 库，以及 `ping`、`auth`、`connect`、`decode`、`managed` 命令
@@ -31,10 +32,11 @@ iWAN 客户端协议的独立开源 Rust 实现。
 | IPv4 与 IPv6 | 已实现 |
 | IPFRAG 与 IPFRAG6 下行重组 | 已实现 |
 | 心跳、CLOSE、故障检测和重连 | 已实现 |
+| 无路由本地 HTTP 到 HTTPS 反向代理 | 已实现；HTTP/1.1 固定上游 |
 | 配置驱动的 OIDC 和兼容 Panabit 控制器流程 | 已实现 |
 | USTC 托管登录配置 | 已提供示例；仍需在授权环境中实测 |
 | SEGRT/SR 多路径 | 仅识别并安全丢弃；尚未实现 |
-| DNS relay 与操作系统策略管理 | 不在项目范围内 |
+| `serve` 用户态 DNS（UDP、TCP 回退、TTL 缓存） | 已实现 |
 
 这里的“面向生产”表示实现包含防御性解析、资源上限、明确错误处理、凭据保护、清理逻辑、
 测试和 CI，并不表示已经获得厂商认证。部署前必须在获得授权的测试环境中验证互操作性。
@@ -55,7 +57,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-创建和配置 TUN 通常需要 root 或等效网络权限。
+创建和配置 TUN 通常需要 root 或等效网络权限。`serve` 使用用户态 TCP/IP 栈，不创建
+网络接口，也不需要提升权限。
 
 ## 使用
 
@@ -92,6 +95,45 @@ sudo openiwan connect \
 域名。所有参数都以独立参数调用系统工具，不经过 shell。客户端拒绝默认路由以及会覆盖
 当前 iWAN 数据端点的路由。
 
+### 不修改路由地访问 HTTPS API
+
+将一个固定的组织内 HTTPS origin 暴露为仅本机可访问的 HTTP 服务：
+
+```bash
+openiwan serve \
+  --server 192.0.2.10:6001 \
+  --username alice \
+  --encryption xor \
+  --upstream https://api.example.edu \
+  --listen 127.0.0.1:8080
+```
+
+例如，本地请求 `http://127.0.0.1:8080/v1/profile?full=true` 会通过 iWAN 用户态
+TCP/IP 栈访问 `https://api.example.edu/v1/profile?full=true`。请求方法、查询参数、
+流式请求体和 `Authorization` 等业务头会保留，HTTPS 的 Host、SNI 和证书域名仍使用
+原始上游域名。
+
+`serve` 不打开 TUN，不调用系统路由工具，也不接受 `--route` 参数。监听地址必须是
+回环地址；上游必须是没有路径、查询或用户信息的 HTTPS origin。默认使用系统根证书，
+内部 CA 可通过可重复的 `--ca-cert organization-ca.pem` 添加。
+
+默认 `--dns-mode auto` 会优先通过 iWAN 用户态栈查询 OPENACK 或托管 provider
+提供的组织 DNS。它校验 DNS 事务和响应、支持 CNAME、按 TTL 缓存，并在 UDP
+响应被截断时自动改用 DNS-over-TCP。这样 Shadowrocket 看不到内层 DNS 查询，
+也无法返回 Fake-IP。USTC provider 已配置校内 DNS；旧的本地副本需要重新安装，
+或在顶层加入：
+
+```toml
+dns_servers = ["202.38.64.1"]
+```
+
+手动模式或临时覆盖可使用 `--dns-server 202.38.64.1`。指定
+`--dns-mode iwan` 可要求必须存在 iWAN DNS。`auto` 只有在没有任何 iWAN DNS
+配置时才使用系统解析；已经配置的组织 DNS 如果查询失败会直接失败，不会泄露域名到
+宿主机解析器。系统解析得到 `198.18.0.0/15` Fake-IP 时也会立即拒绝，而不是等待
+无意义的 TCP 超时。`--upstream-ip` 仍保留为紧急运维覆盖，但正常生产运行不需要
+预查 API 地址。
+
 ### 统一认证并连接
 
 托管客户域使用外部 TOML 文件，因此认证和控制器参数变化时无需重新编译。先把仓库中的
@@ -123,6 +165,14 @@ sudo openiwan managed \
 将动作换成 `all` 可以一次完成登录、列出线路、选择和连接。access token 与解密后的线路
 密码不会写入磁盘。provider 结构、状态文件和安全模型参见
 [托管客户域文档](docs/MANAGED_PROVIDERS.md)。
+
+也可以使用已经保存的托管线路启动无路由 HTTP 代理：
+
+```bash
+openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  serve --line-index 1 --upstream https://api.example.edu
+```
 
 也可以使用 TOML 配置：
 

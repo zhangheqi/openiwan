@@ -74,3 +74,32 @@ OIDC access tokens and decrypted line passwords stay in memory, are redacted
 from debug output, and are zeroized when their owners are dropped. Do not attach
 provider files, managed state, callback URLs, tokens, or controller responses to
 public reports.
+
+## Route-free HTTP proxy
+
+The `serve` command accepts only a fixed HTTPS origin and a loopback listen
+address. It validates the upstream certificate chain, hostname, and SNI with
+system roots plus explicitly supplied CA files. There is no option to disable
+TLS verification, and the connector cannot select a destination from an
+incoming request.
+
+Organization DNS queries can run through the iWAN userspace stack. The client
+checks transaction IDs, response metadata and questions, bounds CNAME depth,
+caches positive results with bounded TTLs, and retries truncated UDP replies
+over TCP. `auto` rejects host-DNS answers in the common `198.18.0.0/15`
+Fake-IP range. `--dns-mode iwan` prohibits host-DNS fallback.
+
+`--upstream-ip` remains an emergency DNS bypass, but does not change the HTTPS
+Host, SNI, or certificate identity. Supplying an address therefore does not
+disable or weaken certificate verification.
+
+Hop-by-hop headers are removed, while application credentials such as
+`Authorization` are forwarded without being logged. The local side is plain
+HTTP and is intended only for processes on the same host; browser cookie/SSO,
+mTLS, WebSocket, and HTTP/2 behavior are not security claims of this mode.
+
+HTTPS protects application payloads end to end even though the underlying
+legacy iWAN data plane lacks authenticated encryption. Destination metadata and
+traffic patterns remain visible to the iWAN transport. Only the outer iWAN UDP
+socket necessarily uses the host's existing routes and may be affected by
+another VPN.

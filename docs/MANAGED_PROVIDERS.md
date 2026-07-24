@@ -16,6 +16,7 @@ A provider contains only deployment-level parameters:
 version = 1
 id = "example"
 display_name = "Example iWAN"
+dns_servers = ["192.0.2.53"]
 require_auth_verify_echo = false
 xor_key_bytes = 16
 
@@ -45,6 +46,12 @@ audience, expiry, and nonce validation against the advertised JWKS.
 
 Provider files contain controller application material. Copy them with mode
 `0600`; files readable by a Unix group or other users are rejected.
+
+`dns_servers` is an optional list of recursive resolver IP addresses reachable
+inside iWAN. `managed serve` queries them through the userspace iWAN stack, so
+another VPN cannot replace answers with Fake-IP records. The iWAN OPENACK DNS
+attributes are also used when present. Resolver addresses must be unicast;
+provider addresses use DNS port 53.
 
 `require_auth_verify_echo` controls compatibility with data endpoints that omit
 the AUTH_VERIFY TLV from OPENACK. The client always sends AUTH_VERIFY and always
@@ -130,6 +137,25 @@ Options may be repeated or comma-separated. Domains are resolved once before
 the interface is changed. Duplicate targets are removed. Default routes and
 routes containing the active iWAN endpoint are rejected; full-tunnel routing is
 not implemented.
+
+## Route-free HTTPS API proxy
+
+The `serve` managed action selects and decrypts a saved line exactly like
+`connect`, but it does not create a TUN interface or modify host routes:
+
+```bash
+openiwan managed \
+  --provider examples/providers/ustc.toml \
+  serve --line-index 1 --upstream https://api.example.edu
+```
+
+It binds `127.0.0.1:8080` by default and forwards local HTTP/1.1 requests to the
+fixed HTTPS origin through an in-process TCP/IP stack. Use `--listen` for a
+different loopback address and repeat `--ca-cert` for private CA roots.
+Organization DNS comes from `dns_servers` or OPENACK and runs inside iWAN with
+TTL caching and DNS-over-TCP fallback. `--dns-mode iwan` forbids host-DNS
+fallback. The managed state must already exist; run `fetch` first when it does
+not.
 
 ## Compatibility Boundary
 

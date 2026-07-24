@@ -1,3 +1,7 @@
+#[cfg(feature = "http-proxy")]
+#[path = "openiwan/http_proxy.rs"]
+mod http_proxy;
+
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
 #[cfg(feature = "managed")]
@@ -10,6 +14,8 @@ use openiwan::tun::{RouteGuard, TunDevice, resolve_route_targets};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
 use std::fs;
 use std::io::{BufRead, Write};
+#[cfg(feature = "http-proxy")]
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +42,9 @@ enum Command {
     Auth(ConnectionArgs),
     /// Authenticate, create a TUN interface, and exchange IP packets.
     Connect(ConnectArgs),
+    /// Expose one HTTPS origin on a local HTTP server without TUN or host routes.
+    #[cfg(feature = "http-proxy")]
+    Serve(ServeArgs),
     /// Decode one hexadecimal iWAN datagram without network access.
     Decode(DecodeArgs),
     /// Log in through a configured controller, manage lines, and connect.
@@ -85,6 +94,77 @@ struct ConnectArgs {
     routes: RouteArgs,
 }
 
+#[cfg(feature = "http-proxy")]
+#[derive(Debug, Args)]
+struct ServeArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+    #[command(flatten)]
+    proxy: HttpProxyArgs,
+}
+
+#[cfg(feature = "http-proxy")]
+#[derive(Debug, Clone, Args)]
+struct HttpProxyArgs {
+    /// Fixed HTTPS origin. Incoming paths and queries are preserved.
+    #[arg(long)]
+    upstream: String,
+    /// Connect to this IP instead of resolving the upstream with host DNS.
+    /// Repeat for multiple addresses. Host, SNI, and certificate verification
+    /// still use the upstream URL.
+    #[arg(long = "upstream-ip", value_delimiter = ',')]
+    upstream_ips: Vec<IpAddr>,
+    /// DNS policy: auto uses iWAN DNS when available, otherwise safe host DNS;
+    /// iwan requires iWAN DNS; system uses only host DNS.
+    #[arg(long, value_enum, default_value = "auto")]
+    dns_mode: DnsModeArg,
+    /// Recursive DNS server reached through the iWAN userspace stack. An
+    /// omitted port defaults to 53. Repeat for multiple servers.
+    #[arg(long = "dns-server", value_parser = parse_dns_server)]
+    dns_servers: Vec<SocketAddr>,
+    /// Timeout for one DNS server query.
+    #[arg(long, default_value_t = 3_000)]
+    dns_timeout_ms: u64,
+    /// Loopback address for the local HTTP server.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    listen: SocketAddr,
+    /// Additional PEM CA certificate file. Repeat for multiple files.
+    #[arg(long = "ca-cert")]
+    ca_certificates: Vec<PathBuf>,
+    /// Total timeout for upstream DNS, userspace TCP, and TLS setup.
+    #[arg(long, default_value_t = 10_000)]
+    upstream_timeout_ms: u64,
+}
+
+#[cfg(feature = "http-proxy")]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum DnsModeArg {
+    Auto,
+    Iwan,
+    System,
+}
+
+#[cfg(feature = "http-proxy")]
+impl From<DnsModeArg> for http_proxy::DnsMode {
+    fn from(value: DnsModeArg) -> Self {
+        match value {
+            DnsModeArg::Auto => Self::Auto,
+            DnsModeArg::Iwan => Self::Iwan,
+            DnsModeArg::System => Self::System,
+        }
+    }
+}
+
+#[cfg(feature = "http-proxy")]
+fn parse_dns_server(value: &str) -> std::result::Result<SocketAddr, String> {
+    if let Ok(address) = value.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(address, 53));
+    }
+    value
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid DNS server {value}: {error}"))
+}
+
 #[derive(Debug, Clone, Default, Args)]
 struct RouteArgs {
     /// CIDR routed through iWAN. Repeat for multiple routes.
@@ -128,6 +208,9 @@ enum ManagedCommand {
     Connect(ManagedConnectArgs),
     /// Fetch, list, select, and connect.
     All(ManagedConnectArgs),
+    /// Select a saved line and expose one HTTPS origin without host routes.
+    #[cfg(feature = "http-proxy")]
+    Serve(ManagedServeArgs),
 }
 
 #[cfg(feature = "managed")]
@@ -147,6 +230,23 @@ struct ManagedConnectArgs {
     encryption: Option<EncryptionMethod>,
     #[command(flatten)]
     routes: RouteArgs,
+}
+
+#[cfg(all(feature = "managed", feature = "http-proxy"))]
+#[derive(Debug, Args)]
+struct ManagedServeArgs {
+    /// Select a line by one-based index instead of prompting.
+    #[arg(long, conflicts_with = "line_name")]
+    line_index: Option<usize>,
+    /// Select a line by its unique exact name instead of prompting.
+    #[arg(long, conflicts_with = "line_index")]
+    line_name: Option<String>,
+    #[arg(long)]
+    mtu: Option<u16>,
+    #[arg(long)]
+    encryption: Option<EncryptionMethod>,
+    #[command(flatten)]
+    proxy: HttpProxyArgs,
 }
 
 fn main() {
@@ -175,6 +275,8 @@ fn run() -> Result<()> {
             session.close()?;
         }
         Command::Connect(arguments) => connect(arguments)?,
+        #[cfg(feature = "http-proxy")]
+        Command::Serve(arguments) => serve(arguments)?,
         Command::Decode(arguments) => decode(&arguments.hex)?,
         #[cfg(feature = "managed")]
         Command::Managed(arguments) => managed(arguments)?,
@@ -185,6 +287,12 @@ fn run() -> Result<()> {
 fn connect(arguments: ConnectArgs) -> Result<()> {
     let client = build_client(&arguments.connection)?;
     run_client(client, &arguments.tun, &arguments.routes)
+}
+
+#[cfg(feature = "http-proxy")]
+fn serve(arguments: ServeArgs) -> Result<()> {
+    let client = build_client(&arguments.connection)?;
+    run_http_proxy(client, &arguments.proxy, &[])
 }
 
 fn run_client(client: Client, tun: &str, route_arguments: &RouteArgs) -> Result<()> {
@@ -204,12 +312,53 @@ fn run_client(client: Client, tun: &str, route_arguments: &RouteArgs) -> Result<
     }
     println!("TUN {} is active; press Ctrl-C to stop", device.name());
 
+    let shutdown = install_shutdown_handler()?;
+    let end = client.run_reconnecting_from(session, device, shutdown)?;
+    println!("session ended: {end:?}");
+    Ok(())
+}
+
+fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&shutdown);
     ctrlc::set_handler(move || signal.store(true, Ordering::Release)).map_err(|error| {
         Error::InvalidConfig(format!("failed to install signal handler: {error}"))
     })?;
-    let end = client.run_reconnecting_from(session, device, shutdown)?;
+    Ok(shutdown)
+}
+
+#[cfg(feature = "http-proxy")]
+fn run_http_proxy(
+    client: Client,
+    arguments: &HttpProxyArgs,
+    provider_dns_servers: &[IpAddr],
+) -> Result<()> {
+    let mut dns_servers = arguments.dns_servers.clone();
+    if dns_servers.is_empty() {
+        dns_servers.extend(
+            provider_dns_servers
+                .iter()
+                .copied()
+                .map(|address| SocketAddr::new(address, 53)),
+        );
+    }
+    let dns = http_proxy::DnsConfig::new(
+        arguments.dns_mode.into(),
+        dns_servers,
+        Duration::from_millis(arguments.dns_timeout_ms),
+    )?;
+    let config = http_proxy::HttpProxyConfig::new(
+        arguments.listen,
+        &arguments.upstream,
+        arguments.upstream_ips.clone(),
+        dns,
+        arguments.ca_certificates.clone(),
+        Duration::from_millis(arguments.upstream_timeout_ms),
+    )?;
+    let session = client.authenticate()?;
+    print_session(session.info());
+    let shutdown = install_shutdown_handler()?;
+    let end = http_proxy::run(client, session, config, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
@@ -237,6 +386,12 @@ fn managed(arguments: ManagedArgs) -> Result<()> {
             let state = managed_fetch(&client, &state_path)?;
             print_servers(&state);
             managed_connect(&client, &state, &connect)?;
+        }
+        #[cfg(feature = "http-proxy")]
+        ManagedCommand::Serve(serve) => {
+            let state = load_managed_state(&client, &state_path)?;
+            print_servers(&state);
+            managed_serve(&client, &state, &serve)?;
         }
     }
     Ok(())
@@ -292,6 +447,31 @@ fn managed_connect(
     }
     let iwan_client = client.build_client(state, selected, config)?;
     run_client(iwan_client, &arguments.tun, &arguments.routes)
+}
+
+#[cfg(all(feature = "managed", feature = "http-proxy"))]
+fn managed_serve(
+    client: &ManagedClient,
+    state: &ManagedState,
+    arguments: &ManagedServeArgs,
+) -> Result<()> {
+    let selected = select_server(state, arguments.line_index, arguments.line_name.as_deref())?
+        .map_or_else(|| prompt_for_server(state), Ok)?;
+    println!("connecting to {} ({})", selected.name, selected.endpoint());
+
+    let mut config = ClientConfig::new(selected.endpoint());
+    if let Some(mtu) = arguments.mtu {
+        config.mtu = mtu;
+    }
+    if let Some(encryption) = arguments.encryption {
+        config.encryption = encryption;
+    }
+    let iwan_client = client.build_client(state, selected, config)?;
+    run_http_proxy(
+        iwan_client,
+        &arguments.proxy,
+        &client.provider().dns_servers,
+    )
 }
 
 #[cfg(feature = "managed")]
@@ -598,5 +778,88 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "http-proxy")]
+    #[test]
+    fn parses_manual_route_free_proxy_without_tun_options() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "serve",
+            "--server",
+            "192.0.2.10:6001",
+            "--username",
+            "alice",
+            "--upstream",
+            "https://api.example.test",
+            "--upstream-ip",
+            "192.0.2.25",
+            "--dns-mode",
+            "iwan",
+            "--dns-server",
+            "192.0.2.53",
+            "--listen",
+            "127.0.0.1:9080",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Serve(ServeArgs {
+                proxy: HttpProxyArgs {
+                    listen,
+                    upstream,
+                    upstream_ips,
+                    dns_mode: DnsModeArg::Iwan,
+                    dns_servers,
+                    ..
+                },
+                ..
+            }) if listen == "127.0.0.1:9080".parse().unwrap()
+                && upstream == "https://api.example.test"
+                && upstream_ips == vec!["192.0.2.25".parse::<IpAddr>().unwrap()]
+                && dns_servers == vec!["192.0.2.53:53".parse::<SocketAddr>().unwrap()]
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "serve",
+                "--server",
+                "192.0.2.10:6001",
+                "--username",
+                "alice",
+                "--upstream",
+                "https://api.example.test",
+                "--route",
+                "10.0.0.0/8",
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(all(feature = "managed", feature = "http-proxy"))]
+    #[test]
+    fn parses_managed_route_free_proxy() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "managed",
+            "--provider",
+            "provider.toml",
+            "serve",
+            "--line-name",
+            "Education",
+            "--upstream",
+            "https://api.example.test",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Managed(ManagedArgs {
+                action: ManagedCommand::Serve(ManagedServeArgs {
+                    line_name: Some(name),
+                    ..
+                }),
+                ..
+            }) if name == "Education"
+        ));
     }
 }

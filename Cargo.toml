@@ -22,20 +22,34 @@ path = "src/bin/openiwan.rs"
 aes = "0.8"
 aes-gcm = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+bytes = { version = "1", optional = true }
 cipher = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
+futures = { version = "0.3", optional = true }
+hickory-proto = { version = "0.25", default-features = false, features = ["std"], optional = true }
 hmac = { version = "0.12", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["client", "server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"], optional = true }
 jsonwebtoken = { version = "9", optional = true }
 libc = "0.2"
 md-5 = "0.10"
 rand = { version = "0.8", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 thiserror = "2"
 time = { version = "=0.3.44", optional = true }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"], optional = true }
+tokio-smoltcp = { version = "=0.5.2", default-features = false, features = ["proto-ipv4", "proto-ipv6"], optional = true }
+tokio-util = { version = "0.7", optional = true }
 toml = "0.9"
+tower-service = { version = "0.3", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ureq = { version = "2", features = ["json"], optional = true }
@@ -43,7 +57,24 @@ url = { version = "2", optional = true }
 zeroize = "1.8"
 
 [features]
-default = ["managed"]
+default = ["managed", "http-proxy"]
+http-proxy = [
+    "dep:bytes",
+    "dep:futures",
+    "dep:hickory-proto",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:rustls-pemfile",
+    "dep:tokio",
+    "dep:tokio-rustls",
+    "dep:tokio-smoltcp",
+    "dep:tokio-util",
+    "dep:tower-service",
+    "dep:url",
+]
 managed = [
     "dep:aes-gcm",
     "dep:base64",

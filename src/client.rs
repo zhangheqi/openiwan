@@ -5,6 +5,7 @@ use crate::protocol::{
     self, DecodedPacket, EncryptionMethod, PacketHeader, PacketType, Tlv, TlvType,
 };
 use crate::{Error, Result};
+use std::collections::HashSet;
 use std::io::{ErrorKind, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -801,6 +802,9 @@ fn parse_open_ack(
             dns_servers.push(IpAddr::V6(Ipv6Addr::from(octets)));
         }
     }
+    dns_servers.retain(|address| !address.is_unspecified() && !address.is_multicast());
+    let mut seen_dns_servers = HashSet::new();
+    dns_servers.retain(|address| seen_dns_servers.insert(*address));
 
     Ok(SessionInfo {
         peer,
@@ -983,7 +987,7 @@ mod tests {
                 Tlv::mtu(1400),
                 Tlv::new(TlvType::Ip, [10, 64, 0, 2]).unwrap(),
                 Tlv::new(TlvType::Gateway, [10, 64, 0, 1]).unwrap(),
-                Tlv::new(TlvType::Dns, [1, 1, 1, 1]).unwrap(),
+                Tlv::new(TlvType::Dns, [0, 0, 0, 0, 1, 1, 1, 1]).unwrap(),
                 Tlv::auth_verify(nonce),
             ];
             let mut body = Vec::new();

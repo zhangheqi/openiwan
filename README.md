@@ -19,6 +19,7 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - Plaintext, repeating XOR, and legacy AES-128-ECB data modes
 - IPv4, IPv6, heartbeat, CLOSE, bounded reconnection, and fragment reassembly
 - Native Linux `/dev/net/tun` and macOS `utun` support
+- A route-free local HTTP to internal HTTPS reverse proxy with no TUN device
 - Strict packet validation, bounded fragment queues, route cleanup, and
   credential zeroization
 - Config-driven OIDC/JWKS login and controller-managed line discovery
@@ -35,10 +36,11 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 | IPv4 and IPv6 | Implemented |
 | IPFRAG and IPFRAG6 receive-side reassembly | Implemented |
 | Heartbeat, CLOSE, failure detection, and reconnection | Implemented |
+| Route-free local HTTP to HTTPS reverse proxy | Implemented; fixed HTTP/1.1 upstream |
 | Config-driven OIDC and compatible Panabit controller flows | Implemented |
 | USTC managed login profile | Example included; authorized live validation required |
 | SEGRT/SR multipath | Recognized and safely discarded; not implemented |
-| DNS relay and operating-system policy management | Out of scope |
+| `serve` userspace DNS (UDP, TCP fallback, TTL cache) | Implemented |
 
 Production-oriented here means that the implementation has defensive parsing,
 resource limits, explicit error handling, credential hygiene, cleanup logic,
@@ -62,7 +64,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
 Creating and configuring a TUN interface normally requires root or equivalent
-network privileges.
+network privileges. The userspace `serve` path creates no network interface and
+does not require elevated privileges.
 
 ## Usage
 
@@ -100,6 +103,51 @@ resolves a domain once before connecting. Values are passed to platform tools
 as separate arguments, never through a shell. The client rejects default
 routes and any route containing the active iWAN endpoint.
 
+### Access an HTTPS API without changing host routes
+
+Expose one fixed organization HTTPS origin on a loopback-only HTTP listener:
+
+```bash
+openiwan serve \
+  --server 192.0.2.10:6001 \
+  --username alice \
+  --encryption xor \
+  --upstream https://api.example.edu \
+  --listen 127.0.0.1:8080
+```
+
+A local request for `http://127.0.0.1:8080/v1/profile?full=true` is sent through
+the iWAN userspace TCP/IP stack to
+`https://api.example.edu/v1/profile?full=true`. Methods, queries, streaming
+bodies, and end-to-end headers such as `Authorization` are preserved. HTTPS
+Host, SNI, and certificate verification continue to use the original upstream
+name.
+
+`serve` opens no TUN device, invokes no platform route command, and has no route
+options. The listener must be a loopback address, and the upstream must be an
+HTTPS origin without a path, query, or user information. System roots are used
+by default; repeat `--ca-cert organization-ca.pem` to add private roots.
+
+The default `--dns-mode auto` first queries organization resolvers advertised
+by OPENACK or configured by the managed provider through the iWAN userspace
+stack. It validates transactions and responses, follows CNAMEs, caches by TTL,
+and retries truncated UDP responses over DNS-over-TCP. Shadowrocket cannot see
+that inner DNS query or replace the answer with a Fake-IP. The USTC provider
+includes its campus resolver; reinstall an older local copy or add this
+top-level setting:
+
+```toml
+dns_servers = ["202.38.64.1"]
+```
+
+Manual mode and temporary overrides can pass `--dns-server 202.38.64.1`.
+`--dns-mode iwan` requires an iWAN resolver. `auto` uses host DNS only when no
+iWAN resolver is available; failure of a configured organization resolver is
+fail-closed and does not leak the hostname to the host resolver. Host answers
+in `198.18.0.0/15` are rejected instead of causing a useless TCP timeout.
+`--upstream-ip` remains available as an emergency operator override, but normal
+production use does not require pre-resolving API addresses.
+
 ### Managed login and connection
 
 Managed providers are external TOML files so the authentication and controller
@@ -133,6 +181,14 @@ Use `all` in place of `fetch` or `connect` to perform the complete flow. The
 access token and decrypted line password are never written to disk. See
 [Managed Providers](docs/MANAGED_PROVIDERS.md) for the provider schema, state
 layout, and security model.
+
+An existing managed line can run the route-free proxy as well:
+
+```bash
+openiwan managed \
+  --provider "$HOME/.config/openiwan/providers/ustc.toml" \
+  serve --line-index 1 --upstream https://api.example.edu
+```
 
 Configuration can also be loaded from TOML:
 

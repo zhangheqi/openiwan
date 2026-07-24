@@ -1,6 +1,7 @@
 version = 1
 id = "ustc"
 display_name = "USTC iWAN"
+dns_servers = ["202.38.64.1"]
 require_auth_verify_echo = false
 xor_key_bytes = 8
 

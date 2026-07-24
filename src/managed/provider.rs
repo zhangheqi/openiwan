@@ -2,6 +2,7 @@ use crate::{Error, Result};
 use serde::Deserialize;
 use std::fmt;
 use std::fs;
+use std::net::IpAddr;
 use std::path::Path;
 use url::Url;
 use zeroize::Zeroize;
@@ -76,6 +77,8 @@ pub struct ProviderConfig {
     pub id: String,
     pub display_name: String,
     #[serde(default)]
+    pub dns_servers: Vec<IpAddr>,
+    #[serde(default)]
     pub require_auth_verify_echo: bool,
     #[serde(default = "default_xor_key_bytes")]
     pub xor_key_bytes: u8,
@@ -117,6 +120,15 @@ impl ProviderConfig {
         if !matches!(self.xor_key_bytes, 8 | 16) {
             return Err(Error::ManagedProvider(
                 "xor_key_bytes must be either 8 or 16".into(),
+            ));
+        }
+        if self
+            .dns_servers
+            .iter()
+            .any(|address| address.is_unspecified() || address.is_multicast())
+        {
+            return Err(Error::ManagedProvider(
+                "dns_servers must contain unicast, non-unspecified IP addresses".into(),
             ));
         }
         require_nonempty("oidc.client_id", &self.oidc.client_id)?;
@@ -241,6 +253,7 @@ mod tests {
             version: PROVIDER_VERSION,
             id: "example-1".into(),
             display_name: "Example".into(),
+            dns_servers: vec!["192.0.2.53".parse().unwrap()],
             require_auth_verify_echo: false,
             xor_key_bytes: 16,
             oidc: OidcConfig {

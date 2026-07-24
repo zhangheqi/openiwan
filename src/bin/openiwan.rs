@@ -485,7 +485,7 @@ fn managed_serve(
 #[cfg(feature = "managed")]
 fn print_servers(state: &ManagedState) {
     for (index, server) in state.servers.iter().enumerate() {
-        println!("{:>2}. {:30} {}", index + 1, server.name, server.endpoint());
+        println!("{}. {} ({})", index + 1, server.name, server.endpoint());
     }
 }
 

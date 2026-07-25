@@ -18,7 +18,7 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - OPEN, OPENACK, and OPENREJECT authentication with AUTH_VERIFY correlation
 - Plaintext, repeating XOR, and legacy AES-128-ECB data modes
 - IPv4, IPv6, heartbeat, CLOSE, bounded reconnection, and fragment reassembly
-- Native Linux `/dev/net/tun` and macOS `utun` support
+- Native Linux, macOS, and Windows TUN support through the `tun` crate
 - A route-free local HTTP to internal HTTP or HTTPS reverse proxy with no TUN device
 - Strict packet validation, bounded fragment queues, route cleanup, and
   credential zeroization
@@ -54,7 +54,7 @@ certification. Validate every deployment against an authorized test endpoint.
 
 ## Build
 
-The minimum supported Rust version is 1.85.
+The minimum supported Rust version is 1.88.
 
 ```bash
 cargo build --release
@@ -68,9 +68,29 @@ cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-Creating and configuring a TUN interface normally requires root or equivalent
-network privileges. The userspace `serve` path creates no network interface and
-does not require elevated privileges.
+Creating and configuring a TUN interface requires root on Linux/macOS or an
+elevated terminal on Windows. The userspace `serve` path creates no network
+interface and does not require elevated privileges.
+
+### Windows
+
+Windows 10/11 on x86_64 and ARM64 is supported. Install Rust 1.88 or newer,
+then install the complete CLI with:
+
+```powershell
+cargo install openiwan
+```
+
+Ensure `%USERPROFILE%\.cargo\bin` is on `PATH`. `connect`, `managed connect`,
+and `managed all` must run from an elevated PowerShell or Terminal because they
+create an adapter and routes. `ping`, `auth`, `decode`, `serve`, managed login,
+and managed listing can run without elevation.
+
+The official signed Wintun 0.14.1 library is embedded in the executable. On the
+first TUN connection, OpenIWAN verifies its SHA-256 digest, atomically extracts
+it below `%LOCALAPPDATA%\openiwan\wintun\0.14.1`, verifies its Authenticode
+signature while loading it, and reuses the validated file thereafter. No
+separate Wintun setup or DLL copy is required.
 
 ## Usage
 
@@ -89,8 +109,9 @@ openiwan auth \
   --encryption xor
 ```
 
-If `OPENIWAN_PASSWORD` is unset, the client reads the password from `/dev/tty`
-without echoing it. Do not pass passwords directly on the command line.
+If `OPENIWAN_PASSWORD` is unset, the client securely prompts for the password
+without echoing it on Linux, macOS, and Windows. Do not pass passwords directly
+on the command line.
 
 Create a tunnel for explicit destination prefixes:
 
@@ -103,10 +124,16 @@ sudo openiwan connect \
   --route 2001:db8::/32
 ```
 
+On Windows, run the equivalent command in an elevated terminal without
+`sudo`. The default interface is `openiwan0` on Linux and Windows; macOS
+automatically allocates an available `utunN`. Use `--tun` to override the name
+(`utunN` is required for an explicit macOS name).
+
 `--route` accepts CIDRs, `--route-ip` creates host routes, and `--route-domain`
-resolves a domain once before connecting. Values are passed to platform tools
-as separate arguments, never through a shell. The client rejects default
-routes and any route containing the active iWAN endpoint.
+resolves a domain once before connecting. Unix values are passed to platform
+tools as separate arguments, never through a shell; Windows uses the native IP
+Helper API. The client rejects default routes and any route containing the
+active iWAN endpoint.
 
 ### Access an HTTP or HTTPS API without changing host routes
 
@@ -193,6 +220,8 @@ access token and decrypted line password are never written to disk. See
 [Managed Providers](docs/MANAGED_PROVIDERS.md) for the provider schema, state
 layout, and security model. Bundled configurations and deployment-specific
 instructions are listed under [Provider Profiles](docs/providers/README.md).
+The default managed state directory is `~/.config/openiwan/managed` on Unix and
+`%APPDATA%\openiwan\managed` on Windows.
 
 An existing managed line can run the route-free proxy as well:
 

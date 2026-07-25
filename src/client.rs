@@ -723,12 +723,12 @@ fn write_inner_packet(device: &dyn PacketDevice, packet: &[u8]) -> Result<()> {
 
 fn validate_inner_packet(packet: &[u8], expected_version: Option<u8>) -> Result<&[u8]> {
     let packet = trim_ip_packet(packet)?;
-    if let Some(expected) = expected_version {
-        if packet[0] >> 4 != expected {
-            return Err(Error::InvalidFragment(
-                "inner IP version does not match packet type",
-            ));
-        }
+    if let Some(expected) = expected_version
+        && packet[0] >> 4 != expected
+    {
+        return Err(Error::InvalidFragment(
+            "inner IP version does not match packet type",
+        ));
     }
     Ok(packet)
 }

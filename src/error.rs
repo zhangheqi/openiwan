@@ -63,6 +63,9 @@ pub enum Error {
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
 
+    #[error("TUN operation failed: {0}")]
+    Tun(String),
+
     #[error("external command failed: {program}: {message}")]
     CommandFailed { program: String, message: String },
 

@@ -348,10 +348,10 @@ fn select_jwk<'a>(set: &'a JwkSet, key_id: Option<&str>) -> Result<&'a Jwk> {
 
 fn extract_username(provider: &ProviderConfig, claims: &Value) -> Result<String> {
     for name in &provider.oidc.username_claims {
-        if let Some(value) = claims.get(name).and_then(Value::as_str) {
-            if !value.trim().is_empty() {
-                return Ok(value.to_owned());
-            }
+        if let Some(value) = claims.get(name).and_then(Value::as_str)
+            && !value.trim().is_empty()
+        {
+            return Ok(value.to_owned());
         }
     }
     Err(Error::Oidc(format!(

@@ -75,17 +75,20 @@ from this generic schema. See the [provider profile index](providers/README.md).
 The default state path is:
 
 ```text
-~/.config/openiwan/managed/<provider-id>.json
+Unix:    ~/.config/openiwan/managed/<provider-id>.json
+Windows: %APPDATA%\openiwan\managed\<provider-id>.json
 ```
 
 When invoked through `sudo`, the client resolves `SUDO_USER` and continues to
 use that user's state. `--state-dir` provides an explicit override.
 
-State writes are atomic and use mode `0600`; state files with broader Unix
-permissions are rejected. The file contains a schema version, provider ID,
-customer domain, stable random device ID, fetch time, line names and endpoints,
-usernames, and the encrypted passwords returned by the controller. It never
-contains an OAuth token or plaintext line password.
+State writes are atomic. Unix files use mode `0600` and files with broader
+permissions are rejected. Windows stores state inside the current user's
+Roaming AppData and relies on that profile's NTFS access controls. The file
+contains a schema version, provider ID, customer domain, stable random device
+ID, fetch time, line names and endpoints, usernames, and the encrypted
+passwords returned by the controller. It never contains an OAuth token or
+plaintext line password.
 
 The selected password is decrypted with authenticated AES-GCM only when
 connecting, moved into `Client`, and zeroized on drop. Authentication failures

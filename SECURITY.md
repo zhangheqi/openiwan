@@ -75,6 +75,18 @@ from debug output, and are zeroized when their owners are dropped. Do not attach
 provider files, managed state, callback URLs, tokens, or controller responses to
 public reports.
 
+## Windows TUN deployment
+
+The official Wintun 0.14.1 x86_64 and ARM64 binaries and their prebuilt-binary
+license are distributed with the crate. Only the active architecture is
+embedded in an executable. Before each load, OpenIWAN validates the versioned
+LocalAppData cache against the embedded size and SHA-256; replacement uses an
+atomic Windows file operation. The `tun` signature-verification feature then
+checks the Authenticode signature while loading the DLL by absolute path.
+
+Creating a Wintun adapter or changing routes requires an elevated process.
+Commands that do not create TUN state remain usable without elevation.
+
 ## Route-free HTTP proxy
 
 The `serve` command accepts only a fixed HTTP or HTTPS origin and a loopback

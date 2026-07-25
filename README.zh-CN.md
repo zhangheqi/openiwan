@@ -16,7 +16,7 @@ iWAN 客户端协议的独立开源 Rust 实现。
 - OPEN、OPENACK、OPENREJECT 认证以及 AUTH_VERIFY 请求关联
 - 明文、循环 XOR 和传统 AES-128-ECB 数据模式
 - IPv4、IPv6、心跳、CLOSE、有限重连和分片重组
-- Linux `/dev/net/tun` 与 macOS `utun`
+- 通过 `tun` crate 支持 Linux、macOS 与 Windows 原生 TUN
 - 不创建 TUN、不修改主机路由的本地 HTTP 到内网 HTTP 或 HTTPS 反向代理
 - 严格数据包校验、分片队列上限、路由清理和凭据内存清零
 - 配置驱动的 OIDC/JWKS 登录和控制器线路获取
@@ -47,7 +47,7 @@ iWAN 客户端协议的独立开源 Rust 实现。
 
 ## 构建
 
-最低支持 Rust 1.85。
+最低支持 Rust 1.88。
 
 ```bash
 cargo build --release
@@ -61,8 +61,24 @@ cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 
-创建和配置 TUN 通常需要 root 或等效网络权限。`serve` 使用用户态 TCP/IP 栈，不创建
-网络接口，也不需要提升权限。
+创建和配置 TUN 在 Linux/macOS 上需要 root，在 Windows 上需要管理员终端。`serve`
+使用用户态 TCP/IP 栈，不创建网络接口，也不需要提升权限。
+
+### Windows
+
+支持 Windows 10/11 x86_64 与 ARM64。安装 Rust 1.88 或更新版本后执行：
+
+```powershell
+cargo install openiwan
+```
+
+请确保 `%USERPROFILE%\.cargo\bin` 已加入 `PATH`。`connect`、`managed connect`
+与 `managed all` 需要在管理员 PowerShell 或 Terminal 中运行；`ping`、`auth`、
+`decode`、`serve`、托管登录与线路查看不需要管理员权限。
+
+官方签名的 Wintun 0.14.1 已嵌入可执行文件。首次建立 TUN 时，OpenIWAN 会验证
+SHA-256，原子释放到 `%LOCALAPPDATA%\openiwan\wintun\0.14.1`，加载时验证
+Authenticode 签名，之后复用已验证文件。无需另行安装 Wintun 或复制 DLL。
 
 ## 使用
 
@@ -81,8 +97,8 @@ openiwan auth \
   --encryption xor
 ```
 
-如果没有设置 `OPENIWAN_PASSWORD`，客户端会从 `/dev/tty` 隐藏读取密码。不要把密码直接
-放在命令行参数中。
+如果没有设置 `OPENIWAN_PASSWORD`，客户端会在 Linux、macOS 和 Windows 上隐藏
+读取密码。不要把密码直接放在命令行参数中。
 
 为指定目标网段建立隧道：
 
@@ -95,9 +111,13 @@ sudo openiwan connect \
   --route 2001:db8::/32
 ```
 
+Windows 请在管理员终端中运行不带 `sudo` 的等价命令。Linux 与 Windows 的默认接口名
+为 `openiwan0`；macOS 自动分配可用的 `utunN`。可用 `--tun` 覆盖，macOS 显式
+名称必须是 `utunN`。
+
 `--route` 接受 CIDR，`--route-ip` 创建主机路由，`--route-domain` 在连接前解析一次
-域名。所有参数都以独立参数调用系统工具，不经过 shell。客户端拒绝默认路由以及会覆盖
-当前 iWAN 数据端点的路由。
+域名。Unix 参数都以独立参数调用系统工具，不经过 shell；Windows 使用原生 IP Helper
+API。客户端拒绝默认路由以及会覆盖当前 iWAN 数据端点的路由。
 
 ### 不修改路由地访问 HTTP 或 HTTPS API
 
@@ -172,6 +192,8 @@ sudo openiwan managed \
 密码不会写入磁盘。provider 结构、状态文件和安全模型参见
 [托管客户域文档](docs/MANAGED_PROVIDERS.md)；预制配置和部署专属说明参见
 [Provider Profiles](docs/providers/README.md)。
+托管状态默认位于 Unix 的 `~/.config/openiwan/managed` 或 Windows 的
+`%APPDATA%\openiwan\managed`。
 
 也可以使用已经保存的托管线路启动无路由 HTTP 代理：
 

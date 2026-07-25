@@ -204,14 +204,13 @@ fn parse_response(
     for _ in 0..MAX_CNAME_DEPTH {
         let mut changed = false;
         for record in response.answers() {
-            if accepted_names.contains(record.name()) {
-                if let RData::CNAME(target) = record.data() {
-                    if accepted_names.insert(target.0.clone()) {
-                        canonical_name = Some(target.0.clone());
-                        ttl = ttl.min(record.ttl());
-                        changed = true;
-                    }
-                }
+            if accepted_names.contains(record.name())
+                && let RData::CNAME(target) = record.data()
+                && accepted_names.insert(target.0.clone())
+            {
+                canonical_name = Some(target.0.clone());
+                ttl = ttl.min(record.ttl());
+                changed = true;
             }
         }
         if !changed {

@@ -134,12 +134,58 @@ pub fn default_state_path(provider_id: &str, override_dir: Option<&Path>) -> Res
     let directory = if let Some(directory) = override_dir {
         directory.to_path_buf()
     } else {
-        effective_home()?
-            .join(".config")
-            .join("openiwan")
-            .join("managed")
+        default_managed_directory()?
     };
     Ok(directory.join(format!("{provider_id}.json")))
+}
+
+#[cfg(unix)]
+fn default_managed_directory() -> Result<PathBuf> {
+    Ok(effective_home()?
+        .join(".config")
+        .join("openiwan")
+        .join("managed"))
+}
+
+#[cfg(windows)]
+fn default_managed_directory() -> Result<PathBuf> {
+    Ok(
+        windows_roaming_data_from(std::env::var_os("APPDATA"), std::env::var_os("USERPROFILE"))?
+            .join("openiwan")
+            .join("managed"),
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn default_managed_directory() -> Result<PathBuf> {
+    Ok(effective_home()?
+        .join(".config")
+        .join("openiwan")
+        .join("managed"))
+}
+
+#[cfg(windows)]
+fn windows_roaming_data_from(
+    app_data: Option<std::ffi::OsString>,
+    user_profile: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let path = app_data
+        .map(PathBuf::from)
+        .or_else(|| {
+            user_profile.map(|profile| PathBuf::from(profile).join("AppData").join("Roaming"))
+        })
+        .ok_or_else(|| {
+            Error::ManagedProvider(
+                "cannot determine Windows AppData from APPDATA or USERPROFILE".into(),
+            )
+        })?;
+    if !path.is_absolute() {
+        return Err(Error::ManagedProvider(format!(
+            "Windows AppData path is not absolute: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 pub fn new_device_id() -> String {
@@ -191,6 +237,7 @@ fn set_private_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn effective_home() -> Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -198,7 +245,7 @@ fn effective_home() -> Result<PathBuf> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         effective_home_from(sudo_user.as_deref(), home, passwd_home)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
             Error::ManagedProvider("cannot determine the user home directory".into())
@@ -346,6 +393,21 @@ mod tests {
         assert_eq!(resolved, PathBuf::from("/home/alice"));
         assert!(
             effective_home_from(Some("missing"), Some(PathBuf::from("/root")), |_| None,).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_state_directory_uses_app_data_with_profile_fallback() {
+        let app_data = PathBuf::from(r"C:\Users\alice\AppData\Roaming");
+        assert_eq!(
+            windows_roaming_data_from(Some(app_data.clone().into_os_string()), None).unwrap(),
+            app_data
+        );
+        assert_eq!(
+            windows_roaming_data_from(None, Some(std::ffi::OsString::from(r"C:\Users\alice")))
+                .unwrap(),
+            PathBuf::from(r"C:\Users\alice\AppData\Roaming")
         );
     }
 }

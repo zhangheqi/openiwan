@@ -17,7 +17,7 @@ chance to agree on evidence, scope, and compatibility expectations.
 
 ## Development Setup
 
-The minimum supported Rust version is 1.85. Current stable Rust is recommended
+The minimum supported Rust version is 1.88. Current stable Rust is recommended
 for development.
 
 ```bash
@@ -28,8 +28,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo package
 ```
 
-Changes should pass these commands on both Linux and macOS when they affect
-platform networking.
+Changes should pass these commands on Linux, macOS, and Windows when they
+affect platform networking. Windows networking changes must also compile for
+`aarch64-pc-windows-msvc`; privileged smoke tests should verify route cleanup
+and prompt shutdown on both IPv4 and IPv6.
 
 ## Pull Requests
 

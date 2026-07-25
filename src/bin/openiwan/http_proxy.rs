@@ -797,10 +797,10 @@ impl IwanConnector {
         }
 
         let mut cache = self.dns_cache.lock().await;
-        if let Some(resolution) = cache.as_ref() {
-            if resolution.expires_at > Instant::now() {
-                return Ok(resolution.clone());
-            }
+        if let Some(resolution) = cache.as_ref()
+            && resolution.expires_at > Instant::now()
+        {
+            return Ok(resolution.clone());
         }
         let resolution = self.resolve_uncached().await?;
         *cache = Some(resolution.clone());

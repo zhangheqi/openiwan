@@ -138,15 +138,15 @@ impl FragmentReassembler {
         if fragment.end_offset()? > self.max_packet_size {
             return Err(Error::FragmentTooLarge);
         }
-        if !self.groups.contains_key(&fragment.id) && self.groups.len() >= self.max_groups {
-            if let Some(oldest_id) = self
+        if !self.groups.contains_key(&fragment.id)
+            && self.groups.len() >= self.max_groups
+            && let Some(oldest_id) = self
                 .groups
                 .iter()
                 .min_by_key(|(_, group)| group.created)
                 .map(|(id, _)| *id)
-            {
-                self.groups.remove(&oldest_id);
-            }
+        {
+            self.groups.remove(&oldest_id);
         }
 
         let id = fragment.id;

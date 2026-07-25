@@ -12,8 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
-        toolchain: ["1.85.0", stable]
+        os: [ubuntu-latest, macos-14, windows-latest]
+        toolchain: ["1.88.0", stable]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,31 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - run: cargo test --all-targets --all-features --locked
+
+  windows-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - run: cargo check --target aarch64-pc-windows-msvc --all-targets --all-features --locked
+
+  windows-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - shell: pwsh
+        run: |
+          cargo package --list
+          cargo install --path . --locked --root "$env:RUNNER_TEMP\openiwan-install"
+          if (-not (Test-Path "$env:RUNNER_TEMP\openiwan-install\bin\openiwan.exe")) {
+            throw "cargo install did not produce openiwan.exe"
+          }
+          if (Test-Path "$env:RUNNER_TEMP\openiwan-install\bin\wintun.dll") {
+            throw "wintun.dll must be embedded, not installed side-by-side"
+          }
 
   quality:
     runs-on: ubuntu-latest
@@ -33,4 +58,3 @@ jobs:
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
       - run: cargo package --locked
-

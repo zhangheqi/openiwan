@@ -6,6 +6,23 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Windows 10/11 x86_64 and ARM64 TUN support with native IPv4/IPv6 route
+  management and rollback
+- Embedded, signed Wintun 0.14.1 binaries with verified, atomic first-use
+  extraction for `cargo install`
+- Cross-platform hidden password prompts and Windows managed-state directories
+
+### Changed
+
+- Replaced the hand-written Linux/macOS TUN implementation with `tun` 0.8.14
+- Raised the minimum supported Rust version from 1.85 to 1.88
+- Made `--tun` platform-aware: `openiwan0` on Linux/Windows and automatic
+  `utunN` allocation on macOS
+- Changed `TunDevice::open` and `RouteGuard::configure` to accept authenticated
+  session/device state directly
+
 ## [0.1.0] - 2026-07-25
 
 ### Added

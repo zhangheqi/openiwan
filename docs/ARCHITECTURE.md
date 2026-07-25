@@ -23,7 +23,7 @@ boundary; the route-free HTTP proxy includes its own bounded DNS client.
 | `fragment` | Strict fragment parsing, bounded reassembly, and inner IP validation |
 | `config` | Serializable client and reconnect configuration |
 | `managed` | Provider validation, OIDC/JWKS, controller signing, encrypted line state |
-| `tun` | Linux TUN, macOS utun, interface configuration, routes, and cleanup |
+| `tun` | Cross-platform TUN, Wintun deployment, interface configuration, routes, and cleanup |
 | `error` | Public error model |
 | `bin/openiwan` | CLI, secret input, signals, userspace HTTP proxy, logging, and command dispatch |
 
@@ -120,9 +120,28 @@ consecutive-failure budget.
 
 ## Host Networking
 
-`TunDevice` implements native Linux and macOS packet framing. `RouteGuard`
-configures the interface and explicit routes, then removes them on drop,
-including rollback after partial configuration.
+`TunDevice` wraps `tun` 0.8.14. Linux and macOS use the crate's nonblocking
+device; Windows splits its asynchronous Wintun reader and writer behind a
+dedicated Tokio runtime. Windows reads have a 100 ms polling timeout so the
+existing synchronous `PacketDevice` contract can stop and reconnect promptly.
+
+The authenticated address, mask, and MTU are applied as part of interface
+creation. macOS automatically allocates `utunN` unless an explicit valid name
+is requested. The legacy Unix address ioctls used upstream are IPv4-specific,
+so OpenIWAN applies IPv6 `/128` addresses with `ip` on Linux or `ifconfig` on
+macOS after creating the device through `tun`; MTU, state, framing, and device
+lifetime remain owned by `tun`.
+
+Linux and macOS routes continue to use their system route tools. Windows routes
+use the IP Helper API and the Wintun interface LUID, with no localized command
+output parsing. Route installation is transactional: partial changes are
+reversed, replaced rows are restored, and only rows owned by the guard are
+removed at shutdown.
+
+The official x86_64 and ARM64 Wintun 0.14.1 DLLs are embedded per target
+architecture. First use verifies the embedded SHA-256, atomically extracts the
+DLL to versioned LocalAppData storage, and loads it by absolute path with
+Authenticode verification enabled.
 
 CIDR, IP, and one-time domain targets share one resolver. It rejects invalid
 targets, default routes, duplicates, and routes that would contain the active
@@ -180,7 +199,8 @@ The project assumes that:
 
 - callers provide authorized endpoint and credential data
 - `PacketDevice` implementations use nonblocking reads
-- system networking tools are trusted platform components
+- system networking tools, Windows IP Helper, and the verified Wintun binary
+  are trusted platform components
 
 The project does not assume that UDP bodies are well formed. All lengths,
 types, session fields, fragments, and inner IP packets are validated before

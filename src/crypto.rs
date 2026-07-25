@@ -177,7 +177,7 @@ impl DataCipher for AesCipher {
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        if ciphertext.len() % AES_BLOCK_LEN != 0 {
+        if !ciphertext.len().is_multiple_of(AES_BLOCK_LEN) {
             return Err(Error::Crypto(
                 "AES ciphertext length is not a multiple of 16",
             ));

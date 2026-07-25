@@ -13,7 +13,8 @@ use openiwan::protocol::{self, Tlv};
 use openiwan::tun::{RouteGuard, TunDevice, resolve_route_targets};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
 use std::fs;
-use std::io::{BufRead, Write};
+#[cfg(feature = "managed")]
+use std::io::Write;
 #[cfg(feature = "http-proxy")]
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -88,8 +89,10 @@ struct ConnectionArgs {
 struct ConnectArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
-    #[arg(long, default_value = "openiwan0")]
-    tun: String,
+    /// TUN interface name. Defaults to openiwan0 on Linux/Windows and an
+    /// automatically allocated utunN on macOS.
+    #[arg(long)]
+    tun: Option<String>,
     #[command(flatten)]
     routes: RouteArgs,
 }
@@ -222,8 +225,10 @@ struct ManagedConnectArgs {
     /// Select a line by its unique exact name instead of prompting.
     #[arg(long, conflicts_with = "line_index")]
     line_name: Option<String>,
-    #[arg(long, default_value = "openiwan0")]
-    tun: String,
+    /// TUN interface name. Defaults to openiwan0 on Linux/Windows and an
+    /// automatically allocated utunN on macOS.
+    #[arg(long)]
+    tun: Option<String>,
     #[arg(long)]
     mtu: Option<u16>,
     #[arg(long)]
@@ -286,7 +291,7 @@ fn run() -> Result<()> {
 
 fn connect(arguments: ConnectArgs) -> Result<()> {
     let client = build_client(&arguments.connection)?;
-    run_client(client, &arguments.tun, &arguments.routes)
+    run_client(client, arguments.tun.as_deref(), &arguments.routes)
 }
 
 #[cfg(feature = "http-proxy")]
@@ -295,7 +300,7 @@ fn serve(arguments: ServeArgs) -> Result<()> {
     run_http_proxy(client, &arguments.proxy, &[])
 }
 
-fn run_client(client: Client, tun: &str, route_arguments: &RouteArgs) -> Result<()> {
+fn run_client(client: Client, tun: Option<&str>, route_arguments: &RouteArgs) -> Result<()> {
     let session = client.authenticate()?;
     print_session(session.info());
 
@@ -305,8 +310,8 @@ fn run_client(client: Client, tun: &str, route_arguments: &RouteArgs) -> Result<
         &route_arguments.route_domains,
         Some(session.info().peer.ip()),
     )?;
-    let device = Arc::new(TunDevice::open(tun)?);
-    let _routes = RouteGuard::configure(device.name(), session.info(), &routes)?;
+    let device = Arc::new(TunDevice::open(tun, session.info())?);
+    let _routes = RouteGuard::configure(&device, &routes)?;
     for route in &routes {
         println!("route {route} -> {}", device.name());
     }
@@ -450,7 +455,7 @@ fn managed_connect(
         config.encryption = encryption;
     }
     let iwan_client = client.build_client(state, selected, config)?;
-    run_client(iwan_client, &arguments.tun, &arguments.routes)
+    run_client(iwan_client, arguments.tun.as_deref(), &arguments.routes)
 }
 
 #[cfg(all(feature = "managed", feature = "http-proxy"))]
@@ -493,10 +498,10 @@ fn print_servers(state: &ManagedState) {
 fn prompt_for_server(state: &ManagedState) -> Result<&ManagedServer> {
     loop {
         let value = prompt_line(&format!("Select line [1-{}]: ", state.servers.len()))?;
-        if let Ok(index) = value.parse::<usize>() {
-            if let Ok(Some(server)) = select_server(state, Some(index), None) {
-                return Ok(server);
-            }
+        if let Ok(index) = value.parse::<usize>()
+            && let Ok(Some(server)) = select_server(state, Some(index), None)
+        {
+            return Ok(server);
         }
         eprintln!("invalid line selection");
     }
@@ -556,10 +561,10 @@ fn read_secret(arguments: &ConnectionArgs) -> Result<String> {
         contents.zeroize();
         return password;
     }
-    if let Ok(password) = std::env::var(&arguments.password_env) {
-        if !password.is_empty() {
-            return Ok(password);
-        }
+    if let Ok(password) = std::env::var(&arguments.password_env)
+        && !password.is_empty()
+    {
+        return Ok(password);
     }
     prompt_password("iWAN password: ")
 }
@@ -578,59 +583,18 @@ fn validate_secret_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn validate_secret_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn prompt_password(prompt: &str) -> Result<String> {
-    use std::fs::OpenOptions;
-    use std::os::fd::AsRawFd;
-
-    let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
-    tty.write_all(prompt.as_bytes())?;
-    tty.flush()?;
-    let fd = tty.as_raw_fd();
-    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: `original` points to writable termios storage and fd is a TTY.
-    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } < 0 {
-        return Err(Error::Io(std::io::Error::last_os_error()));
-    }
-    // SAFETY: tcgetattr initialized `original` on success.
-    let original = unsafe { original.assume_init() };
-    let mut hidden = original;
-    hidden.c_lflag &= !libc::ECHO;
-    // SAFETY: both the descriptor and termios pointer are valid.
-    if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const hidden) } < 0 {
-        return Err(Error::Io(std::io::Error::last_os_error()));
-    }
-    let mut password = String::new();
-    let read_result = {
-        let mut reader = std::io::BufReader::new(&tty);
-        reader.read_line(&mut password)
-    };
-    // SAFETY: restore the attributes obtained from tcgetattr.
-    let restore_result = unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const original) };
-    tty.write_all(b"\n")?;
-    read_result?;
-    if restore_result < 0 {
-        password.zeroize();
-        return Err(Error::Io(std::io::Error::last_os_error()));
-    }
-    while matches!(password.as_bytes().last(), Some(b'\n' | b'\r')) {
-        password.pop();
-    }
+    let mut password = rpassword::prompt_password(prompt)?;
     if password.is_empty() {
+        password.zeroize();
         return Err(Error::InvalidConfig("password must not be empty".into()));
     }
     Ok(password)
-}
-
-#[cfg(not(unix))]
-fn prompt_password(_prompt: &str) -> Result<String> {
-    Err(Error::Unsupported(
-        "interactive hidden password input is implemented only on Unix",
-    ))
 }
 
 fn decode(hex: &str) -> Result<()> {
@@ -669,7 +633,7 @@ fn decode_hex(value: &str) -> Result<Vec<u8>> {
         .chars()
         .filter(|character| !character.is_ascii_whitespace() && !matches!(character, ':' | '-'))
         .collect();
-    if compact.len() % 2 != 0 {
+    if !compact.len().is_multiple_of(2) {
         return Err(Error::InvalidConfig(
             "hexadecimal input has an odd number of digits".into(),
         ));
@@ -746,6 +710,37 @@ mod tests {
     fn hex_decoder_accepts_capture_formats() {
         assert_eq!(decode_hex("11:22 aa-bb").unwrap(), [0x11, 0x22, 0xaa, 0xbb]);
         assert!(decode_hex("abc").is_err());
+    }
+
+    #[test]
+    fn tun_name_is_optional_and_can_be_overridden() {
+        let base = [
+            "openiwan",
+            "connect",
+            "--server",
+            "192.0.2.10:6001",
+            "--username",
+            "alice",
+        ];
+        let parsed = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Connect(ConnectArgs { tun: None, .. })
+        ));
+
+        let parsed = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--tun", "custom-tun"])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Connect(ConnectArgs {
+                tun: Some(ref name),
+                ..
+            }) if name == "custom-tun"
+        ));
     }
 
     #[cfg(feature = "managed")]

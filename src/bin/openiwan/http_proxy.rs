@@ -154,8 +154,10 @@ impl Upstream {
     fn parse(value: &str) -> Result<Self> {
         let url = Url::parse(value)
             .map_err(|error| Error::InvalidConfig(format!("invalid upstream URL: {error}")))?;
-        if url.scheme() != "https" {
-            return Err(Error::InvalidConfig("upstream URL must use https".into()));
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(Error::InvalidConfig(
+                "upstream URL must use http or https".into(),
+            ));
         }
         if !url.username().is_empty() || url.password().is_some() {
             return Err(Error::InvalidConfig(
@@ -201,11 +203,15 @@ impl Upstream {
             .path_and_query()
             .map_or("/", hyper::http::uri::PathAndQuery::as_str);
         Uri::builder()
-            .scheme("https")
+            .scheme(self.url.scheme())
             .authority(self.authority.as_str())
             .path_and_query(path_and_query)
             .build()
             .map_err(|error| Error::Http(format!("build upstream request URI: {error}")))
+    }
+
+    fn uses_tls(&self) -> bool {
+        self.url.scheme() == "https"
     }
 }
 
@@ -232,7 +238,7 @@ async fn run_async(
     let session_info = session.info().clone();
     let (packet_device, capture) = channel_packet_device(session_info.mtu);
     let net = build_userspace_net(capture, &session_info)?;
-    let tls = build_tls_connector(&config.ca_certificates)?;
+    let tls = build_optional_tls(&config.upstream, &config.ca_certificates)?;
     let dns_servers = effective_dns_servers(&config.dns.servers, &session_info);
     let connector = IwanConnector::new(
         Arc::clone(&net),
@@ -266,11 +272,7 @@ async fn run_async(
         upstream: config.upstream,
     });
 
-    println!(
-        "HTTP proxy listening on http://{listen_address} -> {}",
-        proxy_state.upstream.url
-    );
-    println!("no TUN interface or host route was created; press Ctrl-C to stop");
+    announce_proxy(listen_address, &proxy_state.upstream);
 
     let mut connections = JoinSet::new();
     let mut shutdown_check = interval(SHUTDOWN_POLL);
@@ -334,6 +336,27 @@ async fn run_async(
     }
     info!(?end, "route-free HTTP proxy stopped");
     Ok(end)
+}
+
+fn build_optional_tls(
+    upstream: &Upstream,
+    ca_certificates: &[PathBuf],
+) -> Result<Option<TlsConnector>> {
+    upstream
+        .uses_tls()
+        .then(|| build_tls_connector(ca_certificates))
+        .transpose()
+}
+
+fn announce_proxy(listen_address: SocketAddr, upstream: &Upstream) {
+    println!(
+        "HTTP proxy listening on http://{listen_address} -> {}",
+        upstream.url
+    );
+    if !upstream.uses_tls() {
+        println!("warning: HTTP upstream traffic is not protected by TLS");
+    }
+    println!("no TUN interface or host route was created; press Ctrl-C to stop");
 }
 
 fn effective_dns_servers(configured: &[SocketAddr], session: &SessionInfo) -> Vec<SocketAddr> {
@@ -628,7 +651,7 @@ struct IwanConnector {
     dns_timeout: Duration,
     dns_cache: Arc<TokioMutex<Option<CachedResolution>>>,
     next_dns_id: Arc<AtomicU16>,
-    tls: TlsConnector,
+    tls: Option<TlsConnector>,
     timeout: Duration,
     ipv4: bool,
     synthetic_route: Arc<AtomicBool>,
@@ -640,7 +663,7 @@ struct ConnectorSettings {
     dns_mode: DnsMode,
     dns_servers: Vec<SocketAddr>,
     dns_timeout: Duration,
-    tls: TlsConnector,
+    tls: Option<TlsConnector>,
     timeout: Duration,
 }
 
@@ -689,13 +712,13 @@ impl IwanConnector {
             .await
             .map_err(|_| {
                 Error::InvalidConfig(format!(
-                    "DNS resolution for HTTPS upstream {} timed out",
+                    "DNS resolution for upstream {} timed out",
                     self.upstream.host
                 ))
             })?
             .map_err(|error| {
                 Error::InvalidConfig(format!(
-                    "cannot resolve HTTPS upstream {}: {error}",
+                    "cannot resolve upstream {}: {error}",
                     self.upstream.host
                 ))
             })?;
@@ -711,7 +734,7 @@ impl IwanConnector {
                 info!(
                     upstream = %self.upstream.host,
                     addresses = ?resolution.addresses,
-                    "using fixed HTTPS upstream address; DNS was bypassed"
+                    "using fixed upstream address; DNS was bypassed"
                 );
             }
             ResolutionSource::IwanDns(server) => {
@@ -719,14 +742,14 @@ impl IwanConnector {
                     upstream = %self.upstream.host,
                     addresses = ?resolution.addresses,
                     %server,
-                    "resolved HTTPS upstream through iWAN DNS"
+                    "resolved upstream through iWAN DNS"
                 );
             }
             ResolutionSource::SystemDns => {
                 info!(
                     upstream = %self.upstream.host,
                     addresses = ?resolution.addresses,
-                    "resolved HTTPS upstream with the host DNS resolver"
+                    "resolved upstream with the host DNS resolver"
                 );
             }
         }
@@ -918,9 +941,9 @@ impl IwanConnector {
     }
 
     async fn connect(&self, uri: &Uri) -> std::result::Result<IwanConnection, BoxError> {
-        if uri.scheme_str() != Some("https")
+        if uri.scheme_str() != Some(self.upstream.url.scheme())
             || uri.host() != Some(self.upstream.host.as_str())
-            || uri.port_u16().unwrap_or(443) != self.upstream.port
+            || uri.port_u16().unwrap_or(self.upstream.port) != self.upstream.port
         {
             return Err(io::Error::new(
                 ErrorKind::PermissionDenied,
@@ -929,8 +952,14 @@ impl IwanConnector {
             .into());
         }
 
-        let server_name = ServerName::try_from(self.upstream.host.clone())
-            .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+        let server_name = self
+            .upstream
+            .uses_tls()
+            .then(|| {
+                ServerName::try_from(self.upstream.host.clone())
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))
+            })
+            .transpose()?;
         let operation = async {
             let addresses = self.resolve().await?.addresses;
             if addresses.is_empty() {
@@ -943,12 +972,21 @@ impl IwanConnector {
             for address in addresses {
                 self.ensure_userspace_route(address.ip())?;
                 match self.net.tcp_connect(address).await {
-                    Ok(stream) => match self.tls.connect(server_name.clone(), stream).await {
-                        Ok(stream) => {
-                            return Ok(IwanConnection(TokioIo::new(stream)));
+                    Ok(stream) => {
+                        let Some(server_name) = server_name.clone() else {
+                            return Ok(IwanConnection::Plain(TokioIo::new(stream)));
+                        };
+                        let tls = self
+                            .tls
+                            .as_ref()
+                            .expect("HTTPS upstream has a TLS connector");
+                        match tls.connect(server_name, stream).await {
+                            Ok(stream) => {
+                                return Ok(IwanConnection::Tls(Box::new(TokioIo::new(stream))));
+                            }
+                            Err(error) => last_error = Some(error),
                         }
-                        Err(error) => last_error = Some(error),
-                    },
+                    }
                     Err(error) => last_error = Some(error),
                 }
             }
@@ -999,7 +1037,10 @@ impl Service<Uri> for IwanConnector {
     }
 }
 
-struct IwanConnection(TokioIo<TlsStream<UserTcpStream>>);
+enum IwanConnection {
+    Plain(TokioIo<UserTcpStream>),
+    Tls(Box<TokioIo<TlsStream<UserTcpStream>>>),
+}
 
 impl Connection for IwanConnection {
     fn connected(&self) -> Connected {
@@ -1013,7 +1054,10 @@ impl HyperRead for IwanConnection {
         context: &mut Context<'_>,
         buffer: ReadBufCursor<'_>,
     ) -> Poll<io::Result<()>> {
-        HyperRead::poll_read(Pin::new(&mut self.0), context, buffer)
+        match &mut *self {
+            Self::Plain(stream) => HyperRead::poll_read(Pin::new(stream), context, buffer),
+            Self::Tls(stream) => HyperRead::poll_read(Pin::new(stream.as_mut()), context, buffer),
+        }
     }
 }
 
@@ -1023,19 +1067,31 @@ impl HyperWrite for IwanConnection {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
-        HyperWrite::poll_write(Pin::new(&mut self.0), context, buffer)
+        match &mut *self {
+            Self::Plain(stream) => HyperWrite::poll_write(Pin::new(stream), context, buffer),
+            Self::Tls(stream) => HyperWrite::poll_write(Pin::new(stream.as_mut()), context, buffer),
+        }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        HyperWrite::poll_flush(Pin::new(&mut self.0), context)
+        match &mut *self {
+            Self::Plain(stream) => HyperWrite::poll_flush(Pin::new(stream), context),
+            Self::Tls(stream) => HyperWrite::poll_flush(Pin::new(stream.as_mut()), context),
+        }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        HyperWrite::poll_shutdown(Pin::new(&mut self.0), context)
+        match &mut *self {
+            Self::Plain(stream) => HyperWrite::poll_shutdown(Pin::new(stream), context),
+            Self::Tls(stream) => HyperWrite::poll_shutdown(Pin::new(stream.as_mut()), context),
+        }
     }
 
     fn is_write_vectored(&self) -> bool {
-        HyperWrite::is_write_vectored(&self.0)
+        match self {
+            Self::Plain(stream) => HyperWrite::is_write_vectored(stream),
+            Self::Tls(stream) => HyperWrite::is_write_vectored(stream.as_ref()),
+        }
     }
 
     fn poll_write_vectored(
@@ -1043,7 +1099,14 @@ impl HyperWrite for IwanConnection {
         context: &mut Context<'_>,
         buffers: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        HyperWrite::poll_write_vectored(Pin::new(&mut self.0), context, buffers)
+        match &mut *self {
+            Self::Plain(stream) => {
+                HyperWrite::poll_write_vectored(Pin::new(stream), context, buffers)
+            }
+            Self::Tls(stream) => {
+                HyperWrite::poll_write_vectored(Pin::new(stream.as_mut()), context, buffers)
+            }
+        }
     }
 }
 
@@ -1090,7 +1153,7 @@ async fn proxy_request(
             } else {
                 StatusCode::BAD_GATEWAY
             };
-            warn!(%error, "HTTPS upstream request failed");
+            warn!(%error, "upstream request failed");
             Ok(error_response(status))
         }
     }
@@ -1249,8 +1312,8 @@ mod tests {
     }
 
     #[test]
-    fn validates_https_origin_and_loopback_listener() {
-        let config = HttpProxyConfig::new(
+    fn validates_http_or_https_origin_and_loopback_listener() {
+        let secure_config = HttpProxyConfig::new(
             "127.0.0.1:8080".parse().unwrap(),
             "https://api.example.test",
             Vec::new(),
@@ -1259,7 +1322,21 @@ mod tests {
             Duration::from_secs(10),
         )
         .unwrap();
-        assert_eq!(config.upstream.authority, "api.example.test");
+        assert_eq!(secure_config.upstream.authority, "api.example.test");
+        assert!(secure_config.upstream.uses_tls());
+
+        let plain_config = HttpProxyConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://api.example.test",
+            Vec::new(),
+            DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
+            Vec::new(),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(plain_config.upstream.port, 80);
+        assert!(!plain_config.upstream.uses_tls());
+
         assert!(
             HttpProxyConfig::new(
                 "0.0.0.0:8080".parse().unwrap(),
@@ -1274,7 +1351,7 @@ mod tests {
         assert!(
             HttpProxyConfig::new(
                 "127.0.0.1:8080".parse().unwrap(),
-                "http://api.example.test",
+                "ftp://api.example.test",
                 Vec::new(),
                 DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
                 Vec::new(),
@@ -1313,13 +1390,24 @@ mod tests {
 
     #[test]
     fn preserves_path_and_query_for_fixed_upstream() {
-        let upstream = Upstream::parse("https://api.example.test:8443").unwrap();
-        let uri = upstream
+        let secure_origin = Upstream::parse("https://api.example.test:8443").unwrap();
+        let uri = secure_origin
             .request_uri(&"/v1/items?limit=5".parse().unwrap())
             .unwrap();
         assert_eq!(
             uri,
             "https://api.example.test:8443/v1/items?limit=5"
+                .parse::<Uri>()
+                .unwrap()
+        );
+
+        let plain_origin = Upstream::parse("http://api.example.test:8080").unwrap();
+        let uri = plain_origin
+            .request_uri(&"/v1/items?limit=5".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            uri,
+            "http://api.example.test:8080/v1/items?limit=5"
                 .parse::<Uri>()
                 .unwrap()
         );
@@ -1437,6 +1525,63 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(&response, b"pong");
+            server.await.unwrap();
+
+            pumping.store(false, Ordering::Release);
+            pump.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn http_connector_sends_plain_http_over_userspace_tcp() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client_ip = Ipv4Addr::new(198, 18, 0, 1);
+            let server_ip = Ipv4Addr::new(198, 18, 0, 2);
+            let (client_net, server_net, pumping, pump) =
+                linked_userspace_nets(client_ip, server_ip);
+            let server_address = SocketAddr::new(server_ip.into(), 8_080);
+            let mut listener = server_net.tcp_bind(server_address).await.unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    assert_eq!(request.uri().path(), "/health");
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"ready"))))
+                });
+                let _ = http1::Builder::new()
+                    .keep_alive(false)
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+
+            let connector = IwanConnector::new(
+                client_net,
+                &test_session(client_ip),
+                ConnectorSettings {
+                    upstream: Upstream::parse("http://api.example.test:8080").unwrap(),
+                    upstream_ips: vec![server_ip.into()],
+                    dns_mode: DnsMode::Auto,
+                    dns_servers: Vec::new(),
+                    dns_timeout: Duration::from_secs(1),
+                    tls: None,
+                    timeout: Duration::from_secs(2),
+                },
+            );
+            let http_client: HttpClient<IwanConnector, Full<Bytes>> =
+                HttpClient::builder(TokioExecutor::new()).build(connector);
+            let request = Request::builder()
+                .uri("http://api.example.test:8080/health")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let response = http_client.request(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "ready"
+            );
             server.await.unwrap();
 
             pumping.store(false, Ordering::Release);

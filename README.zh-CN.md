@@ -17,7 +17,7 @@ iWAN 客户端协议的独立开源 Rust 实现。
 - 明文、循环 XOR 和传统 AES-128-ECB 数据模式
 - IPv4、IPv6、心跳、CLOSE、有限重连和分片重组
 - Linux `/dev/net/tun` 与 macOS `utun`
-- 不创建 TUN、不修改主机路由的本地 HTTP 到内网 HTTPS 反向代理
+- 不创建 TUN、不修改主机路由的本地 HTTP 到内网 HTTP 或 HTTPS 反向代理
 - 严格数据包校验、分片队列上限、路由清理和凭据内存清零
 - 配置驱动的 OIDC/JWKS 登录和控制器线路获取
 - 可复用 Rust 库，以及 `ping`、`auth`、`connect`、`decode`、`managed` 命令
@@ -30,7 +30,7 @@ iWAN 客户端协议的独立开源 Rust 实现。
 - 明文与循环 XOR 数据模式
 - IPv4、IPv6、IPFRAG 与 IPFRAG6 下行路径
 - 心跳、CLOSE、故障检测和有限重连
-- 无路由的本地 HTTP/1.1 到 HTTPS 反向代理
+- 无路由的本地 HTTP/1.1 到 HTTP 或 HTTPS 反向代理
 - 配置驱动的 OIDC 和兼容 Panabit 控制器流程
 - `serve` 用户态 DNS，包括 UDP、TCP 回退和 TTL 缓存
 
@@ -99,9 +99,9 @@ sudo openiwan connect \
 域名。所有参数都以独立参数调用系统工具，不经过 shell。客户端拒绝默认路由以及会覆盖
 当前 iWAN 数据端点的路由。
 
-### 不修改路由地访问 HTTPS API
+### 不修改路由地访问 HTTP 或 HTTPS API
 
-将一个固定的组织内 HTTPS origin 暴露为仅本机可访问的 HTTP 服务：
+将一个固定的组织内 HTTP 或 HTTPS origin 暴露为仅本机可访问的 HTTP 服务：
 
 ```bash
 openiwan serve \
@@ -114,12 +114,13 @@ openiwan serve \
 
 例如，本地请求 `http://127.0.0.1:8080/v1/profile?full=true` 会通过 iWAN 用户态
 TCP/IP 栈访问 `https://api.example.edu/v1/profile?full=true`。请求方法、查询参数、
-流式请求体和 `Authorization` 等业务头会保留，HTTPS 的 Host、SNI 和证书域名仍使用
-原始上游域名。
+流式请求体和 `Authorization` 等业务头会保留。对于 HTTPS，Host、SNI 和证书域名
+仍使用原始上游域名；也可以指定 `http://` 上游，此时通过 iWAN 内的明文 TCP 连接，
+不受 TLS 保护。
 
 `serve` 不打开 TUN，不调用系统路由工具，也不接受 `--route` 参数。监听地址必须是
-回环地址；上游必须是没有路径、查询或用户信息的 HTTPS origin。默认使用系统根证书，
-内部 CA 可通过可重复的 `--ca-cert organization-ca.pem` 添加。
+回环地址；上游必须是没有路径、查询或用户信息的 HTTP 或 HTTPS origin。HTTPS 默认
+使用系统根证书，内部 CA 可通过可重复的 `--ca-cert organization-ca.pem` 添加。
 
 默认 `--dns-mode auto` 会优先通过 iWAN 用户态栈查询 OPENACK 或托管 provider
 提供的组织 DNS。它校验 DNS 事务和响应、支持 CNAME、按 TTL 缓存，并在 UDP

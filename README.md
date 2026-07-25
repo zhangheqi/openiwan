@@ -19,7 +19,7 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - Plaintext, repeating XOR, and legacy AES-128-ECB data modes
 - IPv4, IPv6, heartbeat, CLOSE, bounded reconnection, and fragment reassembly
 - Native Linux `/dev/net/tun` and macOS `utun` support
-- A route-free local HTTP to internal HTTPS reverse proxy with no TUN device
+- A route-free local HTTP to internal HTTP or HTTPS reverse proxy with no TUN device
 - Strict packet validation, bounded fragment queues, route cleanup, and
   credential zeroization
 - Config-driven OIDC/JWKS login and controller-managed line discovery
@@ -34,7 +34,7 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - Plaintext and repeating XOR data modes
 - IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths
 - Heartbeat, CLOSE, failure detection, and bounded reconnection
-- Route-free local HTTP/1.1 to HTTPS reverse proxy
+- Route-free local HTTP/1.1 to HTTP or HTTPS reverse proxy
 - Config-driven OIDC and compatible Panabit controller flows
 - `serve` userspace DNS with UDP, TCP fallback, and TTL caching
 
@@ -108,9 +108,10 @@ resolves a domain once before connecting. Values are passed to platform tools
 as separate arguments, never through a shell. The client rejects default
 routes and any route containing the active iWAN endpoint.
 
-### Access an HTTPS API without changing host routes
+### Access an HTTP or HTTPS API without changing host routes
 
-Expose one fixed organization HTTPS origin on a loopback-only HTTP listener:
+Expose one fixed organization HTTP or HTTPS origin on a loopback-only HTTP
+listener:
 
 ```bash
 openiwan serve \
@@ -124,14 +125,16 @@ openiwan serve \
 A local request for `http://127.0.0.1:8080/v1/profile?full=true` is sent through
 the iWAN userspace TCP/IP stack to
 `https://api.example.edu/v1/profile?full=true`. Methods, queries, streaming
-bodies, and end-to-end headers such as `Authorization` are preserved. HTTPS
-Host, SNI, and certificate verification continue to use the original upstream
-name.
+bodies, and end-to-end headers such as `Authorization` are preserved. For
+HTTPS, Host, SNI, and certificate verification continue to use the original
+upstream name. An `http://` upstream is also accepted and uses plain TCP inside
+iWAN without TLS protection.
 
 `serve` opens no TUN device, invokes no platform route command, and has no route
 options. The listener must be a loopback address, and the upstream must be an
-HTTPS origin without a path, query, or user information. System roots are used
-by default; repeat `--ca-cert organization-ca.pem` to add private roots.
+HTTP or HTTPS origin without a path, query, or user information. HTTPS uses
+system roots by default; repeat `--ca-cert organization-ca.pem` to add private
+roots.
 
 The default `--dns-mode auto` first queries organization resolvers advertised
 by OPENACK or configured by the managed provider through the iWAN userspace

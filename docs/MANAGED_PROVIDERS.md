@@ -104,7 +104,7 @@ the interface is changed. Duplicate targets are removed. Default routes and
 routes containing the active iWAN endpoint are rejected; full-tunnel routing is
 not implemented.
 
-## Route-free HTTPS API proxy
+## Route-free HTTP(S) API proxy
 
 The `serve` managed action selects and decrypts a saved line exactly like
 `connect`, but it does not create a TUN interface or modify host routes:
@@ -116,8 +116,9 @@ openiwan managed \
 ```
 
 It binds `127.0.0.1:8080` by default and forwards local HTTP/1.1 requests to the
-fixed HTTPS origin through an in-process TCP/IP stack. Use `--listen` for a
-different loopback address and repeat `--ca-cert` for private CA roots.
+fixed HTTP or HTTPS origin through an in-process TCP/IP stack. Use `--listen`
+for a different loopback address and repeat `--ca-cert` for private HTTPS CA
+roots.
 Organization DNS comes from `dns_servers` or OPENACK and runs inside iWAN with
 TTL caching and DNS-over-TCP fallback. `--dns-mode iwan` forbids host-DNS
 fallback. The managed state must already exist; run `fetch` first when it does

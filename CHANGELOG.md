@@ -17,9 +17,9 @@ The project follows [Semantic Versioning](https://semver.org/).
   decryption
 - CIDR, IP, and one-time domain route targets on Linux and macOS
 - Route-free `serve` and `managed serve` HTTP/1.1 reverse proxy commands using
-  an in-process TCP/IP stack and verified upstream HTTPS
+  an in-process TCP/IP stack with HTTP and verified HTTPS upstream support
 - Fixed `--upstream-ip` connection targets that bypass VPN Fake-IP DNS while
-  retaining the configured HTTPS identity
+  retaining the configured HTTP Host and HTTPS identity
 - Automatic organization DNS through the iWAN userspace stack with provider
   and OPENACK resolvers, CNAME support, bounded TTL caching, response
   validation, multi-server retry, and DNS-over-TCP fallback

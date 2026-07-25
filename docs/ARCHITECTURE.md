@@ -144,19 +144,20 @@ The local listener accepts HTTP/1.1 only on a loopback address. Hyper preserves
 streaming request and response bodies while a fixed-destination connector
 resolves the configured host through an organization DNS server inside iWAN,
 filters addresses to the iWAN session family, opens TCP through the userspace
-stack, and performs rustls certificate and SNI validation. It never falls back
-to a host TCP socket.
+stack, and, for HTTPS, performs rustls certificate and SNI validation. HTTP
+upstreams use the same userspace TCP path without TLS. The connector never
+falls back to a host TCP socket.
 
 ```mermaid
 flowchart LR
     Local["Local HTTP client"] --> Listener["127.0.0.1 HTTP listener"]
-    Listener --> TLS["Hyper + rustls HTTPS client"]
+    Listener --> Upstream["Hyper HTTP client + optional rustls"]
     Listener --> DNS["DNS UDP/TCP + TTL cache"]
     DNS --> Stack["Userspace TCP/IP stack"]
-    TLS --> Stack
+    Upstream --> Stack
     Stack --> Device["In-memory PacketDevice"]
     Device --> Client["iWAN Client UDP session"]
-    Client --> API["Organization HTTPS API"]
+    Client --> API["Organization HTTP(S) API"]
 ```
 
 DNS transaction IDs, response headers, questions, address families, and bounded
@@ -166,8 +167,8 @@ selection prefers CLI/provider/OPENACK servers inside iWAN. `auto` uses host DNS
 only when no iWAN resolver exists; failure of a configured iWAN resolver is
 fail-closed. Host `198.18.0.0/15` Fake-IP answers are rejected. `iwan` requires
 an iWAN resolver, while `system` explicitly selects host DNS. `--upstream-ip`
-remains an emergency override without changing HTTP Host, TLS SNI, or
-certificate verification.
+remains an emergency override without changing HTTP Host or, for HTTPS, TLS
+SNI and certificate verification.
 
 Only the outer iWAN UDP socket uses existing host networking. The route-free
 guarantee means this path never creates an interface or adds, replaces, or

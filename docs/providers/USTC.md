@@ -71,7 +71,7 @@ sudo openiwan managed \
 Use `all` to fetch, list, select, and connect in one process. Fetch and list do
 not need elevated privileges; TUN creation normally does.
 
-## Route-free HTTPS Proxy
+## Route-free HTTP(S) Proxy
 
 An existing managed line can run the route-free proxy without creating a TUN
 device or changing host routes:

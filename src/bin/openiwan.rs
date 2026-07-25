@@ -42,7 +42,7 @@ enum Command {
     Auth(ConnectionArgs),
     /// Authenticate, create a TUN interface, and exchange IP packets.
     Connect(ConnectArgs),
-    /// Expose one HTTPS origin on a local HTTP server without TUN or host routes.
+    /// Expose one HTTP or HTTPS origin on a local HTTP server without TUN or host routes.
     #[cfg(feature = "http-proxy")]
     Serve(ServeArgs),
     /// Decode one hexadecimal iWAN datagram without network access.
@@ -106,12 +106,12 @@ struct ServeArgs {
 #[cfg(feature = "http-proxy")]
 #[derive(Debug, Clone, Args)]
 struct HttpProxyArgs {
-    /// Fixed HTTPS origin. Incoming paths and queries are preserved.
+    /// Fixed HTTP or HTTPS origin. Incoming paths and queries are preserved.
     #[arg(long)]
     upstream: String,
     /// Connect to this IP instead of resolving the upstream with host DNS.
-    /// Repeat for multiple addresses. Host, SNI, and certificate verification
-    /// still use the upstream URL.
+    /// Repeat for multiple addresses. Host and, for HTTPS, SNI and certificate
+    /// verification still use the upstream URL.
     #[arg(long = "upstream-ip", value_delimiter = ',')]
     upstream_ips: Vec<IpAddr>,
     /// DNS policy: auto uses iWAN DNS when available, otherwise safe host DNS;
@@ -128,7 +128,7 @@ struct HttpProxyArgs {
     /// Loopback address for the local HTTP server.
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
-    /// Additional PEM CA certificate file. Repeat for multiple files.
+    /// Additional HTTPS PEM CA certificate file. Repeat for multiple files.
     #[arg(long = "ca-cert")]
     ca_certificates: Vec<PathBuf>,
     /// Total timeout for upstream DNS, userspace TCP, and TLS setup.
@@ -208,7 +208,7 @@ enum ManagedCommand {
     Connect(ManagedConnectArgs),
     /// Fetch, list, select, and connect.
     All(ManagedConnectArgs),
-    /// Select a saved line and expose one HTTPS origin without host routes.
+    /// Select a saved line and expose one HTTP or HTTPS origin without host routes.
     #[cfg(feature = "http-proxy")]
     Serve(ManagedServeArgs),
 }

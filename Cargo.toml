@@ -45,6 +45,7 @@ cipher = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
 futures = { version = "0.3", optional = true }
+getrandom = "0.3"
 hickory-proto = { version = "0.25", default-features = false, features = ["std"], optional = true }
 hmac = { version = "0.12", optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -84,7 +85,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
 ] }
 
 [features]

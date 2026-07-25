@@ -5,9 +5,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject,
 };
 
 const WINTUN_VERSION: &str = "0.14.1";
@@ -80,6 +85,7 @@ fn install_into(local_app_data: &Path) -> Result<PathBuf> {
         ))
     })?;
     let destination = directory.join("wintun.dll");
+    let _install_lock = InstallMutex::acquire()?;
     if validate_file(&destination)? {
         return absolute_path(&destination);
     }
@@ -106,6 +112,49 @@ fn install_into(local_app_data: &Path) -> Result<PathBuf> {
     }
     result?;
     absolute_path(&destination)
+}
+
+struct InstallMutex(HANDLE);
+
+impl InstallMutex {
+    fn acquire() -> Result<Self> {
+        let name = format!("Local\\OpenIWAN-Wintun-{WINTUN_VERSION}-{ARCHITECTURE}");
+        let name = wide_null(OsStr::new(&name));
+        // SAFETY: the optional security descriptor is null and `name` is a
+        // NUL-terminated UTF-16 buffer that remains alive for the call.
+        let handle = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(Error::Tun(format!(
+                "create Wintun installation mutex: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // SAFETY: `handle` is a live mutex handle returned by CreateMutexW.
+        let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
+        if wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED {
+            Ok(Self(handle))
+        } else {
+            // SAFETY: `handle` is live and must be closed on the error path.
+            unsafe {
+                CloseHandle(handle);
+            }
+            Err(Error::Tun(format!(
+                "wait for Wintun installation mutex failed with status {wait_result}"
+            )))
+        }
+    }
+}
+
+impl Drop for InstallMutex {
+    fn drop(&mut self) {
+        // SAFETY: this instance owns the mutex after a successful wait and
+        // closes the live handle exactly once.
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
 }
 
 fn write_embedded(path: &Path) -> Result<()> {

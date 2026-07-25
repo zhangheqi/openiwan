@@ -281,10 +281,9 @@ impl PacketDevice for TunDevice {
             .reader
             .lock()
             .map_err(|_| IoError::other("Wintun reader lock is poisoned"))?;
-        map_windows_read_timeout(self.runtime.block_on(tokio::time::timeout(
-            WINDOWS_READ_TIMEOUT,
-            reader.read(buffer),
-        )))
+        map_windows_read_timeout(self.runtime.block_on(async {
+            tokio::time::timeout(WINDOWS_READ_TIMEOUT, reader.read(buffer)).await
+        }))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -981,10 +980,13 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        let result = runtime.block_on(tokio::time::timeout(Duration::from_millis(1), async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok::<usize, std::io::Error>(0)
-        }));
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(1), async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok::<usize, std::io::Error>(0)
+            })
+            .await
+        });
         assert_eq!(
             map_windows_read_timeout(result).unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock

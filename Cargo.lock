@@ -1190,6 +1190,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "futures",
+ "getrandom 0.3.4",
  "hickory-proto",
  "hmac",
  "http-body-util",

@@ -6,7 +6,7 @@ use crate::protocol::{
 };
 use crate::{Error, Result};
 use std::collections::HashSet;
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -888,11 +888,9 @@ pub fn ping(server: SocketAddr, timeout: Duration) -> Result<Duration> {
 }
 
 fn random_u32() -> Result<u32> {
-    let mut bytes = [0_u8; 4];
-    let mut source = std::fs::File::open("/dev/urandom")?;
     loop {
-        source.read_exact(&mut bytes)?;
-        let value = u32::from_ne_bytes(bytes);
+        let value =
+            getrandom::u32().map_err(|_| Error::Crypto("system randomness is unavailable"))?;
         if value != 0 {
             return Ok(value);
         }

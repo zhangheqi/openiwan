@@ -6,8 +6,20 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-25
+
 ### Added
 
+- Traditional iWAN packet, TLV, authentication, heartbeat, and CLOSE handling
+- Compact 8-byte heartbeat responses used by compatible USTC servers
+- Configurable 8/16-byte XOR key cycling, with USTC using the 8-byte form
+- Plaintext, repeating XOR, and legacy AES-128-ECB data modes
+- IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths
+- Bounded fragment reassembly and reconnect policies
+- Linux TUN and macOS utun support
+- `ping`, `auth`, `connect`, and `decode` CLI commands
+- Static-analysis evidence and wire-protocol reference for client version 2.3.0
+- Unit tests and a synthetic local UDP authentication endpoint
 - English-first community and technical documentation
 - Simplified Chinese README translation
 - Contribution guidelines, code of conduct, and architecture guide
@@ -35,17 +47,5 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Replace the pre-release fixed-width cipher constructors with fallible APIs
   that require an explicit 8- or 16-byte XOR key width
 
-## [0.1.0] - 2026-07-23
-
-### Added
-
-- Traditional iWAN packet, TLV, authentication, heartbeat, and CLOSE handling
-- Compact 8-byte heartbeat responses used by compatible USTC servers
-- Configurable 8/16-byte XOR key cycling, with USTC using the 8-byte form
-- Plaintext, repeating XOR, and legacy AES-128-ECB data modes
-- IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths
-- Bounded fragment reassembly and reconnect policies
-- Linux TUN and macOS utun support
-- `ping`, `auth`, `connect`, and `decode` CLI commands
-- Static-analysis evidence and wire-protocol reference for client version 2.3.0
-- Unit tests and a synthetic local UDP authentication endpoint
+[Unreleased]: https://github.com/zhangheqi/openiwan/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/zhangheqi/openiwan/tree/v0.1.0

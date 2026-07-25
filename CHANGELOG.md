@@ -6,6 +6,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-25
+
 ### Added
 
 - Windows 10/11 x86_64 and ARM64 TUN support with native IPv4/IPv6 route
@@ -22,6 +24,15 @@ The project follows [Semantic Versioning](https://semver.org/).
   `utunN` allocation on macOS
 - Changed `TunDevice::open` and `RouteGuard::configure` to accept authenticated
   session/device state directly
+- Standardized the project name as OpeniWAN
+- Reorganized the README installation, source-build, platform, and Rust
+  library guidance, with crates.io, docs.rs, CI, MSRV, and license badges
+
+### Fixed
+
+- Made embedded Wintun extraction safe across concurrent processes
+- Replaced Unix-specific authentication randomness with the platform system
+  random-number generator
 
 ## [0.1.0] - 2026-07-25
 
@@ -64,5 +75,6 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Replace the pre-release fixed-width cipher constructors with fallible APIs
   that require an explicit 8- or 16-byte XOR key width
 
-[Unreleased]: https://github.com/zhangheqi/openiwan/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/zhangheqi/openiwan/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/zhangheqi/openiwan/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/zhangheqi/openiwan/tree/v0.1.0

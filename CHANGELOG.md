@@ -24,15 +24,6 @@ The project follows [Semantic Versioning](https://semver.org/).
   `utunN` allocation on macOS
 - Changed `TunDevice::open` and `RouteGuard::configure` to accept authenticated
   session/device state directly
-- Standardized the project name as OpeniWAN
-- Reorganized the README installation, source-build, platform, and Rust
-  library guidance, with crates.io, docs.rs, CI, MSRV, and license badges
-
-### Fixed
-
-- Made embedded Wintun extraction safe across concurrent processes
-- Replaced Unix-specific authentication randomness with the platform system
-  random-number generator
 
 ## [0.1.0] - 2026-07-25
 

@@ -1,6 +1,6 @@
 # Embedded Wintun binaries
 
-OpenIWAN redistributes the official prebuilt Wintun 0.14.1 DLLs required by
+OpeniWAN redistributes the official prebuilt Wintun 0.14.1 DLLs required by
 Windows TUN support:
 
 | Target | Source archive directory | SHA-256 |

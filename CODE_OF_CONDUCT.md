@@ -2,7 +2,7 @@
 
 ## Our Commitment
 
-We are committed to making participation in `openiwan` a respectful,
+We are committed to making participation in OpeniWAN a respectful,
 harassment-free experience for everyone, regardless of background, identity,
 experience level, location, or viewpoint.
 

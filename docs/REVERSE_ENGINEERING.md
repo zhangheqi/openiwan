@@ -70,7 +70,7 @@ with the following observations:
 - `MD5(username || password)` for the session key
 - the repeating XOR data plane
 
-`openiwan` is a clean implementation. It does not copy source from that
+OpeniWAN is a clean implementation. It does not copy source from that
 project; it provides its own parser boundaries, state management, platform
 abstraction, error model, and tests.
 

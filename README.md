@@ -1,10 +1,16 @@
-# openiwan
+# OpeniWAN
+
+[![Crates.io](https://img.shields.io/crates/v/openiwan.svg)](https://crates.io/crates/openiwan)
+[![docs.rs](https://img.shields.io/docsrs/openiwan.svg)](https://docs.rs/openiwan)
+[![CI](https://img.shields.io/github/actions/workflow/status/zhangheqi/openiwan/ci.yml?branch=main&label=CI)](https://github.com/zhangheqi/openiwan/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/crates/msrv/openiwan.svg)](https://crates.io/crates/openiwan)
+[![License](https://img.shields.io/crates/l/openiwan.svg)](LICENSE)
 
 An independent, open-source Rust implementation of the iWAN client protocol.
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-`openiwan` provides a protocol library and command-line client for the
+OpeniWAN provides a protocol library and command-line client for the
 traditional single-path UDP data plane observed in the macOS iWAN client
 `2.3.0 (230)`.
 
@@ -52,42 +58,53 @@ resource limits, explicit error handling, credential hygiene, cleanup logic,
 tests, and CI. It does not mean that the project has passed vendor
 certification. Validate every deployment against an authorized test endpoint.
 
-## Build
+## Installation
 
-The minimum supported Rust version is 1.88.
-
-```bash
-cargo build --release
-```
-
-Run the project checks with:
+OpeniWAN requires Rust 1.88 or newer. Install the CLI from crates.io:
 
 ```bash
-cargo test --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo install openiwan --locked
 ```
 
-Creating and configuring a TUN interface requires root on Linux/macOS or an
-elevated terminal on Windows. The userspace `serve` path creates no network
-interface and does not require elevated privileges.
+By default, Cargo installs the executable to `$HOME/.cargo/bin` on Linux and
+macOS or `%USERPROFILE%\.cargo\bin` on Windows. Ensure that directory is on
+`PATH`, then verify the installation:
+
+```bash
+openiwan --version
+```
+
+## Build from source
+
+From a repository checkout, build the optimized executable with:
+
+```bash
+cargo build --release --locked
+```
+
+The executable is written to `target/release/openiwan` (`openiwan.exe` on
+Windows). To install the current checkout into Cargo's binary directory instead:
+
+```bash
+cargo install --path . --locked
+```
+
+Contributor checks and development requirements are documented in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Platform notes
+
+Installation does not require elevated privileges. Creating a TUN interface or
+changing routes does: run `connect`, `managed connect`, and `managed all` as
+root on Linux/macOS or from an elevated terminal on Windows. `ping`, `auth`,
+`decode`, `serve`, managed login, and managed listing do not require elevation.
 
 ### Windows
 
-Windows 10/11 on x86_64 and ARM64 is supported. Install Rust 1.88 or newer,
-then install the complete CLI with:
-
-```powershell
-cargo install openiwan
-```
-
-Ensure `%USERPROFILE%\.cargo\bin` is on `PATH`. `connect`, `managed connect`,
-and `managed all` must run from an elevated PowerShell or Terminal because they
-create an adapter and routes. `ping`, `auth`, `decode`, `serve`, managed login,
-and managed listing can run without elevation.
+Windows 10/11 on x86_64 and ARM64 is supported.
 
 The official signed Wintun 0.14.1 library is embedded in the executable. On the
-first TUN connection, OpenIWAN verifies its SHA-256 digest, atomically extracts
+first TUN connection, OpeniWAN verifies its SHA-256 digest, atomically extracts
 it below `%LOCALAPPDATA%\openiwan\wintun\0.14.1`, verifies its Authenticode
 signature while loading it, and reuses the validated file thereafter. No
 separate Wintun setup or DLL copy is required.
@@ -261,6 +278,10 @@ reference.
 
 ## Library
 
+Add OpeniWAN to a Rust project with `cargo add openiwan`. For a protocol-only
+dependency without the default managed-provider and HTTP-proxy features, use
+`cargo add openiwan --no-default-features`.
+
 Packet and TLV codecs live in `openiwan::protocol`; compatibility cryptography
 lives in `openiwan::crypto`. Applications that already own a TUN device,
 virtual interface, or userspace IP stack can implement `PacketDevice` and use
@@ -303,10 +324,10 @@ signature is not a modern message authentication code. These mechanisms exist
 for compatibility and do not provide the confidentiality, integrity, forward
 secrecy, or peer authentication expected from a modern VPN protocol.
 
-Use `openiwan` only on authorized networks, preferably inside an additional
+Use OpeniWAN only on authorized networks, preferably inside an additional
 trusted security layer, and choose a stronger protocol when the endpoint
 supports one.
 
 ## License
 
-`openiwan` is available under the [MIT License](LICENSE).
+OpeniWAN is available under the [MIT License](LICENSE).

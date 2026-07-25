@@ -57,7 +57,7 @@ issue beyond those documented protocol limitations.
 
 Traditional iWAN cryptography is not modern authenticated encryption. The
 control signature does not cover the packet body, and traditional data packets
-do not have authenticated integrity. `openiwan` must not be presented as adding
+do not have authenticated integrity. OpeniWAN must not be presented as adding
 security properties that are absent from the wire protocol.
 
 Use the project only on authorized networks and prefer a stronger protocol when
@@ -79,7 +79,7 @@ public reports.
 
 The official Wintun 0.14.1 x86_64 and ARM64 binaries and their prebuilt-binary
 license are distributed with the crate. Only the active architecture is
-embedded in an executable. Before each load, OpenIWAN validates the versioned
+embedded in an executable. Before each load, OpeniWAN validates the versioned
 LocalAppData cache against the embedded size and SHA-256; replacement uses an
 atomic Windows file operation. The `tun` signature-verification feature then
 checks the Authenticode signature while loading the DLL by absolute path.

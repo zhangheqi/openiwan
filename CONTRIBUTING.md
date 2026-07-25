@@ -1,7 +1,13 @@
-# Contributing to openiwan
+# Contributing to OpeniWAN
 
-Thank you for helping make `openiwan` a reliable, internationally accessible
+Thank you for helping make OpeniWAN a reliable, internationally accessible
 interoperability project.
+
+## Project Name
+
+Use **OpeniWAN** for the project name in prose and headings. Use `openiwan`
+only for technical identifiers such as the crate, executable, commands, paths,
+configuration names, and URLs.
 
 ## Before You Start
 

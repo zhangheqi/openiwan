@@ -1,6 +1,6 @@
 # Documentation
 
-The technical documentation for `openiwan` is written and reviewed in English.
+The technical documentation for OpeniWAN is written and reviewed in English.
 The root README may have translations, but English is the canonical language
 for protocol claims, architecture decisions, security guidance, and
 contribution policy.

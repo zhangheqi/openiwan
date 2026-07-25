@@ -1,10 +1,16 @@
-# openiwan
+# OpeniWAN
+
+[![Crates.io](https://img.shields.io/crates/v/openiwan.svg)](https://crates.io/crates/openiwan)
+[![docs.rs](https://img.shields.io/docsrs/openiwan.svg)](https://docs.rs/openiwan)
+[![CI](https://img.shields.io/github/actions/workflow/status/zhangheqi/openiwan/ci.yml?branch=main&label=CI)](https://github.com/zhangheqi/openiwan/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/crates/msrv/openiwan.svg)](https://crates.io/crates/openiwan)
+[![License](https://img.shields.io/crates/l/openiwan.svg)](LICENSE)
 
 iWAN 客户端协议的独立开源 Rust 实现。
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-`openiwan` 提供协议库和命令行客户端，当前面向 macOS iWAN 客户端
+OpeniWAN 提供协议库和命令行客户端，当前面向 macOS iWAN 客户端
 `2.3.0 (230)` 中的传统单链路 UDP 数据面。
 
 > [!IMPORTANT]
@@ -45,38 +51,49 @@ iWAN 客户端协议的独立开源 Rust 实现。
 这里的“面向生产”表示实现包含防御性解析、资源上限、明确错误处理、凭据保护、清理逻辑、
 测试和 CI，并不表示已经获得厂商认证。部署前必须在获得授权的测试环境中验证互操作性。
 
-## 构建
+## 安装
 
-最低支持 Rust 1.88。
-
-```bash
-cargo build --release
-```
-
-运行项目检查：
+OpeniWAN 需要 Rust 1.88 或更新版本。从 crates.io 安装命令行客户端：
 
 ```bash
-cargo test --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo install openiwan --locked
 ```
 
-创建和配置 TUN 在 Linux/macOS 上需要 root，在 Windows 上需要管理员终端。`serve`
-使用用户态 TCP/IP 栈，不创建网络接口，也不需要提升权限。
+Cargo 默认将可执行文件安装到 Linux/macOS 的 `$HOME/.cargo/bin` 或 Windows 的
+`%USERPROFILE%\.cargo\bin`。请确保对应目录已加入 `PATH`，然后验证安装：
+
+```bash
+openiwan --version
+```
+
+## 从源码构建
+
+在仓库目录中构建优化后的可执行文件：
+
+```bash
+cargo build --release --locked
+```
+
+构建产物位于 `target/release/openiwan`（Windows 为 `openiwan.exe`）。如需将当前
+源码安装到 Cargo 的可执行文件目录：
+
+```bash
+cargo install --path . --locked
+```
+
+开发环境要求和项目检查命令参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 平台说明
+
+安装本身不需要提升权限。创建 TUN 或修改路由时，Linux/macOS 需要以 root 运行
+`connect`、`managed connect` 和 `managed all`，Windows 则需要使用管理员终端。
+`ping`、`auth`、`decode`、`serve`、托管登录与线路查看不需要提升权限。
 
 ### Windows
 
-支持 Windows 10/11 x86_64 与 ARM64。安装 Rust 1.88 或更新版本后执行：
+支持 Windows 10/11 x86_64 与 ARM64。
 
-```powershell
-cargo install openiwan
-```
-
-请确保 `%USERPROFILE%\.cargo\bin` 已加入 `PATH`。`connect`、`managed connect`
-与 `managed all` 需要在管理员 PowerShell 或 Terminal 中运行；`ping`、`auth`、
-`decode`、`serve`、托管登录与线路查看不需要管理员权限。
-
-官方签名的 Wintun 0.14.1 已嵌入可执行文件。首次建立 TUN 时，OpenIWAN 会验证
+官方签名的 Wintun 0.14.1 已嵌入可执行文件。首次建立 TUN 时，OpeniWAN 会验证
 SHA-256，原子释放到 `%LOCALAPPDATA%\openiwan\wintun\0.14.1`，加载时验证
 Authenticode 签名，之后复用已验证文件。无需另行安装 Wintun 或复制 DLL。
 
@@ -233,6 +250,17 @@ Rust API 在构造客户端或加密器时同样要求显式传入 AUTH_VERIFY �
 
 完整命令行参数请运行 `openiwan --help` 或 `openiwan <command> --help`。
 
+## Rust 库
+
+运行 `cargo add openiwan` 将 OpeniWAN 添加到 Rust 项目。如果只需要协议层，不需要
+默认启用的托管 provider 和 HTTP 代理功能，请使用
+`cargo add openiwan --no-default-features`。
+
+数据包和 TLV 编解码位于 `openiwan::protocol`，兼容加密位于
+`openiwan::crypto`。已有 TUN、虚拟接口或用户态 IP 栈的应用可以实现
+`PacketDevice`，并使用 `Client::authenticate`、`ConnectedSession::run` 或有限
+重连辅助接口。
+
 ## 文档与贡献
 
 技术文档以英语维护：
@@ -253,9 +281,9 @@ Rust API 在构造客户端或加密器时同样要求显式传入 AUTH_VERIFY �
 传统 iWAN 数据面使用 MD5、循环 XOR 或 AES-ECB，控制签名也不是现代消息认证码。这些机制
 只用于兼容，不能提供现代 VPN 所预期的机密性、完整性、前向保密和对等方认证。
 
-请仅在获得授权的网络中使用 `openiwan`，最好配合额外的可信安全层；如果端点支持更强的
+请仅在获得授权的网络中使用 OpeniWAN，最好配合额外的可信安全层；如果端点支持更强的
 协议，应优先使用更强协议。
 
 ## 许可证
 
-`openiwan` 使用 [MIT License](LICENSE)。
+OpeniWAN 使用 [MIT License](LICENSE)。

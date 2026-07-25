@@ -129,7 +129,7 @@ PASSWORD     = AES-128-ECB-Encrypt(password_key, plain_block)
 
 OPENACK returns a nonzero session ID, a token, and address configuration.
 Some observed endpoints echo the same AUTH_VERIFY value, while others omit the
-TLV. A client must reject a present but mismatched echo. `openiwan` keeps strict
+TLV. A client must reject a present but mismatched echo. OpeniWAN keeps strict
 echo checking as the manual-client default and allows a managed provider to
 explicitly accept an absent echo for compatibility. In either mode, the UDP
 socket remains connected to the selected peer and the OPENACK control
@@ -225,7 +225,7 @@ AES-128/AES-256 outer encryption, and reassembly code. That path depends on SR
 group and site configuration delivered by a controller; it is not part of the
 traditional single-endpoint handshake documented above.
 
-`openiwan` recognizes packet type `0x28` and discards its body instead of
+OpeniWAN recognizes packet type `0x28` and discards its body instead of
 passing unknown data to the TUN interface. SEGRT must not be described as
 production-compatible until an implementation has been validated with an
 authorized SR configuration, bidirectional captures, and the corresponding

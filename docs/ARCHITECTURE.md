@@ -1,6 +1,6 @@
 # Architecture
 
-`openiwan` separates wire compatibility, session state, and host networking so
+OpeniWAN separates wire compatibility, session state, and host networking so
 that protocol code can be tested without privileged access to a TUN device.
 
 ## Scope
@@ -128,7 +128,7 @@ existing synchronous `PacketDevice` contract can stop and reconnect promptly.
 The authenticated address, mask, and MTU are applied as part of interface
 creation. macOS automatically allocates `utunN` unless an explicit valid name
 is requested. The legacy Unix address ioctls used upstream are IPv4-specific,
-so OpenIWAN applies IPv6 `/128` addresses with `ip` on Linux or `ifconfig` on
+so OpeniWAN applies IPv6 `/128` addresses with `ip` on Linux or `ifconfig` on
 macOS after creating the device through `tun`; MTU, state, framing, and device
 lifetime remain owned by `tun`.
 

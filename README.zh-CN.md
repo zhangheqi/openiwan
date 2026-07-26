@@ -205,8 +205,10 @@ sudo openiwan managed \
   connect --route-domain example.edu --route 10.0.0.0/8
 ```
 
-将动作换成 `all` 可以一次完成登录、列出线路、选择和连接。access token 与解密后的线路
-密码不会写入磁盘。provider 结构、状态文件和安全模型参见
+将动作换成 `all` 可以一次完成登录、选择和连接。`connect`、`all` 和 `serve`
+未指定线路选择参数时会先列出线路再提示选择；传入 `--line-index` 或 `--line-name`
+时会直接选择目标线路，不打印完整列表。access token 与解密后的线路密码不会写入
+磁盘。provider 结构、状态文件和安全模型参见
 [托管客户域文档](docs/MANAGED_PROVIDERS.md)；预制配置和部署专属说明参见
 [Provider Profiles](docs/providers/README.md)。
 托管状态默认位于 Unix 的 `~/.config/openiwan/managed` 或 Windows 的

@@ -68,8 +68,10 @@ sudo openiwan managed \
   connect --line-index 1 --route 10.0.0.0/8
 ```
 
-Use `all` to fetch, list, select, and connect in one process. Fetch and list do
-not need elevated privileges; TUN creation normally does.
+Use `all` to fetch, select, and connect in one process. `connect`, `all`, and
+`serve` list the available lines before prompting only when neither
+`--line-index` nor `--line-name` is provided. Fetch and list do not need
+elevated privileges; TUN creation normally does.
 
 ## Route-free HTTP(S) Proxy
 

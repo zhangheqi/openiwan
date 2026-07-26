@@ -240,6 +240,10 @@ instructions are listed under [Provider Profiles](docs/providers/README.md).
 The default managed state directory is `~/.config/openiwan/managed` on Unix and
 `%APPDATA%\openiwan\managed` on Windows.
 
+`connect`, `all`, and `serve` print the line list before prompting when no
+selector is provided. Passing `--line-index` or `--line-name` selects the line
+directly without printing the complete list.
+
 An existing managed line can run the route-free proxy as well:
 
 ```bash

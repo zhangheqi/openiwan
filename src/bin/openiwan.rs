@@ -209,7 +209,7 @@ enum ManagedCommand {
     List,
     /// Select a saved line and connect.
     Connect(ManagedConnectArgs),
-    /// Fetch, list, select, and connect.
+    /// Fetch, select, and connect, prompting from the line list when needed.
     All(ManagedConnectArgs),
     /// Select a saved line and expose one HTTP or HTTPS origin without host routes.
     #[cfg(feature = "http-proxy")]
@@ -384,18 +384,15 @@ fn managed(arguments: ManagedArgs) -> Result<()> {
         }
         ManagedCommand::Connect(connect) => {
             let state = load_managed_state(&client, &state_path)?;
-            print_servers(&state);
             managed_connect(&client, &state, &connect)?;
         }
         ManagedCommand::All(connect) => {
             let state = managed_fetch(&client, &state_path)?;
-            print_servers(&state);
             managed_connect(&client, &state, &connect)?;
         }
         #[cfg(feature = "http-proxy")]
         ManagedCommand::Serve(serve) => {
             let state = load_managed_state(&client, &state_path)?;
-            print_servers(&state);
             managed_serve(&client, &state, &serve)?;
         }
     }
@@ -439,8 +436,8 @@ fn managed_connect(
     state: &ManagedState,
     arguments: &ManagedConnectArgs,
 ) -> Result<()> {
-    let selected = select_server(state, arguments.line_index, arguments.line_name.as_deref())?
-        .map_or_else(|| prompt_for_server(state), Ok)?;
+    let selected =
+        select_or_prompt_server(state, arguments.line_index, arguments.line_name.as_deref())?;
     println!("connecting to {} ({})", selected.name, selected.endpoint());
 
     let mut config = ClientConfig::new(
@@ -464,8 +461,8 @@ fn managed_serve(
     state: &ManagedState,
     arguments: &ManagedServeArgs,
 ) -> Result<()> {
-    let selected = select_server(state, arguments.line_index, arguments.line_name.as_deref())?
-        .map_or_else(|| prompt_for_server(state), Ok)?;
+    let selected =
+        select_or_prompt_server(state, arguments.line_index, arguments.line_name.as_deref())?;
     println!("connecting to {} ({})", selected.name, selected.endpoint());
 
     let mut config = ClientConfig::new(
@@ -485,6 +482,19 @@ fn managed_serve(
         &arguments.proxy,
         &client.provider().dns_servers,
     )
+}
+
+#[cfg(feature = "managed")]
+fn select_or_prompt_server<'a>(
+    state: &'a ManagedState,
+    line_index: Option<usize>,
+    line_name: Option<&str>,
+) -> Result<&'a ManagedServer> {
+    if let Some(server) = select_server(state, line_index, line_name)? {
+        return Ok(server);
+    }
+    print_servers(state);
+    prompt_for_server(state)
 }
 
 #[cfg(feature = "managed")]
@@ -782,6 +792,37 @@ mod tests {
                 "Education",
             ])
             .is_err()
+        );
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn explicit_managed_selector_resolves_without_prompting() {
+        let state: ManagedState = serde_json::from_value(serde_json::json!({
+            "version": openiwan::managed::STATE_VERSION,
+            "provider_id": "test",
+            "domain": "test",
+            "device_id": "device",
+            "fetched_at_unix": 0,
+            "servers": [{
+                "name": "Education",
+                "host": "192.0.2.1",
+                "port": 6001,
+                "username": "alice",
+                "encrypted_password": "encrypted"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            select_or_prompt_server(&state, Some(1), None).unwrap().name,
+            "Education"
+        );
+        assert_eq!(
+            select_or_prompt_server(&state, None, Some("Education"))
+                .unwrap()
+                .endpoint(),
+            "192.0.2.1:6001"
         );
     }
 

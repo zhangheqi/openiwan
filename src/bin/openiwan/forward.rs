@@ -9,7 +9,7 @@ use openiwan::{Client, ConnectedSession, Error, PacketDevice, Result, SessionEnd
 use rustls::pki_types::ServerName;
 use std::future::Future;
 use std::io::{self, ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -814,15 +814,8 @@ fn channel_packet_device(mtu: u16) -> (Arc<ChannelPacketDevice>, IwanAsyncDevice
 }
 
 fn build_userspace_net(capture: IwanAsyncDevice, session: &SessionInfo) -> Result<Arc<Net>> {
-    let address = session.address.ok_or(Error::MissingTlv("IP/IP6"))?;
-    let prefix = match address {
-        IpAddr::V4(_) => session
-            .netmask
-            .map(ipv4_mask_prefix)
-            .transpose()?
-            .unwrap_or(32),
-        IpAddr::V6(_) => 128,
-    };
+    let address = session.address.ok_or(Error::MissingTlv("IP"))?;
+    let prefix = if address.is_ipv4() { 32 } else { 128 };
     let ip_cidr = format!("{address}/{prefix}")
         .parse::<IpCidr>()
         .map_err(|()| Error::InvalidConfig("invalid userspace IP assignment".into()))?;
@@ -850,22 +843,6 @@ fn session_random_seed(session: &SessionInfo) -> u64 {
         .unwrap_or_default()
         .as_nanos() as u64;
     time ^ (u64::from(session.token) << 16) ^ u64::from(session.session_id)
-}
-
-fn ipv4_mask_prefix(mask: Ipv4Addr) -> Result<u8> {
-    let bits = u32::from(mask);
-    let prefix = bits.leading_ones() as u8;
-    let expected = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    if bits != expected {
-        return Err(Error::InvalidConfig(format!(
-            "non-contiguous IPv4 netmask {mask}"
-        )));
-    }
-    Ok(prefix)
 }
 
 #[derive(Clone)]
@@ -1190,6 +1167,7 @@ fn clamp_dns_ttl(ttl: Duration) -> Duration {
 mod tests {
     use super::*;
     use openiwan::EncryptionMethod;
+    use std::net::Ipv4Addr;
 
     pub(super) fn test_session(address: Ipv4Addr) -> SessionInfo {
         SessionInfo {
@@ -1200,10 +1178,8 @@ mod tests {
             mtu: 1_400,
             address: Some(address.into()),
             gateway: None,
-            netmask: Some(Ipv4Addr::BROADCAST),
             dns_servers: Vec::new(),
-            duplicate_packets: false,
-            server_config: None,
+            segment_routing: false,
         }
     }
 
@@ -1406,15 +1382,6 @@ mod tests {
         };
         assert_eq!(length, 4);
         assert_eq!(&buffer[..4], &[0x45, 4, 5, 6]);
-    }
-
-    #[test]
-    fn validates_contiguous_ipv4_masks() {
-        assert_eq!(
-            ipv4_mask_prefix(Ipv4Addr::new(255, 255, 255, 0)).unwrap(),
-            24
-        );
-        assert!(ipv4_mask_prefix(Ipv4Addr::new(255, 0, 255, 0)).is_err());
     }
 
     #[test]

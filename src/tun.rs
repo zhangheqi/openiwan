@@ -69,14 +69,10 @@ fn interface_settings(
     requested_name: Option<&str>,
     session: &SessionInfo,
 ) -> Result<InterfaceSettings> {
-    let address = session.address.ok_or(Error::MissingTlv("IP/IP6"))?;
+    let address = session.address.ok_or(Error::MissingTlv("IP"))?;
     let name = platform_tun_name(requested_name)?;
     let netmask = match address {
-        IpAddr::V4(_) => {
-            let mask = session.netmask.unwrap_or(Ipv4Addr::BROADCAST);
-            netmask_prefix(mask)?;
-            IpAddr::V4(mask)
-        }
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::BROADCAST),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::from(u128::MAX)),
     };
     Ok(InterfaceSettings {
@@ -253,8 +249,8 @@ fn open_device(settings: &InterfaceSettings) -> Result<TunDevice> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn open_device(_settings: &InterfaceSettings) -> Result<TunDevice> {
-    Err(Error::Unsupported(
-        "native TUN creation is supported on Linux, macOS, and Windows",
+    Err(Error::Tun(
+        "native TUN creation is supported on Linux, macOS, and Windows".into(),
     ))
 }
 
@@ -590,8 +586,8 @@ fn configure_routes(device: &TunDevice, routes: &[Route]) -> Result<PlatformRout
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn configure_routes(_device: &TunDevice, _routes: &[Route]) -> Result<PlatformRoutes> {
-    Err(Error::Unsupported(
-        "route configuration is supported on Linux, macOS, and Windows",
+    Err(Error::Tun(
+        "route configuration is supported on Linux, macOS, and Windows".into(),
     ))
 }
 
@@ -656,22 +652,6 @@ fn run_command(program: &str, arguments: &[&str]) -> Result<()> {
         });
     }
     Ok(())
-}
-
-fn netmask_prefix(mask: Ipv4Addr) -> Result<u8> {
-    let bits = u32::from(mask);
-    let prefix = bits.leading_ones() as u8;
-    let expected = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    if bits != expected {
-        return Err(Error::InvalidConfig(format!(
-            "non-contiguous IPv4 netmask {mask}"
-        )));
-    }
-    Ok(prefix)
 }
 
 #[cfg(any(windows, test))]
@@ -918,7 +898,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
-    fn session(address: Option<IpAddr>, netmask: Option<Ipv4Addr>) -> SessionInfo {
+    fn session(address: Option<IpAddr>) -> SessionInfo {
         SessionInfo {
             peer: "192.0.2.1:6001".parse().unwrap(),
             session_id: 1,
@@ -927,30 +907,20 @@ mod tests {
             mtu: 1400,
             address,
             gateway: None,
-            netmask,
             dns_servers: Vec::new(),
-            duplicate_packets: false,
-            server_config: None,
+            segment_routing: false,
         }
     }
 
     #[test]
     fn derives_ipv4_and_ipv6_interface_settings() {
-        let v4 = interface_settings(
-            None,
-            &session(
-                Some("10.0.0.8".parse().unwrap()),
-                Some("255.255.252.0".parse().unwrap()),
-            ),
-        )
-        .unwrap();
-        assert_eq!(v4.netmask, "255.255.252.0".parse::<IpAddr>().unwrap());
+        let v4 = interface_settings(None, &session(Some("10.0.0.8".parse().unwrap()))).unwrap();
+        assert_eq!(v4.netmask, IpAddr::V4(Ipv4Addr::BROADCAST));
         assert_eq!(v4.mtu, 1400);
 
-        let v6 =
-            interface_settings(None, &session(Some("2001:db8::8".parse().unwrap()), None)).unwrap();
+        let v6 = interface_settings(None, &session(Some("2001:db8::8".parse().unwrap()))).unwrap();
         assert_eq!(v6.netmask, IpAddr::V6(Ipv6Addr::from(u128::MAX)));
-        assert!(interface_settings(None, &session(None, None)).is_err());
+        assert!(interface_settings(None, &session(None)).is_err());
     }
 
     #[test]
@@ -1030,15 +1000,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn rejects_noncontiguous_netmask() {
-        assert_eq!(
-            netmask_prefix("255.255.252.0".parse().unwrap()).unwrap(),
-            22
-        );
-        assert!(netmask_prefix("255.0.255.0".parse().unwrap()).is_err());
     }
 
     #[derive(Default)]

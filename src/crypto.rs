@@ -12,6 +12,7 @@ use zeroize::Zeroize;
 
 pub const KEY_LEN: usize = 16;
 pub const AES_BLOCK_LEN: usize = 16;
+pub const XOR_KEY_LEN: usize = 8;
 
 pub fn md5(data: &[u8]) -> [u8; KEY_LEN] {
     let digest = md5::Md5::digest(data);
@@ -20,21 +21,38 @@ pub fn md5(data: &[u8]) -> [u8; KEY_LEN] {
     output
 }
 
-/// Derive the data-plane session key: `MD5(username || password)`.
+/// Reproduce Java `String.getBytes(StandardCharsets.US_ASCII)`.
+///
+/// Java's default replacement for an unmappable character in US-ASCII is
+/// `?`. A Unicode scalar therefore contributes either its ASCII byte or one
+/// replacement byte.
+pub fn java_us_ascii(value: &str) -> Vec<u8> {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii() {
+                character as u8
+            } else {
+                b'?'
+            }
+        })
+        .collect()
+}
+
+/// Derive the data-plane session key: `MD5(ASCII(username || password))`.
 pub fn derive_session_key(username: &str, password: &str) -> [u8; KEY_LEN] {
-    let mut input = Vec::with_capacity(username.len() + password.len());
-    input.extend_from_slice(username.as_bytes());
-    input.extend_from_slice(password.as_bytes());
+    let mut input = java_us_ascii(username);
+    input.extend_from_slice(&java_us_ascii(password));
     let key = md5(&input);
     input.zeroize();
     key
 }
 
-/// Derive the password wrapping key: `MD5("mw" || username)`.
+/// Derive the password wrapping key: `MD5("mw" || ASCII(username))`.
 pub fn derive_password_key(username: &str) -> [u8; KEY_LEN] {
     let mut input = Vec::with_capacity(2 + username.len());
     input.extend_from_slice(b"mw");
-    input.extend_from_slice(username.as_bytes());
+    input.extend_from_slice(&java_us_ascii(username));
     let key = md5(&input);
     input.zeroize();
     key
@@ -42,14 +60,15 @@ pub fn derive_password_key(username: &str) -> [u8; KEY_LEN] {
 
 /// Encrypt the fixed-size password field used in an OPEN packet.
 ///
-/// The official 2.3.0 client copies at most the first 16 UTF-8 bytes and pads
+/// The Android 2.3.0 client copies at most the first 16 US-ASCII bytes and pads
 /// the remainder with zero bytes before one AES-128-ECB block encryption.
 pub fn encrypt_password(password: &str, username: &str) -> [u8; KEY_LEN] {
     let mut key = derive_password_key(username);
     let mut block = [0_u8; AES_BLOCK_LEN];
-    let password_bytes = password.as_bytes();
+    let mut password_bytes = java_us_ascii(password);
     let copy_len = password_bytes.len().min(AES_BLOCK_LEN);
     block[..copy_len].copy_from_slice(&password_bytes[..copy_len]);
+    password_bytes.zeroize();
 
     let cipher = Aes128::new(GenericArray::from_slice(&key));
     let mut generic_block = GenericArray::clone_from_slice(&block);
@@ -85,19 +104,17 @@ impl DataCipher for NoCipher {
 #[derive(Clone)]
 pub struct XorCipher {
     key: [u8; KEY_LEN],
-    key_bytes: u8,
 }
 
 impl XorCipher {
-    pub fn new(key: [u8; KEY_LEN], key_bytes: u8) -> Result<Self> {
-        validate_xor_key_bytes(key_bytes)?;
-        Ok(Self { key, key_bytes })
+    pub const fn new(key: [u8; KEY_LEN]) -> Self {
+        Self { key }
     }
 
     fn apply(&self, input: &[u8]) -> Vec<u8> {
         input
             .iter()
-            .zip(self.key[..usize::from(self.key_bytes)].iter().cycle())
+            .zip(self.key[..XOR_KEY_LEN].iter().cycle())
             .map(|(byte, key)| byte ^ key)
             .collect()
     }
@@ -108,7 +125,6 @@ impl std::fmt::Debug for XorCipher {
         formatter
             .debug_struct("XorCipher")
             .field("key", &"[REDACTED]")
-            .field("key_bytes", &self.key_bytes)
             .finish()
     }
 }
@@ -195,27 +211,14 @@ pub fn create_cipher(
     method: EncryptionMethod,
     username: &str,
     password: &str,
-    xor_key_bytes: u8,
 ) -> Result<Box<dyn DataCipher>> {
-    validate_xor_key_bytes(xor_key_bytes)?;
     Ok(match method {
         EncryptionMethod::None => Box::new(NoCipher),
         EncryptionMethod::Xor => Box::new(XorCipher {
             key: derive_session_key(username, password),
-            key_bytes: xor_key_bytes,
         }),
         EncryptionMethod::Aes => Box::new(AesCipher::new(derive_session_key(username, password))),
     })
-}
-
-fn validate_xor_key_bytes(key_bytes: u8) -> Result<()> {
-    if matches!(key_bytes, 8 | 16) {
-        Ok(())
-    } else {
-        Err(Error::InvalidConfig(
-            "xor_key_bytes must be either 8 or 16".into(),
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -235,11 +238,8 @@ mod tests {
 
     #[test]
     fn xor_round_trip() {
-        let cipher = XorCipher::new([0x5a; KEY_LEN], 16).unwrap();
-        assert_eq!(
-            format!("{cipher:?}"),
-            "XorCipher { key: \"[REDACTED]\", key_bytes: 16 }"
-        );
+        let cipher = XorCipher::new([0x5a; KEY_LEN]);
+        assert_eq!(format!("{cipher:?}"), "XorCipher { key: \"[REDACTED]\" }");
         let ciphertext = cipher.encrypt(b"openiwan").unwrap();
         assert_eq!(cipher.decrypt(&ciphertext).unwrap(), b"openiwan");
     }
@@ -249,7 +249,7 @@ mod tests {
         let key = [
             0, 1, 2, 3, 4, 5, 6, 7, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
         ];
-        let cipher = XorCipher::new(key, 8).unwrap();
+        let cipher = XorCipher::new(key);
         assert_eq!(
             cipher.encrypt(&[0_u8; 16]).unwrap(),
             [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]
@@ -257,9 +257,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_xor_key_widths() {
-        assert!(XorCipher::new([0_u8; KEY_LEN], 7).is_err());
-        assert!(create_cipher(EncryptionMethod::None, "alice", "secret", 17).is_err());
+    fn xor_matches_specification_vector() {
+        let cipher = XorCipher::new(derive_session_key("alice", "secret"));
+        let plain = [
+            0x45, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0xc0, 0x00,
+            0x02, 0x01, 0xc6, 0x33, 0x64, 0x02,
+        ];
+        assert_eq!(
+            cipher.encrypt(&plain).unwrap(),
+            [
+                0x81, 0xe3, 0x13, 0x07, 0x22, 0x2c, 0xf0, 0x5f, 0x84, 0xe2, 0x13, 0x13, 0xe2, 0x2c,
+                0xf2, 0x5e, 0x02, 0xd0, 0x77, 0x11
+            ]
+        );
     }
 
     #[test]
@@ -270,5 +280,27 @@ mod tests {
         let plaintext = cipher.decrypt(&ciphertext).unwrap();
         assert_eq!(&plaintext[..21], b"twenty-one byte input");
         assert!(plaintext[21..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn session_aes_matches_specification_vector() {
+        let cipher = AesCipher::new(derive_session_key("alice", "secret"));
+        let plain = [
+            0x45, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0xc0, 0x00,
+            0x02, 0x01, 0xc6, 0x33, 0x64, 0x02,
+        ];
+        assert_eq!(
+            cipher.encrypt(&plain).unwrap(),
+            [
+                0x44, 0x4d, 0x65, 0x8f, 0x5b, 0xb3, 0x0e, 0x9a, 0x09, 0x9e, 0x02, 0x95, 0xe2, 0x1f,
+                0xf1, 0x18, 0x49, 0x6f, 0x56, 0x63, 0xd9, 0x78, 0x0f, 0x85, 0x2b, 0xa4, 0xf9, 0xc6,
+                0xc7, 0x5d, 0xf2, 0x55
+            ]
+        );
+    }
+
+    #[test]
+    fn java_ascii_replaces_unmappable_characters() {
+        assert_eq!(java_us_ascii("a中🙂z"), b"a??z");
     }
 }

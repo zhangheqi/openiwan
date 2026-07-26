@@ -1,97 +1,51 @@
 # Changelog
 
-All notable changes to OpeniWAN will be documented in this file.
-
-The project follows [Semantic Versioning](https://semver.org/).
+All notable changes to OpeniWAN are documented here. The project follows
+[Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-26
+
 ### Added
 
-- Unified route-free `forward` and `managed forward` commands with required
-  URI targets: `tcp://HOST:PORT` for bidirectional raw TCP, plus
-  `http://HOST[:PORT]` and `https://HOST[:PORT]` for HTTP/1.1 reverse proxying
-  with standard default ports
+- Full Segment Routing transport: directional headers, inner and outer
+  encryption, exact two-fragment planning, offset-aware reassembly, monitor
+  handshake, counters, and peer-down timing
+- Android 2.3.0 byte-vector tests for OPEN, ping, signed close, XOR, AES, SR
+  headers, fragment words, SR outer AES, and keepalive HMAC
+- Confirmed `/config` request and dynamic response API
+- Complete recovered HTTP keepalive request/response metric graph,
+  Java-compatible URL canonicalization, HMAC headers, five-second timeouts, and
+  one retry after a failed attempt except HTTP 401
+- Exact standalone Android `SREntry` serializer model
 
 ### Changed
 
-- Renamed the default route-free forwarding Cargo feature to `forward`
-- Forward targets now require a URI scheme; bare `HOST:PORT` values and a
-  separate `--target-ip` override are not accepted
-- HTTP(S) forwarding now uses `--target`, rewrites `Host` to the fixed target
-  authority, preserves streaming messages, removes hop-by-hop headers, and
-  rewrites same-origin absolute `Location` values to relative references
-- HTTPS forwarding retains repeatable `--ca-cert` private roots, system roots,
-  SNI, and certificate verification
-- All forwarding modes retain organization DNS selection, UDP/TCP resolution,
-  TTL caching, `--dns-mode`, `--dns-server`, and `--dns-timeout-ms`;
-  `--connect-timeout-ms` covers DNS, TCP, and HTTPS TLS setup
-
-### Removed
-
-- The separate `serve` and `managed serve` commands and their `--upstream` and
-  `--upstream-ip` options; HTTP(S) proxying now uses `forward --target`
+- Made the Android 2.3.0 reverse-engineering result the protocol contract
+- Corrected stateless ping sentinels to `0xffff` and `0xffffffff`
+- Corrected XOR to repeat only the first eight session-key bytes
+- Corrected heartbeat to a 20-byte little-endian monotonic body, two-second
+  period, ten-miss limit, and 20-second response timeout
+- Corrected Java US-ASCII credential replacement, OPEN TLV order, optional
+  AUTH_VERIFY echo handling, OPEN_ACK integer widths, and OPEN_REJECT suffix
+  parsing/error mapping
+- Corrected traditional IPv6 transmission to use the same `DATA` or
+  `DATA_ENCRYPTED` choice as IPv4
+- Split legacy and SR fragment behavior, including their different ID
+  endianness and reassembly rules
+- Bumped the crate version directly to 0.3.0; compatibility with speculative
+  0.1/0.2 APIs is intentionally not retained
 
 ## [0.2.0] - 2026-07-25
 
-### Added
-
-- Windows 10/11 x86_64 and ARM64 TUN support with native IPv4/IPv6 route
-  management and rollback
-- Embedded, signed Wintun 0.14.1 binaries with verified, atomic first-use
-  extraction for `cargo install`
-- Cross-platform hidden password prompts and Windows managed-state directories
-
-### Changed
-
-- Replaced the hand-written Linux/macOS TUN implementation with `tun` 0.8.14
-- Raised the minimum supported Rust version from 1.85 to 1.88
-- Made `--tun` platform-aware: `openiwan0` on Linux/Windows and automatic
-  `utunN` allocation on macOS
-- Changed `TunDevice::open` and `RouteGuard::configure` to accept authenticated
-  session/device state directly
+See the repository tag for the historical release.
 
 ## [0.1.0] - 2026-07-25
 
-### Added
+See the repository tag for the historical release.
 
-- Traditional iWAN packet, TLV, authentication, heartbeat, and CLOSE handling
-- Compact 8-byte heartbeat responses used by compatible USTC servers
-- Configurable 8/16-byte XOR key cycling, with USTC using the 8-byte form
-- Plaintext, repeating XOR, and legacy AES-128-ECB data modes
-- IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths
-- Bounded fragment reassembly and reconnect policies
-- Linux TUN and macOS utun support
-- `ping`, `auth`, `connect`, and `decode` CLI commands
-- Static-analysis evidence and wire-protocol reference for client version 2.3.0
-- Unit tests and a synthetic local UDP authentication endpoint
-- English-first community and technical documentation
-- Simplified Chinese README translation
-- Contribution guidelines, code of conduct, and architecture guide
-- Configuration-driven `managed fetch`, `list`, `connect`, and `all` commands
-- PKCE OIDC login with state, nonce, discovery, JWKS, and ID-token validation
-- Signed controller configuration fetch and authenticated AES-GCM line-password
-  decryption
-- CIDR, IP, and one-time domain route targets on Linux and macOS
-- Route-free `serve` and `managed serve` HTTP/1.1 reverse proxy commands using
-  an in-process TCP/IP stack with HTTP and verified HTTPS upstream support
-- Fixed `--upstream-ip` connection targets that bypass VPN Fake-IP DNS while
-  retaining the configured HTTP Host and HTTPS identity
-- Automatic organization DNS through the iWAN userspace stack with provider
-  and OPENACK resolvers, CNAME support, bounded TTL caching, response
-  validation, multi-server retry, and DNS-over-TCP fallback
-- Explicit managed-provider compatibility for endpoints that omit AUTH_VERIFY
-  from OPENACK, while still rejecting mismatched echoes
-
-### Changed
-
-- Isolated deployment-specific configuration and guidance from generic code,
-  examples, and documentation
-- Require AUTH_VERIFY policy, XOR key width, and managed-provider DNS settings
-  explicitly in the current configuration schema
-- Replace the pre-release fixed-width cipher constructors with fallible APIs
-  that require an explicit 8- or 16-byte XOR key width
-
-[Unreleased]: https://github.com/zhangheqi/openiwan/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/zhangheqi/openiwan/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/zhangheqi/openiwan/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/zhangheqi/openiwan/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/zhangheqi/openiwan/tree/v0.1.0

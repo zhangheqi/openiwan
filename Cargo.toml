@@ -1,6 +1,6 @@
 [package]
 name = "openiwan"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An independently implemented iWAN client and protocol library"
@@ -38,7 +38,6 @@ path = "src/bin/openiwan.rs"
 
 [dependencies]
 aes = "0.8"
-aes-gcm = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
 bytes = { version = "1", optional = true }
 cipher = "0.4"
@@ -109,7 +108,6 @@ forward = [
     "dep:url",
 ]
 managed = [
-    "dep:aes-gcm",
     "dep:base64",
     "dep:hmac",
     "dep:jsonwebtoken",

@@ -1,24 +1,31 @@
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, SegmentRoutingConfig};
 use crate::crypto::{self, DataCipher};
-use crate::fragment::{Fragment, FragmentReassembler, trim_ip_packet};
+use crate::fragment::{Fragment, LegacyFragmentReassembler, SrFragmentReassembler, trim_ip_packet};
 use crate::protocol::{
-    self, DecodedPacket, EncryptionMethod, PacketHeader, PacketType, Tlv, TlvType,
+    self, DecodedPacket, EchoBody, EchoDelayStats, EncryptionMethod, PacketHeader, PacketType, Tlv,
+    TlvType,
+};
+use crate::sr::{
+    self, SrDecoded, SrMonitor, SrMonitorResponder, SrMonitorState, SrOuterCipher, SrSessionTuple,
 };
 use crate::{Error, Result};
-use std::collections::HashSet;
+use std::fmt;
 use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info, trace, warn};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 use zeroize::Zeroize;
 
-/// A TUN-like source and sink of complete IPv4 or IPv6 packets.
-///
-/// Implementations should use nonblocking reads so a running session can shut
-/// down promptly.
+const AUTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+const AUTH_OVERALL_TIMEOUT: Duration = Duration::from_secs(13);
+const AUTH_RETRY_DELAY: Duration = Duration::from_secs(1);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
+const HEARTBEAT_MAX_MISSES: u32 = 10;
+
 pub trait PacketDevice: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn read_packet(&self, buffer: &mut [u8]) -> std::io::Result<usize>;
@@ -34,15 +41,21 @@ pub struct SessionInfo {
     pub mtu: u16,
     pub address: Option<IpAddr>,
     pub gateway: Option<IpAddr>,
-    pub netmask: Option<Ipv4Addr>,
     pub dns_servers: Vec<IpAddr>,
-    pub duplicate_packets: bool,
-    pub server_config: Option<Vec<u8>>,
+    pub segment_routing: bool,
 }
 
 impl SessionInfo {
     pub const fn header(&self, packet_type: PacketType) -> PacketHeader {
         PacketHeader::new(packet_type, self.encryption, self.session_id, self.token)
+    }
+
+    const fn sr_tuple(&self) -> SrSessionTuple {
+        SrSessionTuple {
+            session_id: self.session_id,
+            token: self.token,
+            encryption: self.encryption,
+        }
     }
 }
 
@@ -80,7 +93,6 @@ impl Drop for Credentials {
 pub struct Client {
     config: ClientConfig,
     credentials: Credentials,
-    first_hop_link: Option<u32>,
 }
 
 impl Client {
@@ -93,30 +105,27 @@ impl Client {
             username: username.into(),
             password: password.into(),
         };
-        if credentials.username.is_empty() {
-            return Err(Error::InvalidConfig("username must not be empty".into()));
-        }
-        if credentials.password.is_empty() {
-            return Err(Error::InvalidConfig("password must not be empty".into()));
-        }
         config.validate()?;
         Ok(Self {
             config,
             credentials,
-            first_hop_link: None,
         })
     }
 
-    pub const fn with_first_hop_link(mut self, link: u32) -> Self {
-        self.first_hop_link = Some(link);
-        self
-    }
-
-    pub fn config(&self) -> &ClientConfig {
+    pub const fn config(&self) -> &ClientConfig {
         &self.config
     }
 
     pub fn authenticate(&self) -> Result<ConnectedSession> {
+        self.authenticate_with_budget(AUTH_OVERALL_TIMEOUT)
+    }
+
+    /// One-shot authentication probe retained by the APK.
+    pub fn authenticate_once(&self) -> Result<ConnectedSession> {
+        self.authenticate_with_budget(AUTH_ATTEMPT_TIMEOUT)
+    }
+
+    fn authenticate_with_budget(&self, overall_timeout: Duration) -> Result<ConnectedSession> {
         let peer = self.config.resolve_server()?;
         let bind_address = match peer {
             SocketAddr::V4(_) => "0.0.0.0:0",
@@ -124,21 +133,29 @@ impl Client {
         };
         let socket = UdpSocket::bind(bind_address)?;
         socket.connect(peer)?;
-        socket.set_read_timeout(Some(self.config.auth_timeout()))?;
-        socket.set_write_timeout(Some(self.config.auth_timeout()))?;
+        socket.set_read_timeout(Some(AUTH_ATTEMPT_TIMEOUT))?;
+        socket.set_write_timeout(Some(AUTH_ATTEMPT_TIMEOUT))?;
 
-        let nonce = random_u32()?;
+        let nonce = random_nonzero_u32()?;
+        let first_hop = self
+            .config
+            .segment_routing
+            .as_ref()
+            .and_then(|sr| sr.links.first().copied());
         let open = protocol::build_open(
             &self.credentials.username,
             &self.credentials.password,
             self.config.mtu,
             self.config.encryption,
-            self.first_hop_link,
+            first_hop,
             Some(nonce),
         )?;
 
+        let started = Instant::now();
+        let mut attempt = 0_u32;
         let mut receive_buffer = vec![0_u8; 65_535];
-        for attempt in 1..=self.config.auth_attempts {
+        loop {
+            attempt = attempt.saturating_add(1);
             debug!(attempt, peer = %peer, "sending OPEN");
             socket.send(&open)?;
             match socket.recv(&mut receive_buffer) {
@@ -146,42 +163,36 @@ impl Client {
                     let decoded = protocol::decode_packet(&receive_buffer[..length])?;
                     match decoded.header.packet_type {
                         PacketType::OpenReject => {
-                            return Err(parse_rejection(&decoded.body));
+                            return Err(parse_rejection(&decoded.body, nonce)?);
                         }
                         PacketType::OpenAck => {
-                            let info = parse_open_ack(
-                                &decoded,
-                                peer,
-                                nonce,
-                                self.config.mtu,
-                                self.config.require_auth_verify_echo,
-                            )?;
-                            if info.encryption != self.config.encryption {
-                                return Err(Error::InvalidConfig(format!(
-                                    "server selected {} but client requested {}",
-                                    info.encryption, self.config.encryption
-                                )));
-                            }
+                            let mut info = parse_open_ack(&decoded, peer, nonce, self.config.mtu)?;
+                            info.segment_routing = self.config.segment_routing.is_some();
                             socket.set_read_timeout(Some(self.config.receive_poll()))?;
-                            socket.set_write_timeout(Some(self.config.auth_timeout()))?;
+                            socket.set_write_timeout(Some(AUTH_ATTEMPT_TIMEOUT))?;
                             let cipher = crypto::create_cipher(
                                 info.encryption,
                                 &self.credentials.username,
                                 &self.credentials.password,
-                                self.config.xor_key_bytes,
                             )?;
+                            let sr_runtime = self
+                                .config
+                                .segment_routing
+                                .as_ref()
+                                .map(SrRuntime::new)
+                                .transpose()?;
                             info!(
                                 peer = %peer,
                                 session_id = info.session_id,
                                 encryption = %info.encryption,
+                                segment_routing = info.segment_routing,
                                 "authentication succeeded"
                             );
                             return Ok(ConnectedSession {
                                 socket: Arc::new(socket),
                                 info,
                                 cipher: Arc::from(cipher),
-                                heartbeat_interval: self.config.heartbeat_interval(),
-                                heartbeat_timeout: self.config.heartbeat_timeout(),
+                                sr: sr_runtime.map(Arc::new),
                                 running: Arc::new(AtomicBool::new(true)),
                                 close_sent: AtomicBool::new(false),
                             });
@@ -198,12 +209,16 @@ impl Client {
                 }
                 Err(error) => return Err(Error::Io(error)),
             }
+
+            if overall_timeout <= AUTH_ATTEMPT_TIMEOUT
+                || started.elapsed().saturating_add(AUTH_RETRY_DELAY) >= overall_timeout
+            {
+                return Err(Error::Timeout("authentication"));
+            }
+            thread::sleep(AUTH_RETRY_DELAY);
         }
-        Err(Error::Timeout("authentication"))
     }
 
-    /// Authenticate and run sessions until a clean local/server shutdown or
-    /// the configured reconnection budget is exhausted.
     pub fn run_reconnecting(
         &self,
         device: Arc<dyn PacketDevice>,
@@ -212,13 +227,6 @@ impl Client {
         self.run_reconnecting_inner(None, device, shutdown)
     }
 
-    /// Run an already-authenticated session, then reconnect on transient
-    /// failures.
-    ///
-    /// This variant is intended for native TUN users that need the first
-    /// [`SessionInfo`] to configure the interface. Reconnected sessions must
-    /// retain the original address, gateway, netmask, and MTU; otherwise the
-    /// method stops instead of continuing with stale interface state.
     pub fn run_reconnecting_from(
         &self,
         initial_session: ConnectedSession,
@@ -251,32 +259,26 @@ impl Client {
                         ensure_same_tun_assignment(expected, session.info())?;
                     }
                     let started = Instant::now();
-                    let outcome = session.run(Arc::clone(&device), Arc::clone(&shutdown));
-                    match outcome {
-                        Ok(SessionEnd::LocalShutdown | SessionEnd::ServerClose) => return outcome,
-                        Ok(SessionEnd::HeartbeatTimeout | SessionEnd::TransportFailure)
-                        | Err(_) => {
-                            if let Err(error) = &outcome {
-                                warn!(%error, "session failed");
+                    match session.run(Arc::clone(&device), Arc::clone(&shutdown)) {
+                        Ok(SessionEnd::LocalShutdown) => return Ok(SessionEnd::LocalShutdown),
+                        Ok(SessionEnd::ServerClose) => return Ok(SessionEnd::ServerClose),
+                        Ok(end) => {
+                            if started.elapsed() >= HEARTBEAT_TIMEOUT {
+                                retry = 0;
+                                delay =
+                                    Duration::from_millis(self.config.reconnect.initial_delay_ms);
                             }
+                            debug!(?end, "session ended; reconnecting");
                         }
-                    }
-                    if started.elapsed() >= self.config.heartbeat_timeout() {
-                        retry = 0;
-                        delay = Duration::from_millis(self.config.reconnect.initial_delay_ms);
+                        Err(error) => warn!(%error, "session failed"),
                     }
                 }
-                Err(
-                    error @ (Error::AuthenticationRejected { .. }
-                    | Error::AuthenticationVerifyMismatch),
-                ) => return Err(error),
                 Err(error) => warn!(%error, "connection attempt failed"),
             }
-
-            retry += 1;
-            if retry > self.config.reconnect.attempts {
+            if retry >= self.config.reconnect.attempts {
                 return Err(Error::Timeout("reconnection budget exhausted"));
             }
+            retry += 1;
             wait_interruptibly(delay, &shutdown);
             delay = delay
                 .saturating_mul(2)
@@ -288,32 +290,61 @@ impl Client {
 fn ensure_same_tun_assignment(expected: &SessionInfo, actual: &SessionInfo) -> Result<()> {
     if expected.address != actual.address
         || expected.gateway != actual.gateway
-        || expected.netmask != actual.netmask
         || expected.mtu != actual.mtu
+        || expected.segment_routing != actual.segment_routing
     {
         return Err(Error::InvalidConfig(format!(
             "server changed the tunnel assignment during reconnection: \
-             expected address={:?}, gateway={:?}, netmask={:?}, mtu={}; \
-             received address={:?}, gateway={:?}, netmask={:?}, mtu={}",
+             expected address={:?}, gateway={:?}, mtu={}, sr={}; \
+             received address={:?}, gateway={:?}, mtu={}, sr={}",
             expected.address,
             expected.gateway,
-            expected.netmask,
             expected.mtu,
+            expected.segment_routing,
             actual.address,
             actual.gateway,
-            actual.netmask,
-            actual.mtu
+            actual.mtu,
+            actual.segment_routing,
         )));
     }
     Ok(())
+}
+
+struct SrRuntime {
+    config: SegmentRoutingConfig,
+    outer_cipher: SrOuterCipher,
+    fragment_id: AtomicU32,
+}
+
+impl std::fmt::Debug for SrRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SrRuntime")
+            .field("config", &self.config)
+            .field("outer_cipher", &self.outer_cipher)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SrRuntime {
+    fn new(config: &SegmentRoutingConfig) -> Result<Self> {
+        Ok(Self {
+            config: config.clone(),
+            outer_cipher: SrOuterCipher::new(config.encrypt_algo, &config.encrypt_key)?,
+            fragment_id: AtomicU32::new(random_nonzero_u32()?),
+        })
+    }
+
+    fn next_fragment_id(&self) -> u32 {
+        self.fragment_id.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 pub struct ConnectedSession {
     socket: Arc<UdpSocket>,
     info: SessionInfo,
     cipher: Arc<dyn DataCipher>,
-    heartbeat_interval: Duration,
-    heartbeat_timeout: Duration,
+    sr: Option<Arc<SrRuntime>>,
     running: Arc<AtomicBool>,
     close_sent: AtomicBool,
 }
@@ -323,13 +354,10 @@ impl fmt::Debug for ConnectedSession {
         formatter
             .debug_struct("ConnectedSession")
             .field("info", &self.info)
-            .field("heartbeat_interval", &self.heartbeat_interval)
-            .field("heartbeat_timeout", &self.heartbeat_timeout)
+            .field("segment_routing", &self.sr.is_some())
             .finish_non_exhaustive()
     }
 }
-
-use std::fmt;
 
 impl ConnectedSession {
     pub const fn info(&self) -> &SessionInfo {
@@ -340,7 +368,6 @@ impl ConnectedSession {
         self.running.store(false, Ordering::Release);
     }
 
-    /// Send CLOSE once and consume the authenticated session.
     pub fn close(self) -> Result<()> {
         self.running.store(false, Ordering::Release);
         self.send_close_once()
@@ -353,44 +380,88 @@ impl ConnectedSession {
     ) -> Result<SessionEnd> {
         let running = Arc::clone(&self.running);
         let (failure_tx, failure_rx) = mpsc::channel::<WorkerFailure>();
-        let last_echo = Arc::new(Mutex::new(Instant::now()));
+        let monotonic_origin = Instant::now();
+        let heartbeat = Arc::new(Mutex::new(HeartbeatTracker::new()));
+        let sr_monitor = self
+            .sr
+            .as_ref()
+            .map(|runtime| Arc::new(Mutex::new(SrMonitor::new(runtime.config.monitor_sr_id()))));
 
         let sender = spawn_packet_sender(
             Arc::clone(&self.socket),
             Arc::clone(&device),
             Arc::clone(&self.cipher),
             self.info.clone(),
+            self.sr.clone(),
             Arc::clone(&running),
             failure_tx.clone(),
         )?;
-        let heartbeat = match spawn_heartbeat(
-            Arc::clone(&self.socket),
-            self.info.clone(),
-            Arc::clone(&running),
-            Arc::clone(&last_echo),
-            self.heartbeat_interval,
-            self.heartbeat_timeout,
-            failure_tx,
-        ) {
-            Ok(handle) => handle,
-            Err(error) => {
-                running.store(false, Ordering::Release);
-                let _ = sender.join();
-                return Err(error);
-            }
-        };
+        let heartbeat_worker =
+            if let (Some(runtime), Some(monitor)) = (self.sr.as_ref(), sr_monitor.as_ref()) {
+                if runtime.config.keepalive {
+                    Some(spawn_sr_monitor(
+                        Arc::clone(&self.socket),
+                        self.info.clone(),
+                        Arc::clone(runtime),
+                        Arc::clone(monitor),
+                        Arc::clone(&running),
+                        monotonic_origin,
+                        failure_tx.clone(),
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                Some(spawn_traditional_heartbeat(
+                    Arc::clone(&self.socket),
+                    self.info.clone(),
+                    Arc::clone(&heartbeat),
+                    Arc::clone(&running),
+                    monotonic_origin,
+                    failure_tx,
+                )?)
+            };
 
-        let mut reassemblers = [
-            FragmentReassembler::default(),
-            FragmentReassembler::default(),
+        let outcome = self.receive_loop(
+            device.as_ref(),
+            external_shutdown.as_ref(),
+            &failure_rx,
+            &heartbeat,
+            sr_monitor.as_deref(),
+            monotonic_origin,
+        );
+
+        running.store(false, Ordering::Release);
+        let _ = self.send_close_once();
+        let _ = sender.join();
+        if let Some(worker) = heartbeat_worker {
+            let _ = worker.join();
+        }
+        Ok(outcome)
+    }
+
+    fn receive_loop(
+        &self,
+        device: &dyn PacketDevice,
+        external_shutdown: &AtomicBool,
+        failure_rx: &mpsc::Receiver<WorkerFailure>,
+        heartbeat: &Mutex<HeartbeatTracker>,
+        sr_monitor: Option<&Mutex<SrMonitor>>,
+        monotonic_origin: Instant,
+    ) -> SessionEnd {
+        let mut legacy_reassemblers = [
+            LegacyFragmentReassembler::default(),
+            LegacyFragmentReassembler::default(),
         ];
+        let mut sr_reassembler = SrFragmentReassembler::default();
+        let mut sr_responder = SrMonitorResponder::default();
         let mut buffer = vec![0_u8; 65_535];
-        let outcome = 'receive: loop {
-            if external_shutdown.load(Ordering::Acquire) || !running.load(Ordering::Acquire) {
-                break 'receive SessionEnd::LocalShutdown;
+        loop {
+            if external_shutdown.load(Ordering::Acquire) || !self.running.load(Ordering::Acquire) {
+                return SessionEnd::LocalShutdown;
             }
             if let Ok(failure) = failure_rx.try_recv() {
-                break 'receive match failure {
+                return match failure {
                     WorkerFailure::HeartbeatTimeout => SessionEnd::HeartbeatTimeout,
                     WorkerFailure::Transport(error) => {
                         warn!(%error, "worker transport failure");
@@ -399,148 +470,194 @@ impl ConnectedSession {
                 };
             }
 
-            match self.socket.recv(&mut buffer) {
-                Ok(length) => {
-                    trace!(length, "received UDP datagram");
-                    let decoded = match protocol::decode_packet(&buffer[..length]) {
-                        Ok(packet) => packet,
-                        Err(error) => {
-                            warn!(%error, "dropping malformed datagram");
-                            continue;
-                        }
-                    };
-                    if decoded.header.session_id != self.info.session_id
-                        || decoded.header.token != self.info.token
-                    {
-                        warn!(
-                            session_id = decoded.header.session_id,
-                            token = decoded.header.token,
-                            "dropping packet from a different session"
-                        );
-                        continue;
-                    }
-                    trace_session_packet(&decoded);
-                    match self.process_packet(
-                        &decoded,
-                        device.as_ref(),
-                        &last_echo,
-                        &mut reassemblers,
-                    ) {
-                        Ok(PacketAction::Continue) => {}
-                        Ok(PacketAction::ServerClose) => {
-                            break 'receive SessionEnd::ServerClose;
-                        }
-                        Err(Error::Io(error)) => {
-                            warn!(%error, "packet delivery failed");
-                            break 'receive SessionEnd::TransportFailure;
-                        }
-                        Err(error) => {
-                            warn_invalid_session_datagram(&decoded, &error);
-                        }
-                    }
-                }
+            let length = match self.socket.recv(&mut buffer) {
+                Ok(length) => length,
                 Err(error)
-                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    continue;
+                }
                 Err(error) => {
                     warn!(%error, "UDP receive failed");
-                    break 'receive SessionEnd::TransportFailure;
+                    return SessionEnd::TransportFailure;
                 }
+            };
+            let datagram = &buffer[..length];
+            let action = if datagram.first().copied() == Some(PacketType::SegmentRouting as u8) {
+                self.process_sr_packet(
+                    datagram,
+                    device,
+                    &mut sr_reassembler,
+                    &mut sr_responder,
+                    sr_monitor,
+                    monotonic_origin,
+                )
+            } else {
+                let decoded = match protocol::decode_packet(datagram) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        warn!(%error, "dropping malformed datagram");
+                        continue;
+                    }
+                };
+                if decoded.header.session_id != self.info.session_id
+                    || decoded.header.token != self.info.token
+                {
+                    warn!(
+                        session_id = decoded.header.session_id,
+                        token = decoded.header.token,
+                        "dropping packet from a different session"
+                    );
+                    continue;
+                }
+                self.process_standard_packet(
+                    &decoded,
+                    device,
+                    heartbeat,
+                    &mut legacy_reassemblers,
+                    monotonic_origin,
+                )
+            };
+            match action {
+                Ok(PacketAction::Continue) => {}
+                Ok(PacketAction::ServerClose) => return SessionEnd::ServerClose,
+                Err(Error::Io(error)) => {
+                    warn!(%error, "packet delivery failed");
+                    return SessionEnd::TransportFailure;
+                }
+                Err(error) => warn!(%error, "dropping invalid session datagram"),
             }
-        };
-
-        running.store(false, Ordering::Release);
-        let _ = self.send_close_once();
-        let _ = sender.join();
-        let _ = heartbeat.join();
-        Ok(outcome)
+        }
     }
 
-    fn process_packet(
+    fn process_standard_packet(
         &self,
         packet: &DecodedPacket,
         device: &dyn PacketDevice,
-        last_echo: &Mutex<Instant>,
-        reassemblers: &mut [FragmentReassembler; 2],
+        heartbeat: &Mutex<HeartbeatTracker>,
+        reassemblers: &mut [LegacyFragmentReassembler; 2],
+        monotonic_origin: Instant,
     ) -> Result<PacketAction> {
         match packet.header.packet_type {
             PacketType::Data | PacketType::DataDup => {
-                write_inner_packet(device, validate_inner_packet(&packet.body, Some(4))?)?;
+                require_encryption(packet.header, EncryptionMethod::None)?;
+                write_inner_packet(device, validate_inner_packet(&packet.body, None)?)?;
             }
-            PacketType::Data6 => {
+            PacketType::DataIpv6 => {
+                require_encryption(packet.header, EncryptionMethod::None)?;
                 write_inner_packet(device, validate_inner_packet(&packet.body, Some(6))?)?;
             }
-            PacketType::DataEncrypt | PacketType::DataEncDup => {
-                if packet.header.encryption != self.cipher.method() {
-                    return Err(Error::InvalidConfig(format!(
-                        "packet encryption {} does not match session {}",
-                        packet.header.encryption,
-                        self.cipher.method()
-                    )));
-                }
+            PacketType::DataEncrypted | PacketType::DataEncryptedDup => {
+                require_encryption(packet.header, self.cipher.method())?;
                 let plaintext = self.cipher.decrypt(&packet.body)?;
-                let inner = validate_inner_packet(&plaintext, None)?;
-                write_inner_packet(device, inner)?;
+                write_inner_packet(device, validate_inner_packet(&plaintext, None)?)?;
             }
-            packet_type @ (PacketType::IpFrag | PacketType::IpFrag6) => {
-                let fragment = Fragment::parse(&packet.body)?;
-                let (reassembler, expected_version) = if packet_type == PacketType::IpFrag {
+            packet_type @ (PacketType::IpFragment | PacketType::IpFragmentIpv6) => {
+                require_encryption(packet.header, EncryptionMethod::None)?;
+                let fragment = Fragment::parse_traditional(&packet.body)?;
+                let (reassembler, expected_version) = if packet_type == PacketType::IpFragment {
                     (&mut reassemblers[0], 4)
                 } else {
                     (&mut reassemblers[1], 6)
                 };
                 if let Some(inner) = reassembler.insert(fragment, Instant::now())? {
-                    let inner = validate_inner_packet(&inner, Some(expected_version))?;
-                    write_inner_packet(device, inner)?;
+                    write_inner_packet(
+                        device,
+                        validate_inner_packet(&inner, Some(expected_version))?,
+                    )?;
                 }
             }
             PacketType::EchoResponse => {
-                let response = protocol::parse_echo_response(&packet.body)?;
-                *last_echo
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
-                if let Some(stats) = response.delay_stats {
-                    debug!(
-                        sent_at = response.timestamp_micros,
-                        current_delay_micros = stats.current_micros,
-                        min_delay_micros = stats.minimum_micros,
-                        max_delay_micros = stats.maximum_micros,
-                        "heartbeat response"
-                    );
-                } else {
-                    debug!(
-                        sent_at = response.timestamp_micros,
-                        "compact heartbeat response"
-                    );
+                let response = EchoBody::decode(&packet.body)?;
+                let now_micros = monotonic_micros(monotonic_origin);
+                if response.tick_micros > now_micros {
+                    return Err(Error::InvalidConfig(
+                        "heartbeat echoed a future monotonic tick".into(),
+                    ));
                 }
+                let rtt = u32::try_from(now_micros - response.tick_micros).unwrap_or(u32::MAX);
+                heartbeat
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .observe(rtt);
             }
             PacketType::EchoRequest => {
-                if packet.body.len() < 8 {
-                    return Err(Error::PacketTooShort {
-                        minimum: 8,
-                        actual: packet.body.len(),
-                    });
-                }
-                let timestamp =
-                    u64::from_be_bytes(packet.body[..8].try_into().expect("length checked"));
-                let response = protocol::build_echo_response(packet.header, timestamp, 0, 0, 0);
+                let response = protocol::build_echo_response(packet.header, &packet.body)?;
                 self.socket.send(&response)?;
             }
             PacketType::Close => return Ok(PacketAction::ServerClose),
-            PacketType::PingRequest => {
-                let response = protocol::encode_control(
-                    PacketHeader::new(
-                        PacketType::PingResponse,
-                        packet.header.encryption,
-                        packet.header.session_id,
-                        packet.header.token,
-                    ),
-                    &[],
-                );
-                self.socket.send(&response)?;
-            }
-            PacketType::PingResponse => {}
-            PacketType::Open | PacketType::OpenAck | PacketType::OpenReject | PacketType::SegRt => {
+            PacketType::PingRequest
+            | PacketType::PingResponse
+            | PacketType::Open
+            | PacketType::OpenAck
+            | PacketType::OpenReject
+            | PacketType::SegmentRouting => {
                 debug!(packet_type = %packet.header.packet_type, "ignoring unexpected packet");
+            }
+        }
+        Ok(PacketAction::Continue)
+    }
+
+    fn process_sr_packet(
+        &self,
+        datagram: &[u8],
+        device: &dyn PacketDevice,
+        reassembler: &mut SrFragmentReassembler,
+        responder: &mut SrMonitorResponder,
+        monitor: Option<&Mutex<SrMonitor>>,
+        monotonic_origin: Instant,
+    ) -> Result<PacketAction> {
+        let runtime = self.sr.as_ref().ok_or(Error::InvalidSegmentRouting(
+            "received SR packet in traditional mode",
+        ))?;
+        match sr::decode_datagram(
+            datagram,
+            &runtime.config.links,
+            self.info.sr_tuple(),
+            self.cipher.as_ref(),
+            &runtime.outer_cipher,
+        )? {
+            SrDecoded::Data(packet) => write_inner_packet(device, &packet)?,
+            SrDecoded::Fragment {
+                packet_type,
+                fragment,
+            } => {
+                if let Some(packet) =
+                    sr::insert_fragment(reassembler, packet_type, fragment, Instant::now())?
+                {
+                    write_inner_packet(device, &packet)?;
+                }
+            }
+            SrDecoded::EchoRequest(request) => {
+                if request.sr_id != runtime.config.monitor_sr_id() {
+                    return Err(Error::InvalidSegmentRouting(
+                        "SR monitor request has the wrong SR ID",
+                    ));
+                }
+                if let Some(response) = responder.respond(request) {
+                    self.socket.send(&sr::encode_monitor_datagram(
+                        PacketType::EchoResponse,
+                        response,
+                        &runtime.config.links,
+                        self.info.sr_tuple(),
+                    )?)?;
+                }
+            }
+            SrDecoded::EchoResponse(response) => {
+                let monitor = monitor.ok_or(Error::InvalidSegmentRouting(
+                    "received SR monitor response while monitoring is disabled",
+                ))?;
+                let now_micros = monotonic_micros(monotonic_origin);
+                if response.tick_micros > now_micros {
+                    return Err(Error::InvalidSegmentRouting(
+                        "SR response echoed a future tick",
+                    ));
+                }
+                let rtt = u32::try_from(now_micros - response.tick_micros).unwrap_or(u32::MAX);
+                monitor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .accept_response(response, Instant::now(), rtt)?;
             }
         }
         Ok(PacketAction::Continue)
@@ -574,35 +691,19 @@ enum WorkerFailure {
     Transport(std::io::Error),
 }
 
-fn warn_invalid_session_datagram(packet: &DecodedPacket, error: &Error) {
-    warn!(
-        packet_type = %packet.header.packet_type,
-        body_length = packet.body.len(),
-        %error,
-        "dropping invalid session datagram"
-    );
-}
-
-fn trace_session_packet(packet: &DecodedPacket) {
-    trace!(
-        packet_type = %packet.header.packet_type,
-        body_length = packet.body.len(),
-        "received session packet"
-    );
-}
-
 fn spawn_packet_sender(
     socket: Arc<UdpSocket>,
     device: Arc<dyn PacketDevice>,
     cipher: Arc<dyn DataCipher>,
     info: SessionInfo,
+    sr_runtime: Option<Arc<SrRuntime>>,
     running: Arc<AtomicBool>,
     failures: mpsc::Sender<WorkerFailure>,
 ) -> Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("openiwan-packet-sender".into())
         .spawn(move || {
-            let mut buffer = vec![0_u8; usize::from(info.mtu).max(2_048) + 64];
+            let mut buffer = vec![0_u8; usize::from(info.mtu).max(2_048) * 2 + 64];
             while running.load(Ordering::Acquire) {
                 let length = match device.read_packet(&mut buffer) {
                     Ok(0) => continue,
@@ -618,48 +719,37 @@ fn spawn_packet_sender(
                     }
                 };
                 let inner = match validate_inner_packet(&buffer[..length], None) {
-                    Ok(packet) if packet.len() <= usize::from(info.mtu) => packet,
-                    Ok(packet) => {
-                        warn!(
-                            length = packet.len(),
-                            mtu = info.mtu,
-                            "dropping oversized TUN packet"
-                        );
-                        continue;
-                    }
+                    Ok(packet) => packet,
                     Err(error) => {
                         warn!(%error, "dropping malformed TUN packet");
                         continue;
                     }
                 };
-                let (packet_type, payload) = match info.encryption {
-                    EncryptionMethod::None => {
-                        let packet_type = if inner.first().is_some_and(|byte| byte >> 4 == 6) {
-                            PacketType::Data6
-                        } else {
-                            PacketType::Data
-                        };
-                        (packet_type, inner.to_vec())
-                    }
-                    EncryptionMethod::Xor | EncryptionMethod::Aes => match cipher.encrypt(inner) {
-                        Ok(payload) => (PacketType::DataEncrypt, payload),
-                        Err(error) => {
-                            warn!(%error, "data encryption failed");
-                            continue;
-                        }
-                    },
+
+                let datagrams = if let Some(runtime) = &sr_runtime {
+                    sr::encode_data(
+                        inner,
+                        usize::from(info.mtu),
+                        runtime.next_fragment_id(),
+                        &runtime.config.links,
+                        info.sr_tuple(),
+                        cipher.as_ref(),
+                        &runtime.outer_cipher,
+                    )
+                } else {
+                    encode_traditional_data(inner, &info, cipher.as_ref())
                 };
-                let datagram = protocol::encode_data(info.header(packet_type), &payload);
-                match socket.send(&datagram) {
-                    Ok(length) => trace!(
-                        packet_type = %packet_type,
-                        inner_length = inner.len(),
-                        datagram_length = length,
-                        "sent TUN packet"
-                    ),
+                let datagrams = match datagrams {
+                    Ok(datagrams) => datagrams,
                     Err(error) => {
+                        warn!(%error, "cannot encapsulate outbound packet");
+                        continue;
+                    }
+                };
+                for datagram in datagrams {
+                    if let Err(error) = socket.send(&datagram) {
                         let _ = failures.send(WorkerFailure::Transport(error));
-                        break;
+                        return;
                     }
                 }
             }
@@ -667,41 +757,165 @@ fn spawn_packet_sender(
         .map_err(Error::Io)
 }
 
-fn spawn_heartbeat(
+fn encode_traditional_data(
+    packet: &[u8],
+    info: &SessionInfo,
+    cipher: &dyn DataCipher,
+) -> Result<Vec<Vec<u8>>> {
+    if packet.len() > usize::from(info.mtu) {
+        return Err(Error::FragmentTooLarge);
+    }
+    let (packet_type, encryption, payload) = match info.encryption {
+        EncryptionMethod::None => (PacketType::Data, EncryptionMethod::None, packet.to_vec()),
+        EncryptionMethod::Xor | EncryptionMethod::Aes => (
+            PacketType::DataEncrypted,
+            info.encryption,
+            cipher.encrypt(packet)?,
+        ),
+    };
+    Ok(vec![protocol::encode_data(
+        PacketHeader::new(packet_type, encryption, info.session_id, info.token),
+        &payload,
+    )])
+}
+
+#[derive(Debug)]
+struct HeartbeatTracker {
+    last_response: Instant,
+    missed: u32,
+    current: u32,
+    minimum: u32,
+    maximum: u32,
+}
+
+impl HeartbeatTracker {
+    fn new() -> Self {
+        Self {
+            last_response: Instant::now(),
+            missed: 0,
+            current: 0,
+            minimum: 0,
+            maximum: 0,
+        }
+    }
+
+    fn request_body(&mut self, tick_micros: u64) -> EchoBody {
+        self.missed = self.missed.saturating_add(1);
+        EchoBody::new(
+            tick_micros,
+            EchoDelayStats {
+                current_micros: self.current,
+                minimum_micros: self.minimum,
+                maximum_micros: self.maximum,
+            },
+        )
+    }
+
+    fn observe(&mut self, rtt: u32) {
+        self.last_response = Instant::now();
+        self.missed = 0;
+        self.current = rtt;
+        self.minimum = if self.minimum == 0 {
+            rtt
+        } else {
+            self.minimum.min(rtt)
+        };
+        self.maximum = self.maximum.max(rtt);
+    }
+
+    fn timed_out(&self) -> bool {
+        self.missed >= HEARTBEAT_MAX_MISSES || self.last_response.elapsed() > HEARTBEAT_TIMEOUT
+    }
+}
+
+fn spawn_traditional_heartbeat(
     socket: Arc<UdpSocket>,
     info: SessionInfo,
+    tracker: Arc<Mutex<HeartbeatTracker>>,
     running: Arc<AtomicBool>,
-    last_echo: Arc<Mutex<Instant>>,
-    interval: Duration,
-    timeout: Duration,
+    monotonic_origin: Instant,
     failures: mpsc::Sender<WorkerFailure>,
 ) -> Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("openiwan-heartbeat".into())
         .spawn(move || {
             while running.load(Ordering::Acquire) {
-                wait_interruptibly(interval, &running);
+                wait_interruptibly(HEARTBEAT_INTERVAL, &running);
                 if !running.load(Ordering::Acquire) {
                     break;
                 }
-                let elapsed = last_echo
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .elapsed();
-                if elapsed > timeout {
-                    let _ = failures.send(WorkerFailure::HeartbeatTimeout);
-                    running.store(false, Ordering::Release);
-                    break;
-                }
-                let packet = protocol::build_echo_request(
-                    info.header(PacketType::EchoRequest),
-                    unix_time_micros(),
-                );
+                let echo = {
+                    let mut tracker = tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if tracker.timed_out() {
+                        let _ = failures.send(WorkerFailure::HeartbeatTimeout);
+                        running.store(false, Ordering::Release);
+                        break;
+                    }
+                    tracker.request_body(monotonic_micros(monotonic_origin))
+                };
+                let packet =
+                    protocol::build_echo_request(info.header(PacketType::EchoRequest), echo);
                 if let Err(error) = socket.send(&packet) {
                     let _ = failures.send(WorkerFailure::Transport(error));
                     running.store(false, Ordering::Release);
                     break;
                 }
+            }
+        })
+        .map_err(Error::Io)
+}
+
+fn spawn_sr_monitor(
+    socket: Arc<UdpSocket>,
+    info: SessionInfo,
+    runtime: Arc<SrRuntime>,
+    monitor: Arc<Mutex<SrMonitor>>,
+    running: Arc<AtomicBool>,
+    monotonic_origin: Instant,
+    failures: mpsc::Sender<WorkerFailure>,
+) -> Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("openiwan-sr-monitor".into())
+        .spawn(move || {
+            let started = Instant::now();
+            while running.load(Ordering::Acquire) {
+                let body = {
+                    let mut monitor = monitor
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let state = monitor.update_peer_state(Instant::now());
+                    if state == SrMonitorState::PeerDown
+                        || (state == SrMonitorState::Probing
+                            && started.elapsed() > sr::SR_PEER_DOWN_AFTER)
+                    {
+                        let _ = failures.send(WorkerFailure::HeartbeatTimeout);
+                        running.store(false, Ordering::Release);
+                        break;
+                    }
+                    monitor.request(monotonic_micros(monotonic_origin))
+                };
+                let packet = match sr::encode_monitor_datagram(
+                    PacketType::EchoRequest,
+                    body,
+                    &runtime.config.links,
+                    info.sr_tuple(),
+                ) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        warn!(%error, "cannot encode SR monitor request");
+                        let _ = failures.send(WorkerFailure::HeartbeatTimeout);
+                        running.store(false, Ordering::Release);
+                        break;
+                    }
+                };
+                if let Err(error) = socket.send(&packet) {
+                    let _ = failures.send(WorkerFailure::Transport(error));
+                    running.store(false, Ordering::Release);
+                    break;
+                }
+                wait_interruptibly(sr::SR_MONITOR_PERIOD, &running);
             }
         })
         .map_err(Error::Io)
@@ -730,127 +944,145 @@ fn validate_inner_packet(packet: &[u8], expected_version: Option<u8>) -> Result<
     Ok(packet)
 }
 
+fn require_encryption(header: PacketHeader, expected: EncryptionMethod) -> Result<()> {
+    if header.encryption != expected {
+        return Err(Error::InvalidConfig(format!(
+            "packet encryption {} does not match expected {expected}",
+            header.encryption
+        )));
+    }
+    Ok(())
+}
+
 fn parse_open_ack(
     packet: &DecodedPacket,
     peer: SocketAddr,
     expected_nonce: u32,
     requested_mtu: u16,
-    require_auth_verify_echo: bool,
 ) -> Result<SessionInfo> {
-    if packet.header.session_id == 0 {
-        return Err(Error::InvalidConfig(
-            "OPENACK returned a zero session ID".into(),
-        ));
-    }
     let attributes = Tlv::parse_all(&packet.body)?;
-    if let Some(attribute) = protocol::find_tlv(&attributes, TlvType::AuthVerify) {
-        if attribute.as_u32()? != expected_nonce {
-            return Err(Error::AuthenticationVerifyMismatch);
-        }
-    } else if require_auth_verify_echo {
-        return Err(Error::MissingTlv("AUTH_VERIFY"));
-    } else {
-        debug!("OPENACK omitted optional AUTH_VERIFY echo");
-    }
-    if let Some(attribute) = protocol::find_tlv(&attributes, TlvType::Encrypt) {
-        let advertised = EncryptionMethod::try_from(attribute.as_u8()?)?;
-        if advertised != packet.header.encryption {
-            return Err(Error::InvalidConfig(format!(
-                "OPENACK encryption TLV {advertised} does not match header {}",
-                packet.header.encryption
-            )));
-        }
+    if let Some(attribute) = protocol::find_tlv(&attributes, TlvType::AuthVerify)
+        && attribute.first_u32()? != expected_nonce
+    {
+        return Err(Error::AuthenticationVerifyMismatch);
     }
 
-    let mtu = protocol::find_tlv(&attributes, TlvType::Mtu)
-        .map(Tlv::as_u16)
-        .transpose()?
-        .filter(|mtu| (576..=9_000).contains(mtu))
-        .unwrap_or(requested_mtu);
-    let address = parse_address(
-        protocol::find_tlv(&attributes, TlvType::Ip),
-        protocol::find_tlv(&attributes, TlvType::Ip6),
-    )?;
-    let gateway = parse_address(
-        protocol::find_tlv(&attributes, TlvType::Gateway),
-        protocol::find_tlv(&attributes, TlvType::Gateway6),
-    )?;
-    let netmask = protocol::find_tlv(&attributes, TlvType::Netmask)
-        .map(Tlv::as_ipv4)
-        .transpose()?;
-
+    let mut encryption = packet.header.encryption;
+    let mut mtu = requested_mtu;
+    let mut address = None;
+    let mut gateway = None;
     let mut dns_servers = Vec::new();
-    if let Some(dns) = protocol::find_tlv(&attributes, TlvType::Dns) {
-        if dns.value.len() % 4 != 0 {
-            return Err(Error::InvalidTlvValue(TlvType::Dns.name()));
+    for attribute in &attributes {
+        match attribute.kind {
+            TlvType::Mtu => {
+                mtu = attribute
+                    .as_integer()
+                    .ok()
+                    .and_then(|value| u16::try_from(value).ok())
+                    .filter(|value| (576..=9_000).contains(value))
+                    .unwrap_or(requested_mtu);
+            }
+            TlvType::Ip => {
+                if let Ok(value) = attribute.first_ipv4() {
+                    address = Some(IpAddr::V4(value));
+                }
+            }
+            TlvType::Dns => {
+                if let Ok(value) = attribute.first_ipv4() {
+                    dns_servers = vec![IpAddr::V4(value)];
+                }
+            }
+            TlvType::Gateway => {
+                if let Ok(value) = attribute.first_ipv4() {
+                    gateway = Some(IpAddr::V4(value));
+                }
+            }
+            TlvType::Encrypt => {
+                encryption = match attribute.as_integer() {
+                    Ok(1) => EncryptionMethod::Xor,
+                    Ok(2) => EncryptionMethod::Aes,
+                    _ => EncryptionMethod::None,
+                };
+            }
+            _ => {}
         }
-        dns_servers.extend(
-            dns.value
-                .chunks_exact(4)
-                .map(|bytes| IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))),
-        );
     }
-    if let Some(dns6) = protocol::find_tlv(&attributes, TlvType::Dns6) {
-        if dns6.value.len() % 16 != 0 {
-            return Err(Error::InvalidTlvValue(TlvType::Dns6.name()));
-        }
-        for bytes in dns6.value.chunks_exact(16) {
-            let octets: [u8; 16] = bytes.try_into().expect("chunk length is 16");
-            dns_servers.push(IpAddr::V6(Ipv6Addr::from(octets)));
-        }
-    }
-    dns_servers.retain(|address| !address.is_unspecified() && !address.is_multicast());
-    let mut seen_dns_servers = HashSet::new();
-    dns_servers.retain(|address| seen_dns_servers.insert(*address));
 
     Ok(SessionInfo {
         peer,
         session_id: packet.header.session_id,
         token: packet.header.token,
-        encryption: packet.header.encryption,
+        encryption,
         mtu,
         address,
         gateway,
-        netmask,
         dns_servers,
-        duplicate_packets: protocol::find_tlv(&attributes, TlvType::DupPacket)
-            .map(Tlv::as_u8)
-            .transpose()?
-            .is_some_and(|value| value != 0),
-        server_config: protocol::find_tlv(&attributes, TlvType::ServerConfig)
-            .map(|attribute| attribute.value.clone()),
+        segment_routing: false,
     })
 }
 
-fn parse_address(v4: Option<&Tlv>, v6: Option<&Tlv>) -> Result<Option<IpAddr>> {
-    if let Some(attribute) = v4 {
-        return attribute.as_ipv4().map(IpAddr::V4).map(Some);
+fn parse_rejection(body: &[u8], expected_nonce: u32) -> Result<Error> {
+    let mut message_bytes = body.to_vec();
+    for offset in 0..body.len() {
+        let Ok(attributes) = Tlv::parse_complete(&body[offset..]) else {
+            continue;
+        };
+        let has_username = protocol::find_tlv(&attributes, TlvType::Username).is_some();
+        let Some(auth_verify) = protocol::find_tlv(&attributes, TlvType::AuthVerify) else {
+            continue;
+        };
+        if !has_username || auth_verify.value.len() != 4 {
+            continue;
+        }
+        if auth_verify.first_u32()? != expected_nonce {
+            return Err(Error::AuthenticationVerifyMismatch);
+        }
+        message_bytes = protocol::find_tlv(&attributes, TlvType::ErrorMessage).map_or_else(
+            || body[..offset].to_vec(),
+            |attribute| attribute.value.clone(),
+        );
+        break;
     }
-    if let Some(attribute) = v6 {
-        return attribute.as_ipv6().map(IpAddr::V6).map(Some);
-    }
-    Ok(None)
+    let message = String::from_utf8_lossy(&message_bytes).trim().to_owned();
+    Ok(Error::AuthenticationRejected {
+        code: rejection_code(&message),
+        message,
+    })
 }
 
-fn parse_rejection(body: &[u8]) -> Error {
-    if let Ok(attributes) = Tlv::parse_all(body) {
-        let code = protocol::find_tlv(&attributes, TlvType::RejectReason)
-            .and_then(|attribute| attribute.value.first())
-            .copied()
-            .unwrap_or(0);
-        let message = attributes
-            .iter()
-            .find(|attribute| attribute.kind == TlvType::ServerConfig)
-            .and_then(|attribute| String::from_utf8(attribute.value.clone()).ok())
-            .unwrap_or_else(|| "server rejected OPEN".into());
-        return Error::AuthenticationRejected { code, message };
+fn rejection_code(message: &str) -> u16 {
+    let uppercase = message.trim().to_uppercase();
+    for (keyword, code) in [
+        ("TOOLONG", 2100),
+        ("FREEIP", 2111),
+        ("PPPOECLNT", 2108),
+        ("PPOECLNT", 2108),
+        ("CLNT", 2108),
+        ("PPPOE_INSTAL", 2112),
+        ("PPOE_INSTAL", 2112),
+        ("PPPOEINSTALL", 2112),
+        ("PPOEINSTALL", 2112),
+        ("PPPOE", 2112),
+        ("PPOE", 2112),
+        ("FAIL", 2116),
+        ("NAME", 2102),
+        ("PASS", 2105),
+        ("ABLED", 2103),
+        ("PIRED", 2104),
+        ("FULL", 2115),
+        ("EMPTY", 2115),
+        ("POOL", 2106),
+        ("NO_ENTRY", 2107),
+        ("ENTRY", 2107),
+        ("BIND", 2109),
+        ("NULL", 2110),
+        ("POLL", 2101),
+    ] {
+        if uppercase.contains(keyword) {
+            return code;
+        }
     }
-    let (code, message) = body
-        .split_first()
-        .map_or((0, "server rejected OPEN".into()), |(code, message)| {
-            (*code, String::from_utf8_lossy(message).into_owned())
-        });
-    Error::AuthenticationRejected { code, message }
+    2999
 }
 
 pub fn ping(server: SocketAddr, timeout: Duration) -> Result<Duration> {
@@ -861,9 +1093,8 @@ pub fn ping(server: SocketAddr, timeout: Duration) -> Result<Duration> {
     let socket = UdpSocket::bind(bind_address)?;
     socket.connect(server)?;
     socket.set_read_timeout(Some(timeout))?;
-    let packet = protocol::build_ping_request();
     let started = Instant::now();
-    socket.send(&packet)?;
+    socket.send(&protocol::build_ping_request())?;
     let mut buffer = [0_u8; 2_048];
     let length = socket.recv(&mut buffer).map_err(|error| {
         if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
@@ -872,11 +1103,14 @@ pub fn ping(server: SocketAddr, timeout: Duration) -> Result<Duration> {
             Error::Io(error)
         }
     })?;
+    if length != protocol::CONTROL_PREFIX_LEN {
+        return Err(Error::InvalidPingResponse);
+    }
     let response = protocol::decode_packet(&buffer[..length])?;
     if response.header.packet_type != PacketType::PingResponse
         || response.header.encryption != EncryptionMethod::None
-        || response.header.session_id != 0
-        || response.header.token != 0
+        || response.header.session_id != protocol::PING_SESSION_ID
+        || response.header.token != protocol::PING_TOKEN
         || !response.body.is_empty()
     {
         return Err(Error::InvalidPingResponse);
@@ -884,7 +1118,7 @@ pub fn ping(server: SocketAddr, timeout: Duration) -> Result<Duration> {
     Ok(started.elapsed())
 }
 
-fn random_u32() -> Result<u32> {
+fn random_nonzero_u32() -> Result<u32> {
     loop {
         let value =
             getrandom::u32().map_err(|_| Error::Crypto("system randomness is unavailable"))?;
@@ -894,13 +1128,8 @@ fn random_u32() -> Result<u32> {
     }
 }
 
-fn unix_time_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros()
-        .try_into()
-        .unwrap_or(u64::MAX)
+fn monotonic_micros(origin: Instant) -> u64 {
+    origin.elapsed().as_micros().try_into().unwrap_or(u64::MAX)
 }
 
 fn wait_interruptibly(duration: Duration, running: &AtomicBool) {
@@ -914,121 +1143,116 @@ fn wait_interruptibly(duration: Duration, running: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Tlv, encode_control};
-    use std::thread;
+    use crate::protocol::encode_control;
 
     #[test]
-    fn rejection_fallback_is_safe_for_non_tlv_body() {
-        let error = parse_rejection(b"\x07bad password");
+    fn plain_rejection_keeps_its_first_character() {
+        let error = parse_rejection(b"bad password", 1).unwrap();
         assert!(matches!(
             error,
-            Error::AuthenticationRejected { code: 7, .. }
+            Error::AuthenticationRejected {
+                code: 2105,
+                ref message
+            } if message == "bad password"
         ));
     }
 
     #[test]
-    fn debug_output_redacts_password() {
-        let client = Client::new(
-            ClientConfig::new("127.0.0.1:6001", true, 16),
-            "alice",
-            "very-secret",
-        )
-        .unwrap();
-        let debug = format!("{client:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("very-secret"));
+    fn structured_rejection_validates_nonce_and_err_msg() {
+        let mut body = b"prefix".to_vec();
+        for tlv in [
+            Tlv::new(TlvType::Username, b"alice").unwrap(),
+            Tlv::auth_verify(7),
+            Tlv::new(TlvType::ErrorMessage, b"POOL FULL").unwrap(),
+        ] {
+            tlv.encode(&mut body).unwrap();
+        }
+        assert!(matches!(
+            parse_rejection(&body, 7).unwrap(),
+            Error::AuthenticationRejected { code: 2115, .. }
+        ));
+        assert!(matches!(
+            parse_rejection(&body, 8),
+            Err(Error::AuthenticationVerifyMismatch)
+        ));
     }
 
     #[test]
-    fn auth_verify_echo_can_be_optional_but_never_mismatched() {
+    fn open_ack_accepts_android_integer_widths_and_omitted_nonce() {
         let header = PacketHeader::new(
             PacketType::OpenAck,
             EncryptionMethod::Xor,
             0x1234,
             0x5060_7080,
         );
-        let without_echo = protocol::decode_packet(&encode_control(header, &[])).unwrap();
-        let peer = "127.0.0.1:6001".parse().unwrap();
-        assert!(matches!(
-            parse_open_ack(&without_echo, peer, 0x0102_0304, 1400, true),
-            Err(Error::MissingTlv("AUTH_VERIFY"))
-        ));
-        assert!(parse_open_ack(&without_echo, peer, 0x0102_0304, 1400, false).is_ok());
-
         let mut body = Vec::new();
-        Tlv::auth_verify(0xaabb_ccdd).encode(&mut body).unwrap();
-        let mismatched = protocol::decode_packet(&encode_control(header, &body)).unwrap();
-        assert!(matches!(
-            parse_open_ack(&mismatched, peer, 0x0102_0304, 1400, false),
-            Err(Error::AuthenticationVerifyMismatch)
-        ));
+        Tlv::new(TlvType::Mtu, 1400_u32.to_be_bytes())
+            .unwrap()
+            .encode(&mut body)
+            .unwrap();
+        Tlv::new(TlvType::Encrypt, [99])
+            .unwrap()
+            .encode(&mut body)
+            .unwrap();
+        let packet = protocol::decode_packet(&encode_control(header, &body)).unwrap();
+        let info = parse_open_ack(&packet, "127.0.0.1:6001".parse().unwrap(), 7, 1400).unwrap();
+        assert_eq!(info.mtu, 1400);
+        assert_eq!(info.encryption, EncryptionMethod::None);
     }
 
     #[test]
-    fn authenticates_against_local_compatible_endpoint() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        server
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let server_address = server.local_addr().unwrap();
-        let endpoint = thread::spawn(move || {
-            let mut buffer = [0_u8; 2_048];
-            let (length, peer) = server.recv_from(&mut buffer).unwrap();
-            let open = protocol::decode_packet(&buffer[..length]).unwrap();
-            assert_eq!(open.header.packet_type, PacketType::Open);
-            let attributes = Tlv::parse_all(&open.body).unwrap();
-            let nonce = protocol::find_tlv(&attributes, TlvType::AuthVerify)
-                .unwrap()
-                .as_u32()
-                .unwrap();
-
-            let response_attributes = [
-                Tlv::mtu(1400),
-                Tlv::new(TlvType::Ip, [10, 64, 0, 2]).unwrap(),
-                Tlv::new(TlvType::Gateway, [10, 64, 0, 1]).unwrap(),
-                Tlv::new(TlvType::Dns, [0, 0, 0, 0, 1, 1, 1, 1]).unwrap(),
-                Tlv::auth_verify(nonce),
-            ];
-            let mut body = Vec::new();
-            for attribute in response_attributes {
-                attribute.encode(&mut body).unwrap();
-            }
-            let response = encode_control(
-                PacketHeader::new(
-                    PacketType::OpenAck,
-                    open.header.encryption,
-                    0x1234,
-                    0x5060_7080,
-                ),
-                &body,
-            );
-            server.send_to(&response, peer).unwrap();
-
-            let (length, close_peer) = server.recv_from(&mut buffer).unwrap();
-            assert_eq!(close_peer, peer);
-            let close = protocol::decode_packet(&buffer[..length]).unwrap();
-            assert_eq!(close.header.packet_type, PacketType::Close);
-            assert_eq!(close.header.session_id, 0x1234);
-            assert_eq!(close.header.token, 0x5060_7080);
-        });
-
-        let mut config = ClientConfig::new(server_address.to_string(), true, 16);
-        config.auth_timeout_ms = 1_000;
-        config.auth_attempts = 1;
-        let session = Client::new(config, "alice", "secret")
-            .unwrap()
-            .authenticate()
-            .unwrap();
-        assert_eq!(session.info().session_id, 0x1234);
-        assert_eq!(
-            session.info().address,
-            Some(IpAddr::V4(Ipv4Addr::new(10, 64, 0, 2)))
+    fn open_ack_skips_bad_ip_fields_and_uses_last_valid_values() {
+        let header = PacketHeader::new(
+            PacketType::OpenAck,
+            EncryptionMethod::Xor,
+            0x1234,
+            0x5060_7080,
         );
-        assert_eq!(
-            session.info().dns_servers,
-            [IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))]
-        );
-        session.close().unwrap();
-        endpoint.join().unwrap();
+        let mut body = Vec::new();
+        for tlv in [
+            Tlv::new(TlvType::Ip, [192, 0]).unwrap(),
+            Tlv::new(TlvType::Ip, [192, 0, 2, 1, 99]).unwrap(),
+            Tlv::new(TlvType::Dns, [0, 0, 0, 0]).unwrap(),
+            Tlv::new(TlvType::Encrypt, [1]).unwrap(),
+            Tlv::new(TlvType::Encrypt, [0, 0, 2]).unwrap(),
+        ] {
+            tlv.encode(&mut body).unwrap();
+        }
+        let packet = protocol::decode_packet(&encode_control(header, &body)).unwrap();
+        let info = parse_open_ack(&packet, "127.0.0.1:6001".parse().unwrap(), 7, 1400).unwrap();
+        assert_eq!(info.address, Some("192.0.2.1".parse().unwrap()));
+        assert_eq!(info.dns_servers, ["0.0.0.0".parse::<IpAddr>().unwrap()]);
+        assert_eq!(info.encryption, EncryptionMethod::None);
+    }
+
+    #[test]
+    fn traditional_plain_path_uses_data_for_ipv6() {
+        let packet = {
+            let mut value = vec![0_u8; 40];
+            value[0] = 0x60;
+            value
+        };
+        let info = SessionInfo {
+            peer: "127.0.0.1:6001".parse().unwrap(),
+            session_id: 1,
+            token: 2,
+            encryption: EncryptionMethod::None,
+            mtu: 1400,
+            address: None,
+            gateway: None,
+            dns_servers: Vec::new(),
+            segment_routing: false,
+        };
+        let datagram = encode_traditional_data(&packet, &info, &crypto::NoCipher).unwrap();
+        assert_eq!(datagram[0][0], PacketType::Data as u8);
+    }
+
+    #[test]
+    fn debug_output_redacts_credentials() {
+        let client =
+            Client::new(ClientConfig::new("127.0.0.1:6001"), "alice", "very-secret").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("very-secret"));
     }
 }

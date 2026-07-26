@@ -1,242 +1,195 @@
-# iWAN 2.3.0 Client Wire Protocol
+# iWAN Android 2.3.0 Protocol Reference
 
-This document describes the traditional single-path UDP protocol implemented by
-`com.panabit.iwan.macosclient.PacketTunnel` version `2.3.0 (230)`.
+The normative engineering reference for OpeniWAN 0.3 is
+`reverse/IWAN_PROTOCOL_SPEC.md` in the source workspace. That document was
+reconstructed from the Android 2.3.0 APK and contains the complete byte
+layouts, recovered state machines, test vectors, evidence map, and known
+ambiguities.
 
-It is an interoperability reference derived from static analysis. It is not an
-official specification. See
-[Reverse-Engineering Evidence and Limitations](REVERSE_ENGINEERING.md) for the
-source and confidence level of each conclusion.
+This file is a packaged quick reference. It deliberately does not extend the
+recovered contract.
 
-Unless stated otherwise, all multibyte integers use network byte order
-(big-endian). The second 32-bit word in an IPFRAG header is the only known
-exception; it is a little-endian C bitfield.
+## Standard datagram
 
-## Transport and Session Model
-
-- The transport is UDP.
-- The client starts a session with OPEN.
-- The server answers with OPENACK or OPENREJECT.
-- After OPENACK, every stateful packet carries the assigned `session_id` and
-  `token`.
-- One UDP datagram contains one complete iWAN packet. There is no stream
-  framing across datagrams.
-
-## Common Header
-
-Every packet begins with an 8-byte header:
-
-| Offset | Size | Field |
-|---:|---:|---|
-| 0 | 1 | Packet type |
-| 1 | 1 | Encryption method |
-| 2 | 2 | Session ID, big-endian |
-| 4 | 4 | Token, big-endian |
-
-Control packets append a 16-byte signature immediately after the header:
+The standard header is eight bytes:
 
 ```text
-MD5(header[0..8] || ASCII("mw"))
+type:u8 | encrypt:u8 | session_id:u16 BE | token:u32 BE
 ```
 
-The signature does not cover the control-packet body. A decoder should verify
-the signature before parsing that body.
-
-Data packets do not contain this signature. Their body starts immediately
-after the common header.
-
-## Packet Types
-
-| Value | Name | Class | Body |
-|---:|---|---|---|
-| `0x11` | OPENREJECT | Control | TLVs or error code/message |
-| `0x12` | OPENACK | Control | TLVs |
-| `0x13` | OPEN | Control | TLVs |
-| `0x14` | DATA | Data | IPv4 packet |
-| `0x15` | echoRequest | Control | 8-byte timestamp |
-| `0x16` | echoResponse | Control | Timestamp and three delay values |
-| `0x17` | CLOSE | Control | Empty |
-| `0x18` | DATAENC | Data | Encrypted IP packet |
-| `0x19` | DATADUP | Data | Duplicated plaintext IP packet |
-| `0x20` | DATAENCDUP | Data | Duplicated encrypted IP packet |
-| `0x22` | IPFRAG | Data | Fragmented IPv4 envelope |
-| `0x23` | DATA6 | Data | IPv6 packet |
-| `0x24` | IPFRAG6 | Data | Fragmented IPv6 envelope |
-| `0x28` | SEGRT | Data | SR/multipath envelope |
-| `0x29` | pingRequest | Control | Empty |
-| `0x2a` | pingResponse | Control | Empty |
-
-`0x15` and `0x16` are stateful session heartbeats. `0x29` and `0x2a` are
-stateless endpoint probes. They are distinct exchanges.
-
-## TLV Encoding
-
-Attributes use a one-byte type and a one-byte total length. The total length
-includes the type and length bytes:
+Signed controls append:
 
 ```text
-+---------+--------------+------------------+
-| type:u8 | total_len:u8 | value[len - 2]   |
-+---------+--------------+------------------+
+MD5(exact_header || ASCII("mw"))
 ```
 
-The total length must be at least 2 and must not exceed the remaining packet
-body.
+The 16-byte signature covers only the header. It does not cover the body.
 
-| Value | Name | Value encoding |
-|---:|---|---|
-| `0x01` | USERNAME | UTF-8 bytes |
-| `0x02` | PASSWORD | 16-byte encrypted password block |
-| `0x03` | MTU | `u16` |
-| `0x04` | IP | 4-byte IPv4 address |
-| `0x05` | DNS | One or more IPv4 addresses |
-| `0x06` | GATEWAY | 4-byte IPv4 address |
-| `0x07` | NETMASK | 4-byte IPv4 netmask |
-| `0x08` | ENCRYPT | `u8` |
-| `0x09` | DUPPKT | `u8` boolean |
-| `0x0a` | LINK | `u32` first-hop link |
-| `0x0b` | IP6 | 16-byte IPv6 address |
-| `0x0c` | DNS6 | One or more IPv6 addresses |
-| `0x0d` | GATEWAY6 | 16-byte IPv6 address |
-| `0x0e` | SERVER_CONFIG | Opaque variable-length data |
-| `0x0f` | AUTH_VERIFY | `u32` |
-| `0x10` | REJECT_REASON | `u8` error code |
+Confirmed packet types are:
 
-## Authentication
-
-An OPEN packet uses:
-
-```text
-type=0x13, encryption=requested, session_id=0, token=0
-```
-
-The observed TLV order is:
-
-1. MTU
-2. USERNAME
-3. PASSWORD
-4. ENCRYPT
-5. LINK, when an SR first hop is present
-6. AUTH_VERIFY, containing a random `u32`
-
-The PASSWORD value is produced as follows:
-
-```text
-password_key = MD5("mw" || username_utf8)
-plain_block  = first_16_bytes(password_utf8) || zero_padding
-PASSWORD     = AES-128-ECB-Encrypt(password_key, plain_block)
-```
-
-OPENACK returns a nonzero session ID, a token, and address configuration.
-Some observed endpoints echo the same AUTH_VERIFY value, while others omit the
-TLV. A client must reject a present but mismatched echo. OpeniWAN keeps strict
-echo checking as the manual-client default and allows a managed provider to
-explicitly accept an absent echo for compatibility. In either mode, the UDP
-socket remains connected to the selected peer and the OPENACK control
-signature, session ID, token, and configuration are validated.
-
-The traditional data-plane session key is:
-
-```text
-session_key = MD5(username_utf8 || password_utf8)
-```
-
-## Data Encryption
-
-The ENCRYPT values are:
-
-| Value | Algorithm |
+| Value | Type |
 |---:|---|
-| 0 | None |
-| 1 | Repeating XOR |
-| 2 | AES |
+| `0x11` | `OPEN_REJECT` |
+| `0x12` | `OPEN_ACK` |
+| `0x13` | `OPEN` |
+| `0x14` | `DATA` |
+| `0x15` | `ECHO_REQUEST` |
+| `0x16` | `ECHO_RESPONSE` |
+| `0x17` | `CLOSE` |
+| `0x18` | `DATA_ENCRYPTED` |
+| `0x19` | `DATA_DUP` |
+| `0x20` | `DATA_ENC_DUP` |
+| `0x22` | `IP_FRAGMENT` |
+| `0x23` | `DATA_IPV6` |
+| `0x24` | `IP_FRAGMENT_IPV6` |
+| `0x28` | `SEGMENT_ROUTING` |
+| `0x29` | `PING_REQUEST` |
+| `0x2a` | `PING_RESPONSE` |
 
-Repeating XOR applies:
+Encryption values are `NONE=0`, `XOR=1`, and `AES=2`.
 
-```text
-cipher[i] = plain[i] XOR session_key[i mod 16]
-```
+## Authentication TLVs
 
-Some observed data endpoints repeat only the first 8 bytes:
-
-```text
-cipher[i] = plain[i] XOR session_key[i mod 8]
-```
-
-This width must be selected per deployment; it cannot be inferred from the
-OPENACK encryption identifier. Known deployment mappings belong in the
-[provider profile documentation](providers/README.md).
-
-The AES mode is AES-128-ECB without PKCS#7. The sender appends zero bytes until
-the body length is a multiple of 16; it does not append an extra block when the
-input is already aligned. The receiver removes the zero padding by reading the
-IPv4 total length or IPv6 payload length from the decrypted packet.
-
-None of these legacy modes provides reliable packet integrity.
-
-## Heartbeat
-
-An echoRequest body contains:
+Each TLV is `type:u8 | total_length:u8 | value`. Confirmed types are:
 
 ```text
-timestamp_micros: u64
+01 USERNAME   02 PASSWORD    03 MTU       04 IP
+05 DNS        06 GATEWAY     07 NETMASK   08 ENCRYPT
+09 DUP_PKT    0a LINK        0f AUTH_VERIFY
+10 ERR_MSG
 ```
 
-An echoResponse body contains:
+`NETMASK` and `DUP_PKT` exist in the registry but are not applied by the
+recovered `OPEN_ACK` consumer. The generic parser ignores a final one- or
+two-byte suffix; conforming senders must not emit one.
+
+An `OPEN` body is ordered as MTU, USERNAME, PASSWORD, ENCRYPT, optional LINK,
+and optional nonzero AUTH_VERIFY.
+
+Credentials use Java US-ASCII replacement behavior. Password wrapping is:
 
 ```text
-timestamp_micros:     u64
-current_delay_micros: u32
-minimum_delay_micros: u32
-maximum_delay_micros: u32
+key   = MD5("mw" || ASCII(username))
+block = first 16 ASCII(password) bytes, then zeroes to 16 bytes
+wire  = AES-128-ECB(key, block)
 ```
 
-Some compatible servers return only the first 8-byte `timestamp_micros` field
-and omit the three delay values. Receivers must accept both the compact 8-byte
-form and the extended 20-byte form. All present fields are big-endian. The
-response echoes the request timestamp.
-
-## IPFRAG and IPFRAG6
-
-The fragment body starts with an 8-byte prefix:
+The post-authentication session key is:
 
 ```text
-fragment_id: u32 big-endian
-packed:      u32 little-endian
+MD5(ASCII(username || full_password))
 ```
 
-The `packed` bitfield is:
+AUTH_VERIFY is checked when returned and may be omitted by a response.
 
-- bit 0: EOP, marking the final fragment
-- bit 1: reserved
-- bits 2 through 14: 13-bit byte offset
-- bits 15 through 25: 11-bit fragment payload length
-- bits 26 through 31: reserved
+## Session payloads
 
-A receiver should group fragments by ID and IP family, reject zero-length,
-overlapping, out-of-range, or inconsistent fragments, and enforce limits on
-group count, packet size, and lifetime. An inner IP packet is complete only
-when fragments cover every byte from offset zero through the EOP fragment.
+- `NONE` is identity.
+- `XOR` repeats only the first eight bytes of the 16-byte session key.
+- `AES` is AES-128-ECB with zero padding and no authenticated integrity.
+- the traditional transmit path chooses `DATA` or `DATA_ENCRYPTED` without
+  inspecting the IP version;
+- `DATA_DUP` is plain and `DATA_ENC_DUP` is encrypted;
+- only encrypted data classes are session-decrypted.
 
-## SEGRT
+Traditional fragments use a big-endian ID and a little-endian packed word.
+The legacy receiver combines exactly two fragments by EOP order, ignores
+offsets, retains at most 256 pending entries, and expires entries after 100 ms.
 
-The 2.3.0 binary contains `SegrtHeader`, `SegrtSession`, path monitoring,
-AES-128/AES-256 outer encryption, and reassembly code. That path depends on SR
-group and site configuration delivered by a controller; it is not part of the
-traditional single-endpoint handshake documented above.
+## Heartbeat, ping, and close
 
-OpeniWAN recognizes packet type `0x28` and discards its body instead of
-passing unknown data to the TUN interface. SEGRT must not be described as
-production-compatible until an implementation has been validated with an
-authorized SR configuration, bidirectional captures, and the corresponding
-server state machine.
+The traditional heartbeat body is 20 bytes, all little-endian:
 
-## Security Considerations
+```text
+tick_us:u64 | current_us:u32 | minimum_us:u32 | maximum_us:u32
+```
 
-- The control signature authenticates neither the body nor a peer identity.
-- MD5, repeating XOR, and AES-ECB are legacy compatibility mechanisms.
-- Traditional data packets have no authenticated integrity protection.
-- The protocol should be used only on authorized networks and, where
-  appropriate, inside an additional trusted security layer.
+Requests are sent every two seconds. Ten misses or more than 20 seconds without
+a valid response ends the session.
 
-See the project [Security Policy](../SECURITY.md) for reporting guidance.
+Ping is exactly 24 bytes with `session_id=0xffff`, `token=0xffffffff`, and no
+body. A new client sends a 24-byte signed close; receivers accept both that
+form and the recovered eight-byte probe close.
+
+## Segment Routing
+
+An SR datagram is:
+
+```text
+sr_header || inner_standard_header || inner_payload
+```
+
+The SR header is:
+
+```text
+28 | next_id | link_count | (pad_len << 3 | algorithm) | links:u32 BE[]
+```
+
+Link count is `1..6`, link IDs are `1..0x00ffffff`, and algorithms are
+none/AES-128/AES-256. Outbound paths reverse the controller order and start at
+`next_id = link_count - 1`; returned paths use controller order and require
+`next_id=0`.
+
+Outer AES encrypts only bytes after the inner eight-byte header, uses a raw
+UTF-8 key prefix, AES-ECB-NoPadding, and zero padding recorded in the SR header.
+IPv6 disables inner session encryption. Fragmentation is allowed only when
+both encryption layers are off and emits exactly two fragments. SR fragment
+IDs are little-endian and the SR reassembler honors offsets, gaps, duplicates,
+overlaps, a 2-second lifetime, 16 groups, and 262144 buffered bytes.
+
+SR monitor packets use an unencrypted SR envelope, an unsigned inner echo
+header, and a 40-byte body containing the traditional delay fields, `"SRID"`,
+a big-endian SR ID, marker bytes, flags, and counters. The period is one second
+and peer-down threshold is five seconds.
+
+## Managed HTTP
+
+The confirmed `/config` request is:
+
+```json
+{
+  "domain": "domain",
+  "type": "service-type",
+  "oem_name": "panabit",
+  "app_version": "2.3.0",
+  "device_id": "device-id",
+  "userName": "optional",
+  "posture_version": "optional"
+}
+```
+
+It uses `Content-Type: application/json`, `X-Mobile-Api-Version: 4`, and an
+optional OIDC bearer token. Its aggregate response schema is unresolved and
+must remain dynamic.
+
+Keepalive uses API version 3, a bearer token, five-second connect/read
+timeouts, and one retry after a failed attempt except HTTP 401. Every attempt
+uses a fresh timestamp, nonce, and signature over the same serialized body.
+Its HMAC canonical string is six lines:
+
+```text
+POST
+decoded path
+decoded/sorted query
+lowercase SHA-256 body hex
+Unix timestamp
+lowercase 16-byte nonce hex
+```
+
+The four `X-Auth-*` headers use HMAC-SHA256 with the UTF-8 app secret. See the
+source reference for the complete metrics graph and normative HMAC vector.
+
+## Known ambiguities
+
+The recovered artifacts do not establish:
+
+- authoritative `DUP_PKT` server policy;
+- other-platform use of `NETMASK`;
+- the production-preferred `OPEN_REJECT` construction;
+- vendor names for SR monitor bits or marker `0x79`;
+- relay-side SR path mutation;
+- complete `/lookup`, `/auth`, or aggregate `/config` schemas;
+- whether production servers require signed `CLOSE`;
+- server-side duplicate suppression.
+
+These points must not be filled in from intuition or another implementation.

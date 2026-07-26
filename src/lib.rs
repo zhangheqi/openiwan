@@ -13,9 +13,11 @@ pub mod fragment;
 #[cfg(feature = "managed")]
 pub mod managed;
 pub mod protocol;
+pub mod sr;
 pub mod tun;
 
 pub use client::{Client, ConnectedSession, PacketDevice, SessionEnd, SessionInfo};
-pub use config::{ClientConfig, ReconnectPolicy};
+pub use config::{ClientConfig, ReconnectPolicy, SegmentRoutingConfig};
 pub use error::{Error, Result};
 pub use protocol::{EncryptionMethod, PacketHeader, PacketType, Tlv, TlvType};
+pub use sr::SrEncryptionAlgorithm;

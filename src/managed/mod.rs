@@ -1,21 +1,26 @@
 mod controller;
-mod crypto;
 mod http;
+mod keepalive;
 mod oidc;
 mod provider;
-mod store;
 
+pub use controller::{
+    API_LOGIN_PATH, APP_LOGIN_PATH, AUTH_PATH, CONFIG_PATH, ControllerConfiguration, HEALTH_PATH,
+    KEEPALIVE_RELOAD_PATH, LOGOS_PATH, LOOKUP_PATH, POSTURE_EVALUATE_PATH, POSTURE_RELOAD_PATH,
+    SrEntry, SrIngress, SrPath, UPDATE_CHECK_PATH,
+};
 pub use http::{HttpRequest, HttpResponse, HttpTransport, UreqTransport};
-pub use oidc::PendingAuthorization;
-pub use provider::{
-    ControllerConfig, OidcConfig, PROVIDER_VERSION, ProviderConfig, TokenRequestFormat,
+pub use keepalive::{
+    DeviceBinding, IwanActive, IwanMetrics, IwanMetricsTs, IwanServerMetric, IwanServerMetricTs,
+    KeepaliveCredentials, KeepaliveRequest, KeepaliveResponse, PathMetrics, PathMetricsTs,
+    PostureAck, PostureUpdate, SrActive, SrFullPathMetric, SrFullPathMetricTs, SrMetrics,
+    SrMetricsTs, SrPathMetric, SrPathMetricTs, SrSiteMetric, SrSiteMetricTs, UserNotice,
+    canonical_request, sign_request,
 };
-pub use store::{
-    ManagedServer, ManagedState, STATE_VERSION, default_state_path, load_state, new_device_id,
-    save_state,
-};
+pub use oidc::{OidcIdentity, PendingAuthorization};
+pub use provider::{ControllerConfig, OidcConfig, ProviderConfig};
 
-use crate::{Client, ClientConfig, Error, Result};
+use crate::Result;
 
 pub struct ManagedClient<T = UreqTransport> {
     provider: ProviderConfig,
@@ -39,123 +44,73 @@ impl<T: HttpTransport> ManagedClient<T> {
         }
     }
 
-    pub fn provider(&self) -> &ProviderConfig {
+    pub const fn provider(&self) -> &ProviderConfig {
         &self.provider
     }
 
     pub fn begin_authorization(&self) -> Result<PendingAuthorization> {
-        oidc::begin(&self.provider, &self.transport)
+        let oidc = self
+            .provider
+            .oidc
+            .as_ref()
+            .ok_or_else(|| crate::Error::ManagedProvider("OIDC is not configured".into()))?;
+        oidc::begin(oidc, &self.transport)
     }
 
-    pub fn fetch(
+    pub fn complete_authorization(
         &self,
         pending: &PendingAuthorization,
         redirect_url: &str,
-        device_id: &str,
-    ) -> Result<ManagedState> {
-        if device_id.is_empty() {
-            return Err(Error::ManagedProvider("device id must not be empty".into()));
-        }
-        let identity = oidc::complete(&self.provider, &self.transport, pending, redirect_url)?;
-        controller::fetch(&self.provider, &self.transport, &identity, device_id)
+    ) -> Result<OidcIdentity> {
+        let oidc = self
+            .provider
+            .oidc
+            .as_ref()
+            .ok_or_else(|| crate::Error::ManagedProvider("OIDC is not configured".into()))?;
+        oidc::complete(oidc, &self.transport, pending, redirect_url)
     }
 
-    pub fn build_client(
+    pub fn fetch_configuration(
         &self,
-        state: &ManagedState,
-        server: &ManagedServer,
-        mut config: ClientConfig,
-    ) -> Result<Client> {
-        state.validate_for(&self.provider.id, &self.provider.controller.domain)?;
-        if !state.servers.iter().any(|candidate| candidate == server) {
-            return Err(Error::ManagedProvider(
-                "selected line is not present in managed state".into(),
-            ));
-        }
-        config.server = server.endpoint();
-        config.require_auth_verify_echo = self.provider.require_auth_verify_echo;
-        config.xor_key_bytes = self.provider.xor_key_bytes;
-        let password = crypto::decrypt_server_password(&self.provider, server)?;
-        Client::new(config, server.username.clone(), password.to_string())
+        identity: &OidcIdentity,
+        device_id: &str,
+        posture_version: Option<&str>,
+    ) -> Result<ControllerConfiguration> {
+        controller::fetch(
+            &self.provider,
+            &self.transport,
+            Some(identity.access_token.as_str()),
+            Some(&identity.username),
+            device_id,
+            posture_version,
+        )
     }
-}
 
-pub fn select_server<'a>(
-    state: &'a ManagedState,
-    index: Option<usize>,
-    name: Option<&str>,
-) -> Result<Option<&'a ManagedServer>> {
-    if index.is_some() && name.is_some() {
-        return Err(Error::ManagedProvider(
-            "line index and line name are mutually exclusive".into(),
-        ));
+    /// Fetch `/config` without assuming OIDC. The access-token header and
+    /// `userName` member are omitted when their arguments are absent.
+    pub fn fetch_configuration_raw(
+        &self,
+        access_token: Option<&str>,
+        username: Option<&str>,
+        device_id: &str,
+        posture_version: Option<&str>,
+    ) -> Result<ControllerConfiguration> {
+        controller::fetch(
+            &self.provider,
+            &self.transport,
+            access_token,
+            username,
+            device_id,
+            posture_version,
+        )
     }
-    if let Some(index) = index {
-        if index == 0 || index > state.servers.len() {
-            return Err(Error::ManagedProvider(format!(
-                "line index must be between 1 and {}",
-                state.servers.len()
-            )));
-        }
-        return Ok(Some(&state.servers[index - 1]));
-    }
-    if let Some(name) = name {
-        let matches: Vec<_> = state
-            .servers
-            .iter()
-            .filter(|server| server.name == name)
-            .collect();
-        return match matches.as_slice() {
-            [server] => Ok(Some(*server)),
-            [] => Err(Error::ManagedProvider(format!("no line is named {name:?}"))),
-            _ => Err(Error::ManagedProvider(format!(
-                "multiple lines are named {name:?}; use --line-index"
-            ))),
-        };
-    }
-    Ok(None)
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selects_by_one_based_index_or_unique_name() {
-        let state = ManagedState {
-            version: STATE_VERSION,
-            provider_id: "test".into(),
-            domain: "test".into(),
-            device_id: "device".into(),
-            fetched_at_unix: 0,
-            servers: vec![
-                ManagedServer {
-                    name: "A".into(),
-                    host: "192.0.2.1".into(),
-                    port: 6001,
-                    username: "a".into(),
-                    encrypted_password: "x".into(),
-                },
-                ManagedServer {
-                    name: "B".into(),
-                    host: "192.0.2.2".into(),
-                    port: 6002,
-                    username: "b".into(),
-                    encrypted_password: "y".into(),
-                },
-            ],
-        };
-        assert_eq!(
-            select_server(&state, Some(2), None).unwrap().unwrap().name,
-            "B"
-        );
-        assert_eq!(
-            select_server(&state, None, Some("A"))
-                .unwrap()
-                .unwrap()
-                .host,
-            "192.0.2.1"
-        );
-        assert!(select_server(&state, Some(0), None).is_err());
+    pub fn send_keepalive(
+        &self,
+        endpoint: &str,
+        credentials: &KeepaliveCredentials,
+        request: &KeepaliveRequest,
+    ) -> Result<KeepaliveResponse> {
+        keepalive::send(&self.transport, endpoint, credentials, request)
     }
 }

@@ -2,8 +2,6 @@ use crate::{Error, Result};
 use std::io::Read;
 use std::time::Duration;
 
-const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
-
 #[derive(Clone)]
 pub struct HttpRequest {
     pub method: &'static str,
@@ -50,12 +48,11 @@ pub struct UreqTransport {
 
 impl UreqTransport {
     pub fn new() -> Self {
-        let timeout = Duration::from_secs(15);
+        let timeout = Duration::from_secs(5);
         Self {
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(timeout)
                 .timeout_read(timeout)
-                .timeout_write(timeout)
                 .build(),
         }
     }
@@ -94,12 +91,6 @@ impl HttpTransport for UreqTransport {
 fn read_response(response: ureq::Response) -> Result<HttpResponse> {
     let status = response.status();
     let mut body = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_RESPONSE_BYTES + 1)
-        .read_to_end(&mut body)?;
-    if body.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(Error::Http("response exceeds 1 MiB limit".into()));
-    }
+    response.into_reader().read_to_end(&mut body)?;
     Ok(HttpResponse { status, body })
 }

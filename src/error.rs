@@ -37,7 +37,7 @@ pub enum Error {
     Crypto(&'static str),
 
     #[error("authentication was rejected (code {code}): {message}")]
-    AuthenticationRejected { code: u8, message: String },
+    AuthenticationRejected { code: u16, message: String },
 
     #[error("authentication verification nonce mismatch")]
     AuthenticationVerifyMismatch,
@@ -60,8 +60,14 @@ pub enum Error {
     #[error("fragment group exceeded the configured maximum size")]
     FragmentTooLarge,
 
-    #[error("unsupported operation: {0}")]
-    Unsupported(&'static str),
+    #[error("segment-routing packet is malformed: {0}")]
+    InvalidSegmentRouting(&'static str),
+
+    #[error("segment-routing path is unavailable")]
+    SegmentRoutingPeerDown,
+
+    #[error("fragmentation with encryption is unsupported by iWAN 2.3.0")]
+    FragmentEncryptionUnsupported,
 
     #[error("TUN operation failed: {0}")]
     Tun(String),
@@ -80,6 +86,9 @@ pub enum Error {
 
     #[error("controller operation failed: {0}")]
     Controller(String),
+
+    #[error("controller rejected the request as unauthorized")]
+    ControllerUnauthorized,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

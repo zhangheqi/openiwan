@@ -1,13 +1,23 @@
+//! Byte-exact traditional iWAN 2.3.0 framing.
+//!
+//! The implementation follows `reverse/IWAN_PROTOCOL_SPEC.md`, reconstructed
+//! from the Android 2.3.0 APK.  Segment-routing envelopes are intentionally
+//! parsed by [`crate::sr`] because their first bytes are not a standard iWAN
+//! header even though byte zero is `SEGMENT_ROUTING`.
+
 use crate::crypto;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 pub const HEADER_LEN: usize = 8;
 pub const SIGNATURE_LEN: usize = 16;
 pub const CONTROL_PREFIX_LEN: usize = HEADER_LEN + SIGNATURE_LEN;
+pub const PING_SESSION_ID: u16 = u16::MAX;
+pub const PING_TOKEN: u32 = u32::MAX;
+pub const ECHO_BODY_LEN: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -19,13 +29,13 @@ pub enum PacketType {
     EchoRequest = 0x15,
     EchoResponse = 0x16,
     Close = 0x17,
-    DataEncrypt = 0x18,
+    DataEncrypted = 0x18,
     DataDup = 0x19,
-    DataEncDup = 0x20,
-    IpFrag = 0x22,
-    Data6 = 0x23,
-    IpFrag6 = 0x24,
-    SegRt = 0x28,
+    DataEncryptedDup = 0x20,
+    IpFragment = 0x22,
+    DataIpv6 = 0x23,
+    IpFragmentIpv6 = 0x24,
+    SegmentRouting = 0x28,
     PingRequest = 0x29,
     PingResponse = 0x2a,
 }
@@ -39,13 +49,13 @@ impl PacketType {
         Self::EchoRequest,
         Self::EchoResponse,
         Self::Close,
-        Self::DataEncrypt,
+        Self::DataEncrypted,
         Self::DataDup,
-        Self::DataEncDup,
-        Self::IpFrag,
-        Self::Data6,
-        Self::IpFrag6,
-        Self::SegRt,
+        Self::DataEncryptedDup,
+        Self::IpFragment,
+        Self::DataIpv6,
+        Self::IpFragmentIpv6,
+        Self::SegmentRouting,
         Self::PingRequest,
         Self::PingResponse,
     ];
@@ -65,11 +75,11 @@ impl PacketType {
     }
 
     pub const fn is_data(self) -> bool {
-        !self.is_control()
+        !self.is_control() && !matches!(self, Self::SegmentRouting)
     }
 
     pub const fn is_encrypted_data(self) -> bool {
-        matches!(self, Self::DataEncrypt | Self::DataEncDup)
+        matches!(self, Self::DataEncrypted | Self::DataEncryptedDup)
     }
 }
 
@@ -87,20 +97,22 @@ impl TryFrom<u8> for PacketType {
 impl fmt::Display for PacketType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::OpenReject => "OPENREJECT",
-            Self::OpenAck => "OPENACK",
+            Self::OpenReject => "OPEN_REJECT",
+            Self::OpenAck => "OPEN_ACK",
             Self::Open => "OPEN",
             Self::Data => "DATA",
-            Self::EchoRequest | Self::PingRequest => "PINGREQUEST",
-            Self::EchoResponse | Self::PingResponse => "PINGRESPONSE",
+            Self::EchoRequest => "ECHO_REQUEST",
+            Self::EchoResponse => "ECHO_RESPONSE",
             Self::Close => "CLOSE",
-            Self::DataEncrypt => "DATAENC",
-            Self::DataDup => "DATADUP",
-            Self::DataEncDup => "DATAENCDUP",
-            Self::IpFrag => "IPFRAG",
-            Self::Data6 => "DATA6",
-            Self::IpFrag6 => "IPFRAG6",
-            Self::SegRt => "SEGRT",
+            Self::DataEncrypted => "DATA_ENCRYPTED",
+            Self::DataDup => "DATA_DUP",
+            Self::DataEncryptedDup => "DATA_ENC_DUP",
+            Self::IpFragment => "IP_FRAGMENT",
+            Self::DataIpv6 => "DATA_IPV6",
+            Self::IpFragmentIpv6 => "IP_FRAGMENT_IPV6",
+            Self::SegmentRouting => "SEGMENT_ROUTING",
+            Self::PingRequest => "PING_REQUEST",
+            Self::PingResponse => "PING_RESPONSE",
         })
     }
 }
@@ -192,6 +204,22 @@ impl PacketHeader {
                 actual: input.len(),
             });
         }
+        if input[0] == PacketType::SegmentRouting as u8 {
+            return Err(Error::InvalidSegmentRouting(
+                "SR envelope must be parsed as an SR header",
+            ));
+        }
+        Self::decode_inner(input)
+    }
+
+    /// Decode a standard-format header embedded inside an SR envelope.
+    pub fn decode_inner(input: &[u8]) -> Result<Self> {
+        if input.len() < HEADER_LEN {
+            return Err(Error::PacketTooShort {
+                minimum: HEADER_LEN,
+                actual: input.len(),
+            });
+        }
         Ok(Self {
             packet_type: PacketType::try_from(input[0])?,
             encryption: EncryptionMethod::try_from(input[1])?,
@@ -201,6 +229,7 @@ impl PacketHeader {
     }
 }
 
+/// TLV registry retained by the Android 2.3.0 parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TlvType {
@@ -214,16 +243,12 @@ pub enum TlvType {
     Encrypt = 0x08,
     DupPacket = 0x09,
     Link = 0x0a,
-    Ip6 = 0x0b,
-    Dns6 = 0x0c,
-    Gateway6 = 0x0d,
-    ServerConfig = 0x0e,
     AuthVerify = 0x0f,
-    RejectReason = 0x10,
+    ErrorMessage = 0x10,
 }
 
 impl TlvType {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 12] = [
         Self::Username,
         Self::Password,
         Self::Mtu,
@@ -234,12 +259,8 @@ impl TlvType {
         Self::Encrypt,
         Self::DupPacket,
         Self::Link,
-        Self::Ip6,
-        Self::Dns6,
-        Self::Gateway6,
-        Self::ServerConfig,
         Self::AuthVerify,
-        Self::RejectReason,
+        Self::ErrorMessage,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -252,14 +273,10 @@ impl TlvType {
             Self::Gateway => "GATEWAY",
             Self::Netmask => "NETMASK",
             Self::Encrypt => "ENCRYPT",
-            Self::DupPacket => "DUPPKT",
+            Self::DupPacket => "DUP_PKT",
             Self::Link => "LINK",
-            Self::Ip6 => "IP6",
-            Self::Dns6 => "DNS6",
-            Self::Gateway6 => "GATEWAY6",
-            Self::ServerConfig => "SERVER_CONFIG",
             Self::AuthVerify => "AUTH_VERIFY",
-            Self::RejectReason => "REJECT_REASON",
+            Self::ErrorMessage => "ERR_MSG",
         }
     }
 }
@@ -287,7 +304,7 @@ pub struct Tlv {
 impl Tlv {
     pub fn new(kind: TlvType, value: impl Into<Vec<u8>>) -> Result<Self> {
         let value = value.into();
-        if value.len() + 2 > usize::from(u8::MAX) {
+        if value.len() > 253 {
             return Err(Error::TlvTooLarge {
                 kind: kind.name(),
                 length: value.len(),
@@ -297,8 +314,7 @@ impl Tlv {
     }
 
     pub fn encode(&self, output: &mut Vec<u8>) -> Result<()> {
-        let length = self.value.len() + 2;
-        let length = u8::try_from(length).map_err(|_| Error::TlvTooLarge {
+        let length = u8::try_from(self.value.len() + 2).map_err(|_| Error::TlvTooLarge {
             kind: self.kind.name(),
             length: self.value.len(),
         })?;
@@ -308,16 +324,12 @@ impl Tlv {
         Ok(())
     }
 
+    /// Reproduce the APK list loop: parse while at least three bytes remain and
+    /// silently ignore a final one- or two-byte suffix.
     pub fn parse_all(input: &[u8]) -> Result<Vec<Self>> {
         let mut attributes = Vec::new();
         let mut offset = 0;
-        while offset < input.len() {
-            if input.len() - offset < 2 {
-                return Err(Error::InvalidTlv {
-                    offset,
-                    reason: "not enough data for the two-byte TLV header".into(),
-                });
-            }
+        while input.len() - offset >= 3 {
             let kind = TlvType::try_from(input[offset]).map_err(|_| Error::InvalidTlv {
                 offset,
                 reason: format!("unknown type 0x{:02x}", input[offset]),
@@ -347,6 +359,19 @@ impl Tlv {
         Ok(attributes)
     }
 
+    /// Strict parser used when recognizing a structured `OPEN_REJECT` suffix.
+    pub fn parse_complete(input: &[u8]) -> Result<Vec<Self>> {
+        let attributes = Self::parse_all(input)?;
+        let parsed_len = attributes.iter().map(|tlv| tlv.value.len() + 2).sum();
+        if parsed_len != input.len() {
+            return Err(Error::InvalidTlv {
+                offset: parsed_len,
+                reason: "trailing bytes do not form a complete TLV".into(),
+            });
+        }
+        Ok(attributes)
+    }
+
     pub fn mtu(mtu: u16) -> Self {
         Self {
             kind: TlvType::Mtu,
@@ -355,7 +380,7 @@ impl Tlv {
     }
 
     pub fn username(username: &str) -> Result<Self> {
-        Self::new(TlvType::Username, username.as_bytes())
+        Self::new(TlvType::Username, crypto::java_us_ascii(username))
     }
 
     pub fn encrypted_password(password: [u8; 16]) -> Self {
@@ -386,50 +411,34 @@ impl Tlv {
         }
     }
 
-    pub fn as_u8(&self) -> Result<u8> {
-        self.value
-            .first()
-            .copied()
-            .filter(|_| self.value.len() == 1)
-            .ok_or(Error::InvalidTlvValue(self.kind.name()))
+    /// Shared Android integer decoder: only 1, 2, and 4 byte values exist.
+    pub fn as_integer(&self) -> Result<u32> {
+        match self.value.as_slice() {
+            [value] => Ok(u32::from(*value)),
+            [a, b] => Ok(u32::from(u16::from_be_bytes([*a, *b]))),
+            [a, b, c, d] => Ok(u32::from_be_bytes([*a, *b, *c, *d])),
+            _ => Err(Error::InvalidTlvValue(self.kind.name())),
+        }
     }
 
-    pub fn as_u16(&self) -> Result<u16> {
-        self.value
-            .as_slice()
-            .try_into()
-            .map(u16::from_be_bytes)
-            .map_err(|_| Error::InvalidTlvValue(self.kind.name()))
-    }
-
-    pub fn as_u32(&self) -> Result<u32> {
-        self.value
-            .as_slice()
-            .try_into()
-            .map(u32::from_be_bytes)
-            .map_err(|_| Error::InvalidTlvValue(self.kind.name()))
-    }
-
-    pub fn as_ipv4(&self) -> Result<Ipv4Addr> {
-        let octets: [u8; 4] = self
+    pub fn first_u32(&self) -> Result<u32> {
+        let bytes = self
             .value
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::InvalidTlvValue(self.kind.name()))?;
-        Ok(Ipv4Addr::from(octets))
+            .get(..4)
+            .ok_or(Error::InvalidTlvValue(self.kind.name()))?;
+        Ok(u32::from_be_bytes(
+            bytes.try_into().expect("slice length checked"),
+        ))
     }
 
-    pub fn as_ipv6(&self) -> Result<Ipv6Addr> {
-        let octets: [u8; 16] = self
+    pub fn first_ipv4(&self) -> Result<Ipv4Addr> {
+        let bytes = self
             .value
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::InvalidTlvValue(self.kind.name()))?;
-        Ok(Ipv6Addr::from(octets))
-    }
-
-    pub fn as_string(&self) -> Result<String> {
-        String::from_utf8(self.value.clone()).map_err(|_| Error::InvalidTlvValue(self.kind.name()))
+            .get(..4)
+            .ok_or(Error::InvalidTlvValue(self.kind.name()))?;
+        Ok(Ipv4Addr::from(
+            <[u8; 4]>::try_from(bytes).expect("slice length checked"),
+        ))
     }
 }
 
@@ -467,6 +476,15 @@ pub fn encode_data(header: PacketHeader, body: &[u8]) -> Vec<u8> {
 pub fn decode_packet(input: &[u8]) -> Result<DecodedPacket> {
     let header = PacketHeader::decode(input)?;
     if header.packet_type.is_control() {
+        // The APK has an authentication-probe path that emits a raw 8-byte
+        // CLOSE. Accepting it is required for bidirectional compatibility.
+        if header.packet_type == PacketType::Close && input.len() == HEADER_LEN {
+            return Ok(DecodedPacket {
+                header,
+                signature: None,
+                body: Vec::new(),
+            });
+        }
         if input.len() < CONTROL_PREFIX_LEN {
             return Err(Error::PacketTooShort {
                 minimum: CONTROL_PREFIX_LEN,
@@ -475,7 +493,7 @@ pub fn decode_packet(input: &[u8]) -> Result<DecodedPacket> {
         }
         let signature: [u8; SIGNATURE_LEN] = input[HEADER_LEN..CONTROL_PREFIX_LEN]
             .try_into()
-            .expect("slice length is checked");
+            .expect("slice length checked");
         if signature != calculate_signature(header) {
             return Err(Error::InvalidSignature);
         }
@@ -510,7 +528,7 @@ pub fn build_open(
     if let Some(link) = first_hop_link {
         attributes.push(Tlv::link(link));
     }
-    if let Some(nonce) = auth_verify {
+    if let Some(nonce) = auth_verify.filter(|nonce| *nonce != 0) {
         attributes.push(Tlv::auth_verify(nonce));
     }
 
@@ -536,41 +554,6 @@ pub fn build_close(header: PacketHeader) -> Vec<u8> {
     )
 }
 
-pub fn build_echo_request(header: PacketHeader, timestamp_micros: u64) -> Vec<u8> {
-    encode_control(
-        PacketHeader::new(
-            PacketType::EchoRequest,
-            header.encryption,
-            header.session_id,
-            header.token,
-        ),
-        &timestamp_micros.to_be_bytes(),
-    )
-}
-
-pub fn build_echo_response(
-    request: PacketHeader,
-    timestamp_micros: u64,
-    current_delay_micros: u32,
-    min_delay_micros: u32,
-    max_delay_micros: u32,
-) -> Vec<u8> {
-    let mut body = Vec::with_capacity(20);
-    body.extend_from_slice(&timestamp_micros.to_be_bytes());
-    body.extend_from_slice(&current_delay_micros.to_be_bytes());
-    body.extend_from_slice(&min_delay_micros.to_be_bytes());
-    body.extend_from_slice(&max_delay_micros.to_be_bytes());
-    encode_control(
-        PacketHeader::new(
-            PacketType::EchoResponse,
-            request.encryption,
-            request.session_id,
-            request.token,
-        ),
-        &body,
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EchoDelayStats {
     pub current_micros: u32,
@@ -579,46 +562,95 @@ pub struct EchoDelayStats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EchoResponse {
-    pub timestamp_micros: u64,
-    pub delay_stats: Option<EchoDelayStats>,
+pub struct EchoBody {
+    pub tick_micros: u64,
+    pub delay_stats: EchoDelayStats,
 }
 
-pub fn parse_echo_response(body: &[u8]) -> Result<EchoResponse> {
-    if body.len() < 8 {
-        return Err(Error::PacketTooShort {
-            minimum: 8,
-            actual: body.len(),
-        });
+impl EchoBody {
+    pub const fn new(tick_micros: u64, delay_stats: EchoDelayStats) -> Self {
+        Self {
+            tick_micros,
+            delay_stats,
+        }
     }
 
-    let timestamp = u64::from_be_bytes(body[0..8].try_into().expect("length checked"));
-    if body.len() == 8 {
-        return Ok(EchoResponse {
-            timestamp_micros: timestamp,
-            delay_stats: None,
-        });
-    }
-    if body.len() < 20 {
-        return Err(Error::PacketTooShort {
-            minimum: 20,
-            actual: body.len(),
-        });
+    pub fn encode(self) -> [u8; ECHO_BODY_LEN] {
+        let mut body = [0_u8; ECHO_BODY_LEN];
+        body[0..8].copy_from_slice(&self.tick_micros.to_le_bytes());
+        body[8..12].copy_from_slice(&self.delay_stats.current_micros.to_le_bytes());
+        body[12..16].copy_from_slice(&self.delay_stats.minimum_micros.to_le_bytes());
+        body[16..20].copy_from_slice(&self.delay_stats.maximum_micros.to_le_bytes());
+        body
     }
 
-    Ok(EchoResponse {
-        timestamp_micros: timestamp,
-        delay_stats: Some(EchoDelayStats {
-            current_micros: u32::from_be_bytes(body[8..12].try_into().expect("length checked")),
-            minimum_micros: u32::from_be_bytes(body[12..16].try_into().expect("length checked")),
-            maximum_micros: u32::from_be_bytes(body[16..20].try_into().expect("length checked")),
-        }),
-    })
+    pub fn decode(body: &[u8]) -> Result<Self> {
+        if body.len() < ECHO_BODY_LEN {
+            return Err(Error::PacketTooShort {
+                minimum: ECHO_BODY_LEN,
+                actual: body.len(),
+            });
+        }
+        Ok(Self {
+            tick_micros: u64::from_le_bytes(body[0..8].try_into().expect("length checked")),
+            delay_stats: EchoDelayStats {
+                current_micros: u32::from_le_bytes(body[8..12].try_into().expect("length checked")),
+                minimum_micros: u32::from_le_bytes(
+                    body[12..16].try_into().expect("length checked"),
+                ),
+                maximum_micros: u32::from_le_bytes(
+                    body[16..20].try_into().expect("length checked"),
+                ),
+            },
+        })
+    }
+}
+
+pub fn build_echo_request(header: PacketHeader, echo: EchoBody) -> Vec<u8> {
+    encode_control(
+        PacketHeader::new(
+            PacketType::EchoRequest,
+            header.encryption,
+            header.session_id,
+            header.token,
+        ),
+        &echo.encode(),
+    )
+}
+
+pub fn build_echo_response(request: PacketHeader, request_body: &[u8]) -> Result<Vec<u8>> {
+    let body = EchoBody::decode(request_body)?.encode();
+    Ok(encode_control(
+        PacketHeader::new(
+            PacketType::EchoResponse,
+            request.encryption,
+            request.session_id,
+            request.token,
+        ),
+        &body,
+    ))
 }
 
 pub fn build_ping_request() -> Vec<u8> {
     encode_control(
-        PacketHeader::new(PacketType::PingRequest, EncryptionMethod::None, 0, 0),
+        PacketHeader::new(
+            PacketType::PingRequest,
+            EncryptionMethod::None,
+            PING_SESSION_ID,
+            PING_TOKEN,
+        ),
+        &[],
+    )
+}
+
+pub fn build_ping_response() -> Vec<u8> {
+    encode_control(
+        PacketHeader::new(
+            PacketType::PingResponse,
+            EncryptionMethod::None,
+            PING_SESSION_ID,
+            PING_TOKEN,
+        ),
         &[],
     )
 }
@@ -631,8 +663,16 @@ pub fn find_tlv(attributes: &[Tlv], kind: TlvType) -> Option<&Tlv> {
 mod tests {
     use super::*;
 
+    fn decode_hex(value: &str) -> Vec<u8> {
+        let compact: String = value.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        (0..compact.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&compact[offset..offset + 2], 16).unwrap())
+            .collect()
+    }
+
     #[test]
-    fn packet_type_table_matches_230_binary() {
+    fn packet_registry_matches_android_230() {
         assert_eq!(
             PacketType::ALL.map(|kind| kind as u8),
             [
@@ -643,112 +683,80 @@ mod tests {
     }
 
     #[test]
-    fn header_round_trip() {
+    fn ping_matches_specification_vector() {
+        assert_eq!(
+            build_ping_request(),
+            decode_hex("2900ffffffffffff0a6dd17cf9e6d40493ee1f0e6b4dc521")
+        );
+    }
+
+    #[test]
+    fn signed_close_matches_specification_vector() {
         let header = PacketHeader::new(
-            PacketType::DataEncrypt,
+            PacketType::Close,
             EncryptionMethod::Xor,
             0x1234,
             0x89ab_cdef,
         );
         assert_eq!(
-            header.encode(),
-            [0x18, 0x01, 0x12, 0x34, 0x89, 0xab, 0xcd, 0xef]
+            build_close(header),
+            decode_hex("1701123489abcdefc1ee1606aa425b8bd62cafd88e89f052")
         );
-        assert_eq!(PacketHeader::decode(&header.encode()).unwrap(), header);
+        assert!(decode_packet(&header.encode()).is_ok());
     }
 
     #[test]
-    fn tlv_round_trip() {
-        let attributes = [
-            Tlv::mtu(1400),
-            Tlv::username("alice").unwrap(),
-            Tlv::auth_verify(0x1020_3040),
-        ];
-        let mut encoded = Vec::new();
-        for attribute in &attributes {
-            attribute.encode(&mut encoded).unwrap();
+    fn open_matches_specification_vector() {
+        assert_eq!(
+            build_open("alice", "secret", 1400, EncryptionMethod::Xor, None, None).unwrap(),
+            decode_hex(
+                "13010000000000003601680de3a6b3dd336ac557c87b501b
+                 030405780107616c6963650212567e3c4f58d08532529f8191
+                 a0ae0d9d080301"
+            )
+        );
+    }
+
+    #[test]
+    fn tlv_parser_matches_android_trailing_suffix_quirk() {
+        let mut bytes = Vec::new();
+        Tlv::mtu(1400).encode(&mut bytes).unwrap();
+        bytes.extend_from_slice(&[0xaa, 0xbb]);
+        assert_eq!(Tlv::parse_all(&bytes).unwrap(), [Tlv::mtu(1400)]);
+        assert!(Tlv::parse_complete(&bytes).is_err());
+    }
+
+    #[test]
+    fn integer_and_prefix_decoders_match_android() {
+        for (bytes, expected) in [
+            (vec![2], 2),
+            (vec![1, 2], 0x0102),
+            (vec![1, 2, 3, 4], 0x0102_0304),
+        ] {
+            let tlv = Tlv::new(TlvType::Mtu, bytes).unwrap();
+            assert_eq!(tlv.as_integer().unwrap(), expected);
         }
-        assert_eq!(Tlv::parse_all(&encoded).unwrap(), attributes);
+        let ip = Tlv::new(TlvType::Ip, [192, 0, 2, 1, 99]).unwrap();
+        assert_eq!(ip.first_ipv4().unwrap(), Ipv4Addr::new(192, 0, 2, 1));
     }
 
     #[test]
-    fn control_signature_detects_modification() {
-        let header = PacketHeader::new(PacketType::Close, EncryptionMethod::Xor, 1, 2);
-        let mut packet = encode_control(header, &[]);
-        assert_eq!(decode_packet(&packet).unwrap().header, header);
-        packet[8] ^= 1;
-        assert!(matches!(
-            decode_packet(&packet),
-            Err(Error::InvalidSignature)
-        ));
-    }
-
-    #[test]
-    fn echo_response_accepts_compact_and_extended_forms() {
-        let timestamp = 0x0102_0304_0506_0708_u64;
-        assert_eq!(
-            parse_echo_response(&timestamp.to_be_bytes()).unwrap(),
-            EchoResponse {
-                timestamp_micros: timestamp,
-                delay_stats: None,
-            }
+    fn echo_body_is_twenty_bytes_and_little_endian() {
+        let echo = EchoBody::new(
+            0x0102_0304_0506_0708,
+            EchoDelayStats {
+                current_micros: 0x1112_1314,
+                minimum_micros: 0x2122_2324,
+                maximum_micros: 0x3132_3334,
+            },
         );
-
-        let response = build_echo_response(
-            PacketHeader::new(PacketType::EchoRequest, EncryptionMethod::Xor, 1, 2),
-            timestamp,
-            10,
-            5,
-            20,
-        );
-        let decoded = decode_packet(&response).unwrap();
         assert_eq!(
-            parse_echo_response(&decoded.body).unwrap(),
-            EchoResponse {
-                timestamp_micros: timestamp,
-                delay_stats: Some(EchoDelayStats {
-                    current_micros: 10,
-                    minimum_micros: 5,
-                    maximum_micros: 20,
-                }),
-            }
-        );
-
-        assert!(matches!(
-            parse_echo_response(&[0_u8; 12]),
-            Err(Error::PacketTooShort {
-                minimum: 20,
-                actual: 12
-            })
-        ));
-    }
-
-    #[test]
-    fn open_contains_auth_echo_last() {
-        let packet = build_open(
-            "alice",
-            "secret",
-            1400,
-            EncryptionMethod::Xor,
-            Some(7),
-            Some(9),
-        )
-        .unwrap();
-        let decoded = decode_packet(&packet).unwrap();
-        let attributes = Tlv::parse_all(&decoded.body).unwrap();
-        assert_eq!(
-            attributes
-                .iter()
-                .map(|attribute| attribute.kind)
-                .collect::<Vec<_>>(),
-            vec![
-                TlvType::Mtu,
-                TlvType::Username,
-                TlvType::Password,
-                TlvType::Encrypt,
-                TlvType::Link,
-                TlvType::AuthVerify
+            echo.encode(),
+            [
+                8, 7, 6, 5, 4, 3, 2, 1, 0x14, 0x13, 0x12, 0x11, 0x24, 0x23, 0x22, 0x21, 0x34, 0x33,
+                0x32, 0x31
             ]
         );
+        assert_eq!(EchoBody::decode(&echo.encode()).unwrap(), echo);
     }
 }

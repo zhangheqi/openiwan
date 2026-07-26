@@ -5,10 +5,7 @@ mod forward;
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
 #[cfg(feature = "managed")]
-use openiwan::managed::{
-    ManagedClient, ManagedServer, ManagedState, ProviderConfig, default_state_path, load_state,
-    new_device_id, save_state, select_server,
-};
+use openiwan::managed::{ManagedClient, ProviderConfig};
 use openiwan::protocol::{self, Tlv};
 use openiwan::tun::{RouteGuard, TunDevice, resolve_route_targets};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
@@ -185,12 +182,12 @@ struct DecodeArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedArgs {
-    /// Protected provider TOML file describing OIDC and controller parameters.
+    /// Provider TOML file describing OIDC and controller parameters.
     #[arg(long)]
     provider: PathBuf,
-    /// Override the managed state directory.
+    /// Controller device identifier.
     #[arg(long)]
-    state_dir: Option<PathBuf>,
+    device_id: String,
     #[command(subcommand)]
     action: ManagedCommand,
 }
@@ -198,55 +195,12 @@ struct ManagedArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Subcommand)]
 enum ManagedCommand {
-    /// Log in through OIDC and save the encrypted line configuration.
-    Fetch,
-    /// List saved lines without network access or password decryption.
-    List,
-    /// Select a saved line and connect.
-    Connect(ManagedConnectArgs),
-    /// Fetch, select, and connect, prompting from the line list when needed.
-    All(ManagedConnectArgs),
-    /// Select a saved line and forward TCP or proxy HTTP(S) without host routes.
-    #[cfg(feature = "forward")]
-    Forward(ManagedForwardArgs),
-}
-
-#[cfg(feature = "managed")]
-#[derive(Debug, Args)]
-struct ManagedConnectArgs {
-    /// Select a line by one-based index instead of prompting.
-    #[arg(long, conflicts_with = "line_name")]
-    line_index: Option<usize>,
-    /// Select a line by its unique exact name instead of prompting.
-    #[arg(long, conflicts_with = "line_index")]
-    line_name: Option<String>,
-    /// TUN interface name. Defaults to openiwan0 on Linux/Windows and an
-    /// automatically allocated utunN on macOS.
-    #[arg(long)]
-    tun: Option<String>,
-    #[arg(long)]
-    mtu: Option<u16>,
-    #[arg(long)]
-    encryption: Option<EncryptionMethod>,
-    #[command(flatten)]
-    routes: RouteArgs,
-}
-
-#[cfg(all(feature = "managed", feature = "forward"))]
-#[derive(Debug, Args)]
-struct ManagedForwardArgs {
-    /// Select a line by one-based index instead of prompting.
-    #[arg(long, conflicts_with = "line_name")]
-    line_index: Option<usize>,
-    /// Select a line by its unique exact name instead of prompting.
-    #[arg(long, conflicts_with = "line_index")]
-    line_name: Option<String>,
-    #[arg(long)]
-    mtu: Option<u16>,
-    #[arg(long)]
-    encryption: Option<EncryptionMethod>,
-    #[command(flatten)]
-    forward: ForwardOptions,
+    /// Authenticate with OIDC and print the dynamically decoded `/config` JSON.
+    Config {
+        /// Local posture version; omit it for a full posture refresh.
+        #[arg(long)]
+        posture_version: Option<String>,
+    },
 }
 
 fn main() {
@@ -261,7 +215,7 @@ fn run() -> Result<()> {
     init_logging(cli.verbose);
     match cli.command {
         Command::Ping(arguments) => {
-            let address = ClientConfig::new(arguments.server, true, 16).resolve_server()?;
+            let address = ClientConfig::new(arguments.server).resolve_server()?;
             let elapsed = client::ping(address, Duration::from_millis(arguments.timeout_ms))?;
             println!(
                 "reply from {address}: {:.3} ms",
@@ -365,150 +319,29 @@ fn run_forward(
 #[cfg(feature = "managed")]
 fn managed(arguments: ManagedArgs) -> Result<()> {
     let provider = ProviderConfig::load(&arguments.provider)?;
-    let state_path = default_state_path(&provider.id, arguments.state_dir.as_deref())?;
     let client = ManagedClient::new(provider);
     match arguments.action {
-        ManagedCommand::Fetch => {
-            let state = managed_fetch(&client, &state_path)?;
-            print_servers(&state);
-        }
-        ManagedCommand::List => {
-            let state = load_managed_state(&client, &state_path)?;
-            print_servers(&state);
-        }
-        ManagedCommand::Connect(connect) => {
-            let state = load_managed_state(&client, &state_path)?;
-            managed_connect(&client, &state, &connect)?;
-        }
-        ManagedCommand::All(connect) => {
-            let state = managed_fetch(&client, &state_path)?;
-            managed_connect(&client, &state, &connect)?;
-        }
-        #[cfg(feature = "forward")]
-        ManagedCommand::Forward(forward) => {
-            let state = load_managed_state(&client, &state_path)?;
-            managed_forward(&client, &state, &forward)?;
+        ManagedCommand::Config { posture_version } => {
+            let pending = client.begin_authorization()?;
+            println!(
+                "Open this URL in a browser and complete authentication:\n\n{}\n",
+                pending.authorization_url()
+            );
+            let redirect = prompt_line("Paste the complete callback URL: ")?;
+            let identity = client.complete_authorization(&pending, &redirect)?;
+            let configuration = client.fetch_configuration(
+                &identity,
+                &arguments.device_id,
+                posture_version.as_deref(),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(configuration.raw())
+                    .map_err(|error| Error::Controller(error.to_string()))?
+            );
         }
     }
     Ok(())
-}
-
-#[cfg(feature = "managed")]
-fn managed_fetch(client: &ManagedClient, state_path: &Path) -> Result<ManagedState> {
-    let device_id = if state_path.exists() {
-        let state = load_managed_state(client, state_path)?;
-        state.device_id
-    } else {
-        new_device_id()
-    };
-    let pending = client.begin_authorization()?;
-    println!(
-        "Open this URL in a browser and complete authentication:\n\n{}\n",
-        pending.authorization_url()
-    );
-    let redirect = prompt_line("Paste the complete callback URL: ")?;
-    let state = client.fetch(&pending, &redirect, &device_id)?;
-    save_state(state_path, &state)?;
-    println!(
-        "saved {} line(s) to {}",
-        state.servers.len(),
-        state_path.display()
-    );
-    Ok(state)
-}
-
-#[cfg(feature = "managed")]
-fn load_managed_state(client: &ManagedClient, state_path: &Path) -> Result<ManagedState> {
-    let state = load_state(state_path)?;
-    state.validate_for(&client.provider().id, &client.provider().controller.domain)?;
-    Ok(state)
-}
-
-#[cfg(feature = "managed")]
-fn managed_connect(
-    client: &ManagedClient,
-    state: &ManagedState,
-    arguments: &ManagedConnectArgs,
-) -> Result<()> {
-    let selected =
-        select_or_prompt_server(state, arguments.line_index, arguments.line_name.as_deref())?;
-    println!("connecting to {} ({})", selected.name, selected.endpoint());
-
-    let mut config = ClientConfig::new(
-        selected.endpoint(),
-        client.provider().require_auth_verify_echo,
-        client.provider().xor_key_bytes,
-    );
-    if let Some(mtu) = arguments.mtu {
-        config.mtu = mtu;
-    }
-    if let Some(encryption) = arguments.encryption {
-        config.encryption = encryption;
-    }
-    let iwan_client = client.build_client(state, selected, config)?;
-    run_client(iwan_client, arguments.tun.as_deref(), &arguments.routes)
-}
-
-#[cfg(all(feature = "managed", feature = "forward"))]
-fn managed_forward(
-    client: &ManagedClient,
-    state: &ManagedState,
-    arguments: &ManagedForwardArgs,
-) -> Result<()> {
-    let selected =
-        select_or_prompt_server(state, arguments.line_index, arguments.line_name.as_deref())?;
-    println!("connecting to {} ({})", selected.name, selected.endpoint());
-
-    let mut config = ClientConfig::new(
-        selected.endpoint(),
-        client.provider().require_auth_verify_echo,
-        client.provider().xor_key_bytes,
-    );
-    if let Some(mtu) = arguments.mtu {
-        config.mtu = mtu;
-    }
-    if let Some(encryption) = arguments.encryption {
-        config.encryption = encryption;
-    }
-    let iwan_client = client.build_client(state, selected, config)?;
-    run_forward(
-        iwan_client,
-        &arguments.forward,
-        &client.provider().dns_servers,
-    )
-}
-
-#[cfg(feature = "managed")]
-fn select_or_prompt_server<'a>(
-    state: &'a ManagedState,
-    line_index: Option<usize>,
-    line_name: Option<&str>,
-) -> Result<&'a ManagedServer> {
-    if let Some(server) = select_server(state, line_index, line_name)? {
-        return Ok(server);
-    }
-    print_servers(state);
-    prompt_for_server(state)
-}
-
-#[cfg(feature = "managed")]
-fn print_servers(state: &ManagedState) {
-    for (index, server) in state.servers.iter().enumerate() {
-        println!("{}. {} ({})", index + 1, server.name, server.endpoint());
-    }
-}
-
-#[cfg(feature = "managed")]
-fn prompt_for_server(state: &ManagedState) -> Result<&ManagedServer> {
-    loop {
-        let value = prompt_line(&format!("Select line [1-{}]: ", state.servers.len()))?;
-        if let Ok(index) = value.parse::<usize>()
-            && let Ok(Some(server)) = select_server(state, Some(index), None)
-        {
-            return Ok(server);
-        }
-        eprintln!("invalid line selection");
-    }
 }
 
 #[cfg(feature = "managed")]
@@ -535,8 +368,6 @@ fn build_client(arguments: &ConnectionArgs) -> Result<Client> {
                 .server
                 .clone()
                 .ok_or_else(|| Error::InvalidConfig("--server or --config is required".into()))?,
-            true,
-            16,
         )
     };
     if let Some(server) = &arguments.server {
@@ -603,6 +434,39 @@ fn prompt_password(prompt: &str) -> Result<String> {
 
 fn decode(hex: &str) -> Result<()> {
     let bytes = decode_hex(hex)?;
+    if bytes.first().copied() == Some(protocol::PacketType::SegmentRouting as u8) {
+        let (header, header_length) = openiwan::sr::SrHeader::parse(&bytes)?;
+        let inner = protocol::PacketHeader::decode_inner(
+            bytes
+                .get(header_length..)
+                .ok_or(Error::InvalidSegmentRouting("missing SR inner header"))?,
+        )?;
+        println!(
+            "sr next_id={} links={} algorithm={:?} padding={}",
+            header.next_id,
+            header
+                .links
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            header.algorithm,
+            header.padding_length
+        );
+        println!(
+            "inner type={} encryption={} session_id={} token={:#010x}",
+            inner.packet_type, inner.encryption, inner.session_id, inner.token
+        );
+        println!(
+            "body={}",
+            encode_hex(
+                bytes
+                    .get(header_length + protocol::HEADER_LEN..)
+                    .ok_or(Error::InvalidSegmentRouting("missing SR inner body"))?
+            )
+        );
+        return Ok(());
+    }
     let packet = protocol::decode_packet(&bytes)?;
     println!(
         "type={} encryption={} session_id={} token={:#010x}",
@@ -667,6 +531,7 @@ fn print_session(session: &openiwan::SessionInfo) {
     println!("  token: {:#010x}", session.token);
     println!("  encryption: {}", session.encryption);
     println!("  MTU: {}", session.mtu);
+    println!("  segment routing: {}", session.segment_routing);
     println!(
         "  address: {}",
         session
@@ -749,75 +614,29 @@ mod tests {
 
     #[cfg(feature = "managed")]
     #[test]
-    fn parses_managed_commands_and_rejects_conflicting_selectors() {
+    fn parses_managed_config_command() {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "managed",
             "--provider",
             "provider.toml",
-            "connect",
-            "--line-index",
-            "2",
-            "--route-ip",
-            "192.0.2.10",
+            "--device-id",
+            "device-1",
+            "config",
+            "--posture-version",
+            "v2",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Command::Managed(ManagedArgs {
-                action: ManagedCommand::Connect(ManagedConnectArgs {
-                    line_index: Some(2),
-                    ..
-                }),
+                device_id,
+                action: ManagedCommand::Config {
+                    posture_version: Some(version)
+                },
                 ..
-            })
+            }) if device_id == "device-1" && version == "v2"
         ));
-
-        assert!(
-            Cli::try_parse_from([
-                "openiwan",
-                "managed",
-                "--provider",
-                "provider.toml",
-                "connect",
-                "--line-index",
-                "1",
-                "--line-name",
-                "Education",
-            ])
-            .is_err()
-        );
-    }
-
-    #[cfg(feature = "managed")]
-    #[test]
-    fn explicit_managed_selector_resolves_without_prompting() {
-        let state: ManagedState = serde_json::from_value(serde_json::json!({
-            "version": openiwan::managed::STATE_VERSION,
-            "provider_id": "test",
-            "domain": "test",
-            "device_id": "device",
-            "fetched_at_unix": 0,
-            "servers": [{
-                "name": "Education",
-                "host": "192.0.2.1",
-                "port": 6001,
-                "username": "alice",
-                "encrypted_password": "encrypted"
-            }]
-        }))
-        .unwrap();
-
-        assert_eq!(
-            select_or_prompt_server(&state, Some(1), None).unwrap().name,
-            "Education"
-        );
-        assert_eq!(
-            select_or_prompt_server(&state, None, Some("Education"))
-                .unwrap()
-                .endpoint(),
-            "192.0.2.1:6001"
-        );
     }
 
     #[cfg(feature = "forward")]
@@ -868,42 +687,5 @@ mod tests {
             ])
             .is_err()
         );
-    }
-
-    #[cfg(all(feature = "managed", feature = "forward"))]
-    #[test]
-    fn parses_managed_forward() {
-        let parsed = Cli::try_parse_from([
-            "openiwan",
-            "managed",
-            "--provider",
-            "provider.toml",
-            "forward",
-            "--line-name",
-            "Education",
-            "--target",
-            "https://db.example.test",
-            "--ca-cert",
-            "root-a.pem",
-            "--ca-cert",
-            "root-b.pem",
-        ])
-        .unwrap();
-        assert!(matches!(
-            parsed.command,
-            Command::Managed(ManagedArgs {
-                action: ManagedCommand::Forward(ManagedForwardArgs {
-                    line_name: Some(name),
-                    forward: ForwardOptions {
-                        ca_certificates,
-                        ..
-                    },
-                    ..
-                }),
-                ..
-            }) if name == "Education"
-                && ca_certificates
-                    == vec![PathBuf::from("root-a.pem"), PathBuf::from("root-b.pem")]
-        ));
     }
 }

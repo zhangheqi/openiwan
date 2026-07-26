@@ -1,5 +1,5 @@
 use super::http::{HttpRequest, HttpTransport};
-use super::provider::{ProviderConfig, TokenRequestFormat};
+use super::provider::OidcConfig;
 use crate::{Error, Result};
 use base64::Engine;
 use jsonwebtoken::jwk::{Jwk, JwkSet};
@@ -47,8 +47,9 @@ impl PendingAuthorization {
     }
 }
 
-pub(crate) struct OidcIdentity {
+pub struct OidcIdentity {
     pub access_token: Zeroizing<String>,
+    pub refresh_token: Zeroizing<String>,
     pub username: String,
 }
 
@@ -57,24 +58,24 @@ impl std::fmt::Debug for OidcIdentity {
         formatter
             .debug_struct("OidcIdentity")
             .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
             .field("username", &self.username)
             .finish()
     }
 }
 
 #[derive(Deserialize)]
+#[allow(clippy::struct_field_names)]
 struct TokenResponse {
     access_token: String,
+    refresh_token: String,
     id_token: String,
 }
 
-pub fn begin<T: HttpTransport>(
-    provider: &ProviderConfig,
-    transport: &T,
-) -> Result<PendingAuthorization> {
+pub fn begin<T: HttpTransport>(oidc: &OidcConfig, transport: &T) -> Result<PendingAuthorization> {
     let discovery_url = format!(
         "{}/.well-known/openid-configuration",
-        provider.oidc.issuer.trim_end_matches('/')
+        oidc.issuer.trim_end_matches('/')
     );
     let response = transport.execute(HttpRequest {
         method: "GET",
@@ -90,7 +91,7 @@ pub fn begin<T: HttpTransport>(
     }
     let discovery: DiscoveryDocument = serde_json::from_slice(&response.body)
         .map_err(|error| Error::Oidc(format!("invalid discovery document: {error}")))?;
-    validate_discovery(provider, &discovery)?;
+    validate_discovery(oidc, &discovery)?;
 
     let code_verifier = random_urlsafe(64);
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -101,14 +102,16 @@ pub fn begin<T: HttpTransport>(
         parse_https_url("authorization endpoint", &discovery.authorization_endpoint)?;
     authorization_url
         .query_pairs_mut()
-        .append_pair("client_id", &provider.oidc.client_id)
-        .append_pair("redirect_uri", &provider.oidc.redirect_uri)
+        .append_pair("client_id", &oidc.client_id)
+        .append_pair("redirect_uri", &oidc.redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", &provider.oidc.scopes.join(" "))
+        .append_pair("scope", &oidc.scopes.join(" "))
         .append_pair("code_challenge", &code_challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &state)
-        .append_pair("nonce", &nonce);
+        .append_pair("nonce", &nonce)
+        .append_pair("organization", &oidc.organization)
+        .append_pair("provider", &oidc.provider);
 
     Ok(PendingAuthorization {
         authorization_url,
@@ -120,14 +123,14 @@ pub fn begin<T: HttpTransport>(
 }
 
 pub(crate) fn complete<T: HttpTransport>(
-    provider: &ProviderConfig,
+    oidc: &OidcConfig,
     transport: &T,
     pending: &PendingAuthorization,
     redirect_url: &str,
 ) -> Result<OidcIdentity> {
     let redirect = Url::parse(redirect_url)
         .map_err(|error| Error::Oidc(format!("invalid callback URL: {error}")))?;
-    validate_redirect_uri(&provider.oidc.redirect_uri, &redirect)?;
+    validate_redirect_uri(&oidc.redirect_uri, &redirect)?;
     let query: std::collections::HashMap<String, String> =
         redirect.query_pairs().into_owned().collect();
     if let Some(error) = query.get("error") {
@@ -151,7 +154,7 @@ pub(crate) fn complete<T: HttpTransport>(
             .ok_or_else(|| Error::Oidc("callback URL has no authorization code".into()))?,
     );
 
-    let (content_type, body) = token_request_body(provider, &code, &pending.code_verifier)?;
+    let (content_type, body) = token_request_body(oidc, &code, &pending.code_verifier);
     let response = transport.execute(HttpRequest {
         method: "POST",
         url: pending.discovery.token_endpoint.clone(),
@@ -167,23 +170,26 @@ pub(crate) fn complete<T: HttpTransport>(
     let response_body = Zeroizing::new(response.body);
     let token: TokenResponse = serde_json::from_slice(&response_body)
         .map_err(|error| Error::Oidc(format!("invalid token response: {error}")))?;
-    if token.access_token.is_empty() || token.id_token.is_empty() {
+    if token.access_token.is_empty() || token.refresh_token.is_empty() || token.id_token.is_empty()
+    {
         return Err(Error::Oidc(
-            "token response is missing access_token or id_token".into(),
+            "token response is missing access_token, refresh_token, or id_token".into(),
         ));
     }
     let access_token = Zeroizing::new(token.access_token);
+    let refresh_token = Zeroizing::new(token.refresh_token);
     let id_token = Zeroizing::new(token.id_token);
-    let claims = validate_id_token(provider, transport, pending, &id_token)?;
-    let username = extract_username(provider, &claims)?;
+    let claims = validate_id_token(oidc, transport, pending, &id_token)?;
+    let username = extract_username(oidc, &claims)?;
     Ok(OidcIdentity {
         access_token,
+        refresh_token,
         username,
     })
 }
 
-fn validate_discovery(provider: &ProviderConfig, discovery: &DiscoveryDocument) -> Result<()> {
-    if discovery.issuer.trim_end_matches('/') != provider.oidc.issuer.trim_end_matches('/') {
+fn validate_discovery(oidc: &OidcConfig, discovery: &DiscoveryDocument) -> Result<()> {
+    if discovery.issuer.trim_end_matches('/') != oidc.issuer.trim_end_matches('/') {
         return Err(Error::Oidc(
             "discovery issuer does not match the provider configuration".into(),
         ));
@@ -234,39 +240,23 @@ fn validate_redirect_uri(expected: &str, actual: &Url) -> Result<()> {
 }
 
 fn token_request_body(
-    provider: &ProviderConfig,
+    oidc: &OidcConfig,
     code: &str,
     code_verifier: &str,
-) -> Result<(&'static str, Vec<u8>)> {
-    match provider.oidc.token_request_format {
-        TokenRequestFormat::Json => {
-            let value = serde_json::json!({
-                "client_id": provider.oidc.client_id,
-                "code": code,
-                "code_verifier": code_verifier,
-                "redirect_uri": provider.oidc.redirect_uri,
-                "grant_type": "authorization_code",
-            });
-            serde_json::to_vec(&value)
-                .map(|body| ("application/json", body))
-                .map_err(|error| Error::Oidc(format!("serialize token request: {error}")))
-        }
-        TokenRequestFormat::Form => {
-            let body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("client_id", &provider.oidc.client_id)
-                .append_pair("code", code)
-                .append_pair("code_verifier", code_verifier)
-                .append_pair("redirect_uri", &provider.oidc.redirect_uri)
-                .append_pair("grant_type", "authorization_code")
-                .finish()
-                .into_bytes();
-            Ok(("application/x-www-form-urlencoded", body))
-        }
-    }
+) -> (&'static str, Vec<u8>) {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", &oidc.client_id)
+        .append_pair("code", code)
+        .append_pair("code_verifier", code_verifier)
+        .append_pair("redirect_uri", &oidc.redirect_uri)
+        .append_pair("grant_type", "authorization_code")
+        .finish()
+        .into_bytes();
+    ("application/x-www-form-urlencoded", body)
 }
 
 fn validate_id_token<T: HttpTransport>(
-    provider: &ProviderConfig,
+    oidc: &OidcConfig,
     transport: &T,
     pending: &PendingAuthorization,
     token: &str,
@@ -318,7 +308,7 @@ fn validate_id_token<T: HttpTransport>(
     let key = DecodingKey::from_jwk(jwk)
         .map_err(|error| Error::Oidc(format!("unsupported JWK: {error}")))?;
     let mut validation = Validation::new(header.alg);
-    validation.set_audience(&[provider.oidc.client_id.as_str()]);
+    validation.set_audience(&[oidc.client_id.as_str()]);
     validation.set_issuer(&[pending.discovery.issuer.as_str()]);
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     let token_data = decode::<Value>(token, &key, &validation)
@@ -346,17 +336,15 @@ fn select_jwk<'a>(set: &'a JwkSet, key_id: Option<&str>) -> Result<&'a Jwk> {
     }
 }
 
-fn extract_username(provider: &ProviderConfig, claims: &Value) -> Result<String> {
-    for name in &provider.oidc.username_claims {
-        if let Some(value) = claims.get(name).and_then(Value::as_str)
-            && !value.trim().is_empty()
-        {
-            return Ok(value.to_owned());
-        }
+fn extract_username(oidc: &OidcConfig, claims: &Value) -> Result<String> {
+    if let Some(value) = claims.get(&oidc.username_claim).and_then(Value::as_str)
+        && !value.trim().is_empty()
+    {
+        return Ok(value.to_owned());
     }
     Err(Error::Oidc(format!(
-        "ID token contains none of the configured username claims: {}",
-        provider.oidc.username_claims.join(", ")
+        "ID token does not contain username claim {:?}",
+        oidc.username_claim
     )))
 }
 
@@ -378,9 +366,7 @@ fn random_urlsafe(length: usize) -> String {
 mod tests {
     use super::*;
     use crate::managed::http::{HttpResponse, HttpTransport};
-    use crate::managed::provider::{
-        ControllerConfig, OidcConfig, PROVIDER_VERSION, TokenRequestFormat,
-    };
+    use crate::managed::provider::OidcConfig;
     use jsonwebtoken::{EncodingKey, Header, encode};
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -411,33 +397,15 @@ mod tests {
         }
     }
 
-    fn provider() -> ProviderConfig {
-        ProviderConfig {
-            version: PROVIDER_VERSION,
-            id: "test".into(),
-            display_name: "Test".into(),
-            dns_servers: Vec::new(),
-            require_auth_verify_echo: false,
-            xor_key_bytes: 16,
-            oidc: OidcConfig {
-                issuer: "https://auth.example.test".into(),
-                client_id: "client-id".into(),
-                redirect_uri: "com.example.app://oauth2redirect".into(),
-                scopes: vec!["openid".into(), "profile".into()],
-                username_claims: vec!["name".into(), "sub".into()],
-                token_request_format: TokenRequestFormat::Json,
-            },
-            controller: ControllerConfig {
-                base_url: "https://controller.example.test".into(),
-                domain: "iwan.example".into(),
-                app_id: "controller-example".into(),
-                app_secret: "secret".into(),
-                auth_path: "/m/auth".into(),
-                keepalive_path: "/m/keepalive".into(),
-                config_path: "/m/config".into(),
-                device_type: "android".into(),
-                oem_name: "example-oem".into(),
-            },
+    fn oidc() -> OidcConfig {
+        OidcConfig {
+            issuer: "https://auth.example.test".into(),
+            client_id: "client-id".into(),
+            redirect_uri: "com.example.app://oauth2redirect".into(),
+            scopes: vec!["openid".into(), "profile".into()],
+            username_claim: "name".into(),
+            organization: "example".into(),
+            provider: "oidc".into(),
         }
     }
 
@@ -468,10 +436,10 @@ mod tests {
 
     #[test]
     fn validates_full_pkce_oidc_exchange() {
-        let provider = provider();
+        let oidc = oidc();
         let transport = MockTransport::default();
         transport.push_json(discovery());
-        let pending = begin(&provider, &transport).unwrap();
+        let pending = begin(&oidc, &transport).unwrap();
         let query: std::collections::HashMap<_, _> = pending
             .authorization_url()
             .query_pairs()
@@ -480,6 +448,8 @@ mod tests {
         assert_eq!(query.get("code_challenge_method").unwrap(), "S256");
         assert_eq!(query.get("nonce").unwrap(), pending.nonce.as_str());
         assert_eq!(query.get("state").unwrap(), pending.state.as_str());
+        assert_eq!(query.get("organization").unwrap(), "example");
+        assert_eq!(query.get("provider").unwrap(), "oidc");
 
         let now = jsonwebtoken::get_current_timestamp();
         let claims = serde_json::json!({
@@ -501,6 +471,7 @@ mod tests {
         .unwrap();
         transport.push_json(serde_json::json!({
             "access_token": "access-token-value",
+            "refresh_token": "refresh-token-value",
             "id_token": id_token
         }));
         transport.push_json(serde_json::json!({
@@ -518,7 +489,7 @@ mod tests {
             "com.example.app://oauth2redirect?code=authorization-code&state={}",
             pending.state.as_str()
         );
-        let identity = complete(&provider, &transport, &pending, &redirect).unwrap();
+        let identity = complete(&oidc, &transport, &pending, &redirect).unwrap();
         assert_eq!(identity.username, "alice");
         assert_eq!(identity.access_token.as_str(), "access-token-value");
 
@@ -526,17 +497,24 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[1].method, "POST");
         assert_eq!(requests[1].url, "https://auth.example.test/token");
-        assert!(String::from_utf8_lossy(&requests[1].body).contains("\"code_verifier\""));
+        assert_eq!(
+            requests[1].headers,
+            vec![(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into()
+            )]
+        );
+        assert!(String::from_utf8_lossy(&requests[1].body).contains("code_verifier="));
     }
 
     #[test]
     fn rejects_callback_state_before_token_exchange() {
-        let provider = provider();
+        let oidc = oidc();
         let transport = MockTransport::default();
         transport.push_json(discovery());
-        let pending = begin(&provider, &transport).unwrap();
+        let pending = begin(&oidc, &transport).unwrap();
         let error = complete(
-            &provider,
+            &oidc,
             &transport,
             &pending,
             "com.example.app://oauth2redirect?code=x&state=wrong",

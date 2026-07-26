@@ -87,33 +87,60 @@ checks the Authenticode signature while loading the DLL by absolute path.
 Creating a Wintun adapter or changing routes requires an elevated process.
 Commands that do not create TUN state remain usable without elevation.
 
-## Route-free HTTP proxy
+## Route-free forwarding
 
-The `serve` command accepts only a fixed HTTP or HTTPS origin and a loopback
-listen address. For HTTPS, it validates the upstream certificate chain,
-hostname, and SNI with system roots plus explicitly supplied CA files. There is
-no option to disable HTTPS verification, and the connector cannot select a
-destination from an incoming request. An HTTP upstream uses plain TCP and
-provides no TLS confidentiality or server authentication.
+The `forward` command accepts one fixed URI target and a loopback listen
+address. Bare `HOST:PORT` values are rejected: `tcp://HOST:PORT` selects raw
+TCP, while `http://HOST[:PORT]` and `https://HOST[:PORT]` select an HTTP/1.1
+reverse proxy with default ports 80 and 443. The destination cannot be selected
+from an incoming connection, and there is no `--target-ip` override.
+
+For a `tcp://` target, each accepted connection carries arbitrary bytes
+unchanged in both directions through the iWAN userspace TCP/IP stack. OpeniWAN
+does not inspect the application protocol, terminate TLS, or verify the
+target's application-level identity.
+
+For HTTP(S), the local side is always plaintext HTTP/1.1. The proxy rewrites
+`Host` to the fixed target authority and removes hop-by-hop headers. Application
+credentials such as `Authorization` are forwarded without being logged.
+Incoming `CONNECT`, WebSocket and other HTTP Upgrade requests, and HTTP/2 are
+not supported.
+
+An `https://` domain target uses the target hostname for SNI and certificate
+verification. An IP literal is verified as an IP certificate identity. System
+roots are always loaded, and repeatable `--ca-cert` files can add private trust
+anchors; adding one expands the set of trusted issuers. There is no option to
+disable verification, and `--ca-cert` is rejected for `tcp://` and `http://`
+targets. An `http://` target uses unencrypted TCP inside iWAN and provides no
+TLS confidentiality or server authentication.
 
 Organization DNS queries can run through the iWAN userspace stack. The client
 checks transaction IDs, response metadata and questions, bounds CNAME depth,
 caches positive results with bounded TTLs, and retries truncated UDP replies
 over TCP. `auto` rejects host-DNS answers in the common `198.18.0.0/15`
-Fake-IP range. `--dns-mode iwan` prohibits host-DNS fallback.
+Fake-IP range. `--dns-mode iwan` prohibits host-DNS fallback, while
+`--dns-mode system` explicitly exposes the target hostname to the host
+resolver. `--dns-timeout-ms` bounds each resolver attempt, while
+`--connect-timeout-ms` bounds the complete DNS, TCP, and, for HTTPS, TLS setup.
 
-`--upstream-ip` remains an emergency DNS bypass, but does not change the HTTP
-Host or, for HTTPS, the SNI or certificate identity. Supplying an address
-therefore does not disable or weaken HTTPS certificate verification.
+A literal IPv4 or bracketed IPv6 address in the target URI bypasses DNS. With
+HTTPS it remains the certificate identity and must be covered by the upstream
+certificate; it does not disable or weaken verification.
 
-Hop-by-hop headers are removed, while application credentials such as
-`Authorization` are forwarded without being logged. The local side is plain
-HTTP and is intended only for processes on the same host; browser cookie/SSO,
-mTLS, WebSocket, and HTTP/2 behavior are not security claims of this mode.
+The loopback listener is intended only for processes on the same host, but it
+does not authenticate local clients. Any process that can connect to the
+listener can exchange bytes with a TCP target or issue HTTP requests to the
+configured origin. Bind only the required port and stop the forwarder when it
+is no longer needed. Browser cookie/SSO and mTLS behavior are not security
+claims of this mode. The forwarder caps active connections at 256 and closes
+newly accepted sockets while at capacity.
 
-When an HTTPS upstream is used, TLS protects application payloads even though
-the underlying legacy iWAN data plane lacks authenticated encryption. An HTTP
-upstream has no such protection. Destination metadata and
-traffic patterns remain visible to the iWAN transport. Only the outer iWAN UDP
-socket necessarily uses the host's existing routes and may be affected by
-another VPN.
+For raw TCP, application-level confidentiality, integrity, and server
+authentication remain the responsibility of the local client and target
+service; end-to-end TLS passes through unchanged when those endpoints use it.
+For an HTTPS target, the proxy's upstream TLS protects the HTTP payload. HTTP
+and non-TLS TCP targets receive no such protection from the legacy iWAN data
+plane, which does not add modern authenticated encryption. Destination
+metadata and traffic patterns remain visible to the iWAN transport. Only the
+outer iWAN UDP socket necessarily uses the host's existing routes and may be
+affected by another VPN.

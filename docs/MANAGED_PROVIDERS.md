@@ -54,7 +54,7 @@ Provider files contain controller application material. Copy them with mode
 
 `dns_servers` is a required list of recursive resolver IP addresses reachable
 inside iWAN. Use `[]` when a deployment relies only on DNS attributes from
-OPENACK. `managed serve` queries configured resolvers through the userspace
+OPENACK. `managed forward` queries configured resolvers through the userspace
 iWAN stack, so another VPN cannot replace answers with Fake-IP records.
 Resolver addresses must be unicast; provider addresses use DNS port 53.
 
@@ -107,25 +107,43 @@ the interface is changed. Duplicate targets are removed. Default routes and
 routes containing the active iWAN endpoint are rejected; full-tunnel routing is
 not implemented.
 
-## Route-free HTTP(S) API proxy
+## Route-free forwarding
 
-The `serve` managed action selects and decrypts a saved line exactly like
+The `forward` managed action selects and decrypts a saved line exactly like
 `connect`, but it does not create a TUN interface or modify host routes:
 
 ```bash
 openiwan managed \
   --provider "$HOME/.config/openiwan/providers/provider.toml" \
-  serve --line-index 1 --upstream https://api.example.edu
+  forward --line-index 1 \
+  --listen 127.0.0.1:8080 \
+  --target https://api.example.edu \
+  --ca-cert organization-ca.pem
 ```
 
-It binds `127.0.0.1:8080` by default and forwards local HTTP/1.1 requests to the
-fixed HTTP or HTTPS origin through an in-process TCP/IP stack. Use `--listen`
-for a different loopback address and repeat `--ca-cert` for private HTTPS CA
-roots.
+It binds `127.0.0.1:8080` by default; `--listen` may select a different
+loopback address. `--target` must be a URI: `tcp://HOST:PORT` selects a raw
+bidirectional byte stream and requires the port, while `http://HOST[:PORT]` and
+`https://HOST[:PORT]` select an HTTP/1.1 reverse proxy with default ports 80
+and 443. Bare `HOST:PORT` values are not accepted. HTTP(S) targets must be
+origins without user information, a non-root path, query, or fragment.
+
+For HTTP(S), the local side remains plaintext HTTP/1.1. The proxy rewrites
+`Host` to the target authority, preserves streaming messages and application
+headers, and removes hop-by-hop headers. HTTPS uses the target hostname for SNI
+and certificate verification when the target is a domain; IP literals use IP
+certificate identities. System roots are loaded by default; repeat
+`--ca-cert` to add private CA files. That option is invalid for TCP and HTTP
+targets. CONNECT, WebSocket/Upgrade, and HTTP/2 are not supported.
+
 Organization DNS comes from `dns_servers` or OPENACK and runs inside iWAN with
 TTL caching and DNS-over-TCP fallback. `--dns-mode iwan` forbids host-DNS
-fallback. The managed state must already exist; run `fetch` first when it does
-not.
+fallback, `--dns-server` supplies an explicit resolver, and
+`--dns-timeout-ms` bounds each resolver attempt. A literal IPv4 or bracketed
+IPv6 address in the target URI bypasses resolution; there is no `--target-ip`
+override. `--connect-timeout-ms` bounds DNS, TCP, and, for HTTPS, TLS setup for
+each local connection. The managed state must already exist; run `fetch` first
+when it does not.
 
 ## Compatibility Boundary
 

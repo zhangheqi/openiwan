@@ -11,7 +11,7 @@ configuration-driven OIDC providers and the compatible Panabit mobile
 controller flow. It does not claim compatibility with controllers that use a
 different signing, response, or password-wrapping scheme. General operating
 system DNS/policy management and SEGRT/SR multipath remain outside the
-boundary; the route-free HTTP proxy includes its own bounded DNS client.
+boundary; route-free forwarding includes its own bounded DNS client.
 
 ## Crate Layout
 
@@ -25,7 +25,7 @@ boundary; the route-free HTTP proxy includes its own bounded DNS client.
 | `managed` | Provider validation, OIDC/JWKS, controller signing, encrypted line state |
 | `tun` | Cross-platform TUN, Wintun deployment, interface configuration, routes, and cleanup |
 | `error` | Public error model |
-| `bin/openiwan` | CLI, secret input, signals, userspace HTTP proxy, logging, and command dispatch |
+| `bin/openiwan` | CLI, secret input, signals, userspace forwarding, logging, and command dispatch |
 
 The `PacketDevice` trait is the boundary between protocol/session logic and a
 TUN interface or userspace IP stack.
@@ -151,32 +151,52 @@ Default routes are intentionally rejected. A future full-tunnel implementation
 must first pin the control endpoint to the physical uplink and provide
 platform-specific route restoration.
 
-## Route-free HTTP proxy
+## Route-free forwarding
 
-The default-enabled `http-proxy` feature adds a second `PacketDevice`
+The default-enabled `forward` feature adds a second `PacketDevice`
 implementation backed by bounded in-memory channels. A `tokio-smoltcp`
 IP-medium interface consumes the address, netmask, gateway, and MTU from
 `SessionInfo` and exposes asynchronous TCP streams. These routes exist only in
-that userspace stack.
+that userspace stack. Both `forward` and `managed forward` construct the same
+target connector and forwarding runtime.
 
-The local listener accepts HTTP/1.1 only on a loopback address. Hyper preserves
-streaming request and response bodies while a fixed-destination connector
-resolves the configured host through an organization DNS server inside iWAN,
-filters addresses to the iWAN session family, opens TCP through the userspace
-stack, and, for HTTPS, performs rustls certificate and SNI validation. HTTP
-upstreams use the same userspace TCP path without TLS. The connector never
-falls back to a host TCP socket.
+`--target` is parsed as a required URI. `tcp://HOST:PORT` requires an explicit
+port and selects a bidirectional byte relay that preserves TCP half-closes.
+`http://HOST[:PORT]` and `https://HOST[:PORT]` select an HTTP/1.1 reverse proxy
+and default to ports 80 and 443. Bare `HOST:PORT`, unknown schemes, user
+information, non-root paths, queries, and fragments are rejected.
+
+For every mode, the connector resolves the fixed target through organization
+DNS inside iWAN, filters addresses to the authenticated session family, and
+tries userspace TCP addresses in order. It never falls back to a host TCP
+socket. The shared session runtime permits 256 active local connections and
+applies `--connect-timeout-ms` across DNS and TCP setup.
+
+For HTTP(S), Hyper preserves methods, paths, queries, streaming request and
+response bodies, and end-to-end headers. The proxy rewrites `Host` to the target
+authority, removes hop-by-hop headers, and makes same-origin absolute
+`Location` values relative. The local listener remains plaintext HTTP/1.1.
+HTTPS adds rustls over the userspace stream and includes TLS setup in the
+connection timeout. Domain targets use the target hostname for SNI and
+certificate verification; IP literals use IP certificate identities. System
+roots plus repeatable `--ca-cert` files form the trust store. `--ca-cert` is
+invalid for other schemes. CONNECT, WebSocket/Upgrade, and HTTP/2 are outside
+this boundary. Request translation failures receive 400, upstream connection
+or protocol failures receive 502, and setup timeouts receive 504.
 
 ```mermaid
 flowchart LR
-    Local["Local HTTP client"] --> Listener["127.0.0.1 HTTP listener"]
-    Listener --> Upstream["Hyper HTTP client + optional rustls"]
-    Listener --> DNS["DNS UDP/TCP + TTL cache"]
+    Local["Local client"] --> Listener["Loopback listener"]
+    Listener -->|"tcp://"| Relay["Bidirectional byte relay"]
+    Listener -->|"http(s)://"| Proxy["HTTP/1.1 reverse proxy"]
+    Relay --> Connector["Fixed-target connector"]
+    Proxy --> Connector
+    Connector --> DNS["DNS UDP/TCP + TTL cache"]
     DNS --> Stack["Userspace TCP/IP stack"]
-    Upstream --> Stack
+    Connector --> Stack
     Stack --> Device["In-memory PacketDevice"]
     Device --> Client["iWAN Client UDP session"]
-    Client --> API["Organization HTTP(S) API"]
+    Client --> Target["Organization TCP or HTTP(S) service"]
 ```
 
 DNS transaction IDs, response headers, questions, address families, and bounded
@@ -185,9 +205,11 @@ truncation triggers a query to the same resolver over userspace TCP. Resolver
 selection prefers CLI/provider/OPENACK servers inside iWAN. `auto` uses host DNS
 only when no iWAN resolver exists; failure of a configured iWAN resolver is
 fail-closed. Host `198.18.0.0/15` Fake-IP answers are rejected. `iwan` requires
-an iWAN resolver, while `system` explicitly selects host DNS. `--upstream-ip`
-remains an emergency override without changing HTTP Host or, for HTTPS, TLS
-SNI and certificate verification.
+an iWAN resolver, while `system` explicitly selects host DNS.
+`--dns-timeout-ms` bounds each resolver attempt. A literal IPv4 or bracketed
+IPv6 address in the target URI bypasses resolution; there is no separate
+`--target-ip` path. For HTTPS, the literal IP remains the verified certificate
+identity.
 
 Only the outer iWAN UDP socket uses existing host networking. The route-free
 guarantee means this path never creates an interface or adds, replaces, or

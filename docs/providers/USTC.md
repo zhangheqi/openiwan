@@ -17,7 +17,8 @@ deployment:
 - The repeating XOR data cipher uses the first 8 bytes of the derived session
   key, so `xor_key_bytes = 8`.
 - Compatible endpoints may use the compact 8-byte heartbeat response.
-- `dns_servers` contains the deployment resolver used by the route-free proxy.
+- `dns_servers` contains the deployment resolver used by route-free
+  forwarding.
 
 These are deployment mappings, not universal properties of the iWAN protocol.
 The generic client keeps them explicit so other providers can select their own
@@ -69,21 +70,32 @@ sudo openiwan managed \
 ```
 
 Use `all` to fetch, select, and connect in one process. `connect`, `all`, and
-`serve` list the available lines before prompting only when neither
+`forward` list the available lines before prompting only when neither
 `--line-index` nor `--line-name` is provided. Fetch and list do not need
-elevated privileges; TUN creation normally does.
+elevated privileges; neither does `forward`, while TUN creation normally does.
 
-## Route-free HTTP(S) Proxy
+## Route-free Forwarding
 
-An existing managed line can run the route-free proxy without creating a TUN
-device or changing host routes:
+An existing managed line can forward a fixed TCP service or proxy an HTTP(S)
+origin without creating a TUN device or changing host routes:
 
 ```bash
 openiwan managed \
   --provider "$HOME/.config/openiwan/providers/ustc.toml" \
-  serve --line-index 1 --upstream https://api.example.edu
+  forward --line-index 1 \
+  --listen 127.0.0.1:8080 \
+  --target https://api.example.edu
 ```
 
+The target scheme selects the mode: use `tcp://HOST:PORT` for an unchanged
+bidirectional TCP stream, `http://HOST[:PORT]` for an HTTP origin (default port
+80), or `https://HOST[:PORT]` for a verified HTTPS origin (default port 443).
+Bare `HOST:PORT` values are rejected. The HTTP(S) listener is still local
+plaintext HTTP/1.1; HTTPS applies only to the upstream connection, including
+SNI for domain targets and certificate validation. IP literals are verified as
+IP certificate identities. Repeat `--ca-cert` when a private HTTPS CA is
+required.
+
 The managed state must already exist; run `fetch` first when it does not. See
-[Managed Providers](../MANAGED_PROVIDERS.md) for state handling, DNS behavior,
-route options, and the security model.
+[Managed Providers](../MANAGED_PROVIDERS.md) for target restrictions, state
+handling, DNS behavior, forwarding options, and the security model.

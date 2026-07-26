@@ -91,8 +91,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
-default = ["managed", "http-proxy"]
-http-proxy = [
+default = ["managed", "forward"]
+forward = [
     "dep:bytes",
     "dep:futures",
     "dep:hickory-proto",

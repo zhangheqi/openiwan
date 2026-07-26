@@ -6,6 +6,32 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Unified route-free `forward` and `managed forward` commands with required
+  URI targets: `tcp://HOST:PORT` for bidirectional raw TCP, plus
+  `http://HOST[:PORT]` and `https://HOST[:PORT]` for HTTP/1.1 reverse proxying
+  with standard default ports
+
+### Changed
+
+- Renamed the default route-free forwarding Cargo feature to `forward`
+- Forward targets now require a URI scheme; bare `HOST:PORT` values and a
+  separate `--target-ip` override are not accepted
+- HTTP(S) forwarding now uses `--target`, rewrites `Host` to the fixed target
+  authority, preserves streaming messages, removes hop-by-hop headers, and
+  rewrites same-origin absolute `Location` values to relative references
+- HTTPS forwarding retains repeatable `--ca-cert` private roots, system roots,
+  SNI, and certificate verification
+- All forwarding modes retain organization DNS selection, UDP/TCP resolution,
+  TTL caching, `--dns-mode`, `--dns-server`, and `--dns-timeout-ms`;
+  `--connect-timeout-ms` covers DNS, TCP, and HTTPS TLS setup
+
+### Removed
+
+- The separate `serve` and `managed serve` commands and their `--upstream` and
+  `--upstream-ip` options; HTTP(S) proxying now uses `forward --target`
+
 ## [0.2.0] - 2026-07-25
 
 ### Added

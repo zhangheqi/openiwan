@@ -1,6 +1,6 @@
-#[cfg(feature = "http-proxy")]
-#[path = "openiwan/http_proxy.rs"]
-mod http_proxy;
+#[cfg(feature = "forward")]
+#[path = "openiwan/forward.rs"]
+mod forward;
 
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
@@ -15,7 +15,7 @@ use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Resu
 use std::fs;
 #[cfg(feature = "managed")]
 use std::io::Write;
-#[cfg(feature = "http-proxy")]
+#[cfg(feature = "forward")]
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,9 +43,9 @@ enum Command {
     Auth(ConnectionArgs),
     /// Authenticate, create a TUN interface, and exchange IP packets.
     Connect(ConnectArgs),
-    /// Expose one HTTP or HTTPS origin on a local HTTP server without TUN or host routes.
-    #[cfg(feature = "http-proxy")]
-    Serve(ServeArgs),
+    /// Forward TCP or proxy HTTP(S) to one fixed target without host routes.
+    #[cfg(feature = "forward")]
+    Forward(ForwardArgs),
     /// Decode one hexadecimal iWAN datagram without network access.
     Decode(DecodeArgs),
     /// Log in through a configured controller, manage lines, and connect.
@@ -97,26 +97,21 @@ struct ConnectArgs {
     routes: RouteArgs,
 }
 
-#[cfg(feature = "http-proxy")]
+#[cfg(feature = "forward")]
 #[derive(Debug, Args)]
-struct ServeArgs {
+struct ForwardArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
     #[command(flatten)]
-    proxy: HttpProxyArgs,
+    forward: ForwardOptions,
 }
 
-#[cfg(feature = "http-proxy")]
+#[cfg(feature = "forward")]
 #[derive(Debug, Clone, Args)]
-struct HttpProxyArgs {
-    /// Fixed HTTP or HTTPS origin. Incoming paths and queries are preserved.
-    #[arg(long)]
-    upstream: String,
-    /// Connect to this IP instead of resolving the upstream with host DNS.
-    /// Repeat for multiple addresses. Host and, for HTTPS, SNI and certificate
-    /// verification still use the upstream URL.
-    #[arg(long = "upstream-ip", value_delimiter = ',')]
-    upstream_ips: Vec<IpAddr>,
+struct ForwardOptions {
+    /// Fixed target URI using tcp://, http://, or https://.
+    #[arg(long, value_parser = forward::parse_target_argument)]
+    target: String,
     /// DNS policy: auto uses iWAN DNS when available, otherwise safe host DNS;
     /// iwan requires iWAN DNS; system uses only host DNS.
     #[arg(long, value_enum, default_value = "auto")]
@@ -128,18 +123,18 @@ struct HttpProxyArgs {
     /// Timeout for one DNS server query.
     #[arg(long, default_value_t = 3_000)]
     dns_timeout_ms: u64,
-    /// Loopback address for the local HTTP server.
+    /// Loopback address for the local listener.
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
     /// Additional HTTPS PEM CA certificate file. Repeat for multiple files.
     #[arg(long = "ca-cert")]
     ca_certificates: Vec<PathBuf>,
-    /// Total timeout for upstream DNS, userspace TCP, and TLS setup.
+    /// Total timeout for target DNS, TCP, and TLS setup.
     #[arg(long, default_value_t = 10_000)]
-    upstream_timeout_ms: u64,
+    connect_timeout_ms: u64,
 }
 
-#[cfg(feature = "http-proxy")]
+#[cfg(feature = "forward")]
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum DnsModeArg {
     Auto,
@@ -147,8 +142,8 @@ enum DnsModeArg {
     System,
 }
 
-#[cfg(feature = "http-proxy")]
-impl From<DnsModeArg> for http_proxy::DnsMode {
+#[cfg(feature = "forward")]
+impl From<DnsModeArg> for forward::DnsMode {
     fn from(value: DnsModeArg) -> Self {
         match value {
             DnsModeArg::Auto => Self::Auto,
@@ -158,7 +153,7 @@ impl From<DnsModeArg> for http_proxy::DnsMode {
     }
 }
 
-#[cfg(feature = "http-proxy")]
+#[cfg(feature = "forward")]
 fn parse_dns_server(value: &str) -> std::result::Result<SocketAddr, String> {
     if let Ok(address) = value.parse::<IpAddr>() {
         return Ok(SocketAddr::new(address, 53));
@@ -211,9 +206,9 @@ enum ManagedCommand {
     Connect(ManagedConnectArgs),
     /// Fetch, select, and connect, prompting from the line list when needed.
     All(ManagedConnectArgs),
-    /// Select a saved line and expose one HTTP or HTTPS origin without host routes.
-    #[cfg(feature = "http-proxy")]
-    Serve(ManagedServeArgs),
+    /// Select a saved line and forward TCP or proxy HTTP(S) without host routes.
+    #[cfg(feature = "forward")]
+    Forward(ManagedForwardArgs),
 }
 
 #[cfg(feature = "managed")]
@@ -237,9 +232,9 @@ struct ManagedConnectArgs {
     routes: RouteArgs,
 }
 
-#[cfg(all(feature = "managed", feature = "http-proxy"))]
+#[cfg(all(feature = "managed", feature = "forward"))]
 #[derive(Debug, Args)]
-struct ManagedServeArgs {
+struct ManagedForwardArgs {
     /// Select a line by one-based index instead of prompting.
     #[arg(long, conflicts_with = "line_name")]
     line_index: Option<usize>,
@@ -251,7 +246,7 @@ struct ManagedServeArgs {
     #[arg(long)]
     encryption: Option<EncryptionMethod>,
     #[command(flatten)]
-    proxy: HttpProxyArgs,
+    forward: ForwardOptions,
 }
 
 fn main() {
@@ -280,8 +275,8 @@ fn run() -> Result<()> {
             session.close()?;
         }
         Command::Connect(arguments) => connect(arguments)?,
-        #[cfg(feature = "http-proxy")]
-        Command::Serve(arguments) => serve(arguments)?,
+        #[cfg(feature = "forward")]
+        Command::Forward(arguments) => forward(arguments)?,
         Command::Decode(arguments) => decode(&arguments.hex)?,
         #[cfg(feature = "managed")]
         Command::Managed(arguments) => managed(arguments)?,
@@ -294,10 +289,10 @@ fn connect(arguments: ConnectArgs) -> Result<()> {
     run_client(client, arguments.tun.as_deref(), &arguments.routes)
 }
 
-#[cfg(feature = "http-proxy")]
-fn serve(arguments: ServeArgs) -> Result<()> {
+#[cfg(feature = "forward")]
+fn forward(arguments: ForwardArgs) -> Result<()> {
     let client = build_client(&arguments.connection)?;
-    run_http_proxy(client, &arguments.proxy, &[])
+    run_forward(client, &arguments.forward, &[])
 }
 
 fn run_client(client: Client, tun: Option<&str>, route_arguments: &RouteArgs) -> Result<()> {
@@ -332,10 +327,10 @@ fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
     Ok(shutdown)
 }
 
-#[cfg(feature = "http-proxy")]
-fn run_http_proxy(
+#[cfg(feature = "forward")]
+fn run_forward(
     client: Client,
-    arguments: &HttpProxyArgs,
+    arguments: &ForwardOptions,
     provider_dns_servers: &[IpAddr],
 ) -> Result<()> {
     let mut dns_servers = arguments.dns_servers.clone();
@@ -347,23 +342,22 @@ fn run_http_proxy(
                 .map(|address| SocketAddr::new(address, 53)),
         );
     }
-    let dns = http_proxy::DnsConfig::new(
+    let dns = forward::DnsConfig::new(
         arguments.dns_mode.into(),
         dns_servers,
         Duration::from_millis(arguments.dns_timeout_ms),
     )?;
-    let config = http_proxy::HttpProxyConfig::new(
+    let config = forward::ForwardConfig::new(
         arguments.listen,
-        &arguments.upstream,
-        arguments.upstream_ips.clone(),
+        &arguments.target,
         dns,
         arguments.ca_certificates.clone(),
-        Duration::from_millis(arguments.upstream_timeout_ms),
+        Duration::from_millis(arguments.connect_timeout_ms),
     )?;
     let session = client.authenticate()?;
     print_session(session.info());
     let shutdown = install_shutdown_handler()?;
-    let end = http_proxy::run(client, session, config, shutdown)?;
+    let end = forward::run(client, session, config, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
@@ -390,10 +384,10 @@ fn managed(arguments: ManagedArgs) -> Result<()> {
             let state = managed_fetch(&client, &state_path)?;
             managed_connect(&client, &state, &connect)?;
         }
-        #[cfg(feature = "http-proxy")]
-        ManagedCommand::Serve(serve) => {
+        #[cfg(feature = "forward")]
+        ManagedCommand::Forward(forward) => {
             let state = load_managed_state(&client, &state_path)?;
-            managed_serve(&client, &state, &serve)?;
+            managed_forward(&client, &state, &forward)?;
         }
     }
     Ok(())
@@ -455,11 +449,11 @@ fn managed_connect(
     run_client(iwan_client, arguments.tun.as_deref(), &arguments.routes)
 }
 
-#[cfg(all(feature = "managed", feature = "http-proxy"))]
-fn managed_serve(
+#[cfg(all(feature = "managed", feature = "forward"))]
+fn managed_forward(
     client: &ManagedClient,
     state: &ManagedState,
-    arguments: &ManagedServeArgs,
+    arguments: &ManagedForwardArgs,
 ) -> Result<()> {
     let selected =
         select_or_prompt_server(state, arguments.line_index, arguments.line_name.as_deref())?;
@@ -477,9 +471,9 @@ fn managed_serve(
         config.encryption = encryption;
     }
     let iwan_client = client.build_client(state, selected, config)?;
-    run_http_proxy(
+    run_forward(
         iwan_client,
-        &arguments.proxy,
+        &arguments.forward,
         &client.provider().dns_servers,
     )
 }
@@ -826,20 +820,18 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "http-proxy")]
+    #[cfg(feature = "forward")]
     #[test]
-    fn parses_manual_route_free_proxy_without_tun_options() {
+    fn parses_manual_forward_without_tun_options() {
         let parsed = Cli::try_parse_from([
             "openiwan",
-            "serve",
+            "forward",
             "--server",
             "192.0.2.10:6001",
             "--username",
             "alice",
-            "--upstream",
-            "https://api.example.test",
-            "--upstream-ip",
-            "192.0.2.25",
+            "--target",
+            "tcp://db.example.test:5432",
             "--dns-mode",
             "iwan",
             "--dns-server",
@@ -850,21 +842,62 @@ mod tests {
         .unwrap();
         assert!(matches!(
             parsed.command,
-            Command::Serve(ServeArgs {
-                proxy: HttpProxyArgs {
+            Command::Forward(ForwardArgs {
+                forward: ForwardOptions {
                     listen,
-                    upstream,
-                    upstream_ips,
+                    target,
                     dns_mode: DnsModeArg::Iwan,
                     dns_servers,
                     ..
                 },
                 ..
             }) if listen == "127.0.0.1:9080".parse().unwrap()
-                && upstream == "https://api.example.test"
-                && upstream_ips == vec!["192.0.2.25".parse::<IpAddr>().unwrap()]
+                && target == "tcp://db.example.test:5432"
                 && dns_servers == vec!["192.0.2.53:53".parse::<SocketAddr>().unwrap()]
         ));
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "forward",
+                "--server",
+                "192.0.2.10:6001",
+                "--username",
+                "alice",
+                "--target",
+                "db.example.test:5432",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "forward",
+                "--server",
+                "192.0.2.10:6001",
+                "--username",
+                "alice",
+                "--target",
+                "tcp://db.example.test:5432",
+                "--target-ip",
+                "192.0.2.25",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "forward",
+                "--server",
+                "192.0.2.10:6001",
+                "--username",
+                "alice",
+                "--target",
+                "db.example.test:5432",
+                "--route",
+                "10.0.0.0/8",
+            ])
+            .is_err()
+        );
         assert!(
             Cli::try_parse_from([
                 "openiwan",
@@ -875,37 +908,59 @@ mod tests {
                 "alice",
                 "--upstream",
                 "https://api.example.test",
-                "--route",
-                "10.0.0.0/8",
             ])
             .is_err()
         );
     }
 
-    #[cfg(all(feature = "managed", feature = "http-proxy"))]
+    #[cfg(all(feature = "managed", feature = "forward"))]
     #[test]
-    fn parses_managed_route_free_proxy() {
+    fn parses_managed_forward() {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "managed",
             "--provider",
             "provider.toml",
-            "serve",
+            "forward",
             "--line-name",
             "Education",
-            "--upstream",
-            "https://api.example.test",
+            "--target",
+            "https://db.example.test",
+            "--ca-cert",
+            "root-a.pem",
+            "--ca-cert",
+            "root-b.pem",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Command::Managed(ManagedArgs {
-                action: ManagedCommand::Serve(ManagedServeArgs {
+                action: ManagedCommand::Forward(ManagedForwardArgs {
                     line_name: Some(name),
+                    forward: ForwardOptions {
+                        ca_certificates,
+                        ..
+                    },
                     ..
                 }),
                 ..
             }) if name == "Education"
+                && ca_certificates
+                    == vec![PathBuf::from("root-a.pem"), PathBuf::from("root-b.pem")]
         ));
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "managed",
+                "--provider",
+                "provider.toml",
+                "forward",
+                "--target",
+                "db.example.test:5432",
+                "--target-ip",
+                "192.0.2.25",
+            ])
+            .is_err()
+        );
     }
 }

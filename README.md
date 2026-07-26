@@ -25,12 +25,13 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - Plaintext, repeating XOR, and legacy AES-128-ECB data modes
 - IPv4, IPv6, heartbeat, CLOSE, bounded reconnection, and fragment reassembly
 - Native Linux, macOS, and Windows TUN support through the `tun` crate
-- A route-free local HTTP to internal HTTP or HTTPS reverse proxy with no TUN device
+- Route-free raw TCP forwarding and HTTP/HTTPS reverse proxying from a
+  loopback listener, with no TUN device
 - Strict packet validation, bounded fragment queues, route cleanup, and
   credential zeroization
 - Config-driven OIDC/JWKS login and controller-managed line discovery
-- A reusable Rust library plus `ping`, `auth`, `connect`, `decode`, and
-  `managed` commands
+- A reusable Rust library plus `ping`, `auth`, `connect`, `decode`, `forward`,
+  and `managed` commands
 
 ## Status
 
@@ -40,9 +41,9 @@ traditional single-path UDP data plane observed in the macOS iWAN client
 - Plaintext and repeating XOR data modes
 - IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths
 - Heartbeat, CLOSE, failure detection, and bounded reconnection
-- Route-free local HTTP/1.1 to HTTP or HTTPS reverse proxy
+- URI-selected raw TCP forwarding and HTTP/HTTPS reverse proxying
 - Config-driven OIDC and compatible Panabit controller flows
-- `serve` userspace DNS with UDP, TCP fallback, and TTL caching
+- `forward` userspace DNS with UDP, TCP fallback, and TTL caching
 
 ### Requires deployment validation
 
@@ -97,7 +98,8 @@ Contributor checks and development requirements are documented in
 Installation does not require elevated privileges. Creating a TUN interface or
 changing routes does: run `connect`, `managed connect`, and `managed all` as
 root on Linux/macOS or from an elevated terminal on Windows. `ping`, `auth`,
-`decode`, `serve`, managed login, and managed listing do not require elevation.
+`decode`, `forward`, managed login, and managed listing do not require
+elevation.
 
 ### Windows
 
@@ -152,33 +154,70 @@ tools as separate arguments, never through a shell; Windows uses the native IP
 Helper API. The client rejects default routes and any route containing the
 active iWAN endpoint.
 
-### Access an HTTP or HTTPS API without changing host routes
+### Forward TCP or HTTP(S) without changing host routes
 
-Expose one fixed organization HTTP or HTTPS origin on a loopback-only HTTP
-listener:
+`--target` is a URI whose scheme selects the forwarding mode. For a raw TCP
+service, include an explicit nonzero port:
 
 ```bash
-openiwan serve \
+openiwan forward \
   --server 192.0.2.10:6001 \
   --username alice \
   --encryption xor \
-  --upstream https://api.example.edu \
-  --listen 127.0.0.1:8080
+  --listen 127.0.0.1:3307 \
+  --target tcp://db.internal.example:3306
 ```
 
-A local request for `http://127.0.0.1:8080/v1/profile?full=true` is sent through
-the iWAN userspace TCP/IP stack to
-`https://api.example.edu/v1/profile?full=true`. Methods, queries, streaming
-bodies, and end-to-end headers such as `Authorization` are preserved. For
-HTTPS, Host, SNI, and certificate verification continue to use the original
-upstream name. An `http://` upstream is also accepted and uses plain TCP inside
-iWAN without TLS protection.
+A connection to `127.0.0.1:3307` is carried through the iWAN userspace TCP/IP
+stack to `db.internal.example:3306`. Bytes flow unchanged in both directions;
+OpeniWAN does not parse the application protocol or terminate TLS. If the
+application needs confidentiality or server authentication, configure TLS in
+the local client and target service.
 
-`serve` opens no TUN device, invokes no platform route command, and has no route
-options. The listener must be a loopback address, and the upstream must be an
-HTTP or HTTPS origin without a path, query, or user information. HTTPS uses
-system roots by default; repeat `--ca-cert organization-ca.pem` to add private
-roots.
+For an HTTP or HTTPS origin, the local listener is always plaintext HTTP/1.1:
+
+```bash
+openiwan forward \
+  --server 192.0.2.10:6001 \
+  --username alice \
+  --encryption xor \
+  --listen 127.0.0.1:8080 \
+  --target https://api.example.edu \
+  --ca-cert organization-ca.pem
+```
+
+A local request for `http://127.0.0.1:8080/v1/profile?full=true` is proxied to
+`https://api.example.edu/v1/profile?full=true`. Methods, paths, queries,
+streaming bodies and responses, and end-to-end headers such as `Authorization`
+are preserved. OpeniWAN rewrites `Host` to the target authority, removes
+hop-by-hop headers, and rewrites same-origin absolute `Location` values to
+relative references. HTTPS targets use the target hostname for TLS SNI and
+certificate verification when it is a domain; an IP literal is verified as an
+IP certificate identity. System roots are loaded by default; repeat `--ca-cert`
+to add private CA files. `--ca-cert` is accepted only for an `https://` target.
+An `http://` target uses plain TCP inside iWAN and provides no upstream TLS
+protection.
+
+`forward` opens no TUN device, invokes no platform route command, and has no
+route options. The listener must be a loopback address and defaults to
+`127.0.0.1:8080`. Bare `HOST:PORT` targets are rejected:
+
+- `tcp://HOST:PORT` selects raw TCP and always requires the port.
+- `http://HOST[:PORT]` selects HTTP reverse proxying and defaults to port 80.
+- `https://HOST[:PORT]` selects verified HTTPS upstreams and defaults to port
+  443.
+
+For example, `http://example.com` and `https://example.com` use the defaults,
+while `http://example.com:12345` and `https://example.com:12345` select a
+custom port.
+
+HTTP(S) targets must be origins without user information, a non-root path,
+query, or fragment. Bracket IPv6 literals, for example
+`tcp://[2001:db8::10]:3306` or `https://[2001:db8::10]`. Incoming `CONNECT`,
+WebSocket and other HTTP Upgrade requests, and HTTP/2 are not supported.
+`--connect-timeout-ms` bounds the complete DNS, TCP, and, when applicable, TLS
+setup for each accepted connection. The forwarder permits at most 256
+concurrent connections and closes new connections while at capacity.
 
 The default `--dns-mode auto` first queries organization resolvers advertised
 by OPENACK or configured by the managed provider through the iWAN userspace
@@ -193,13 +232,15 @@ OPENACK DNS attributes:
 dns_servers = []
 ```
 
-Manual mode and temporary overrides can pass `--dns-server 192.0.2.53`.
-`--dns-mode iwan` requires an iWAN resolver. `auto` uses host DNS only when no
-iWAN resolver is available; failure of a configured organization resolver is
-fail-closed and does not leak the hostname to the host resolver. Host answers
-in `198.18.0.0/15` are rejected instead of causing a useless TCP timeout.
-`--upstream-ip` remains available as an emergency operator override, but normal
-production use does not require pre-resolving API addresses.
+Manual mode and temporary overrides can pass `--dns-server 192.0.2.53`;
+`--dns-timeout-ms` bounds each resolver attempt. `--dns-mode iwan` requires an
+iWAN resolver. `auto` uses host DNS only when no iWAN resolver is available;
+failure of a configured organization resolver is fail-closed and does not leak
+the hostname to the host resolver. Host answers in `198.18.0.0/15` are rejected
+instead of causing a useless TCP timeout. To bypass DNS, put a literal IPv4 or
+bracketed IPv6 address directly in the target URI, for example
+`tcp://192.0.2.25:22` or `https://[2001:db8::25]`. There is no separate
+`--target-ip` override.
 
 ### Managed login and connection
 
@@ -240,16 +281,18 @@ instructions are listed under [Provider Profiles](docs/providers/README.md).
 The default managed state directory is `~/.config/openiwan/managed` on Unix and
 `%APPDATA%\openiwan\managed` on Windows.
 
-`connect`, `all`, and `serve` print the line list before prompting when no
+`connect`, `all`, and `forward` print the line list before prompting when no
 selector is provided. Passing `--line-index` or `--line-name` selects the line
 directly without printing the complete list.
 
-An existing managed line can run the route-free proxy as well:
+An existing managed line can run the same route-free forwarder:
 
 ```bash
 openiwan managed \
   --provider "$HOME/.config/openiwan/providers/provider.toml" \
-  serve --line-index 1 --upstream https://api.example.edu
+  forward --line-index 1 \
+  --listen 127.0.0.1:3307 \
+  --target tcp://db.internal.example:3306
 ```
 
 Configuration can also be loaded from TOML. `require_auth_verify_echo` and
@@ -283,7 +326,7 @@ reference.
 ## Library
 
 Add OpeniWAN to a Rust project with `cargo add openiwan`. For a protocol-only
-dependency without the default managed-provider and HTTP-proxy features, use
+dependency without the default `managed` and `forward` features, use
 `cargo add openiwan --no-default-features`.
 
 Packet and TLV codecs live in `openiwan::protocol`; compatibility cryptography

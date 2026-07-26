@@ -235,8 +235,8 @@ fn parse_response(
             _ => {}
         }
     }
-    addresses.sort_unstable();
-    addresses.dedup();
+    let mut seen_addresses = HashSet::new();
+    addresses.retain(|address| seen_addresses.insert(*address));
     let ttl = if ttl == u32::MAX { 0 } else { ttl };
     Ok(ParsedResponse {
         addresses,
@@ -284,14 +284,27 @@ mod tests {
                 name.clone(),
                 120,
                 RData::A(A(Ipv4Addr::new(192, 0, 2, 10))),
+            ))
+            .add_answer(Record::from_rdata(
+                name.clone(),
+                90,
+                RData::A(A(Ipv4Addr::new(192, 0, 2, 5))),
+            ))
+            .add_answer(Record::from_rdata(
+                name.clone(),
+                60,
+                RData::A(A(Ipv4Addr::new(192, 0, 2, 10))),
             ));
 
         let parsed = parse_response(response, 42, &name, RecordType::A).unwrap();
         assert_eq!(
             parsed.addresses,
-            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5)),
+            ]
         );
-        assert_eq!(parsed.ttl, Duration::from_secs(120));
+        assert_eq!(parsed.ttl, Duration::from_secs(60));
     }
 
     #[test]

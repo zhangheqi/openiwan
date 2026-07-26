@@ -23,10 +23,11 @@ OpeniWAN 提供协议库和命令行客户端，当前面向 macOS iWAN 客户�
 - 明文、循环 XOR 和传统 AES-128-ECB 数据模式
 - IPv4、IPv6、心跳、CLOSE、有限重连和分片重组
 - 通过 `tun` crate 支持 Linux、macOS 与 Windows 原生 TUN
-- 不创建 TUN、不修改主机路由的本地 HTTP 到内网 HTTP 或 HTTPS 反向代理
+- 不创建 TUN、不修改主机路由的原始 TCP 转发和 HTTP/HTTPS 反向代理
 - 严格数据包校验、分片队列上限、路由清理和凭据内存清零
 - 配置驱动的 OIDC/JWKS 登录和控制器线路获取
-- 可复用 Rust 库，以及 `ping`、`auth`、`connect`、`decode`、`managed` 命令
+- 可复用 Rust 库，以及 `ping`、`auth`、`connect`、`decode`、`forward`、
+  `managed` 命令
 
 ## 兼容状态
 
@@ -36,9 +37,9 @@ OpeniWAN 提供协议库和命令行客户端，当前面向 macOS iWAN 客户�
 - 明文与循环 XOR 数据模式
 - IPv4、IPv6、IPFRAG 与 IPFRAG6 下行路径
 - 心跳、CLOSE、故障检测和有限重连
-- 无路由的本地 HTTP/1.1 到 HTTP 或 HTTPS 反向代理
+- 由 URI 选择的原始 TCP 转发和 HTTP/HTTPS 反向代理
 - 配置驱动的 OIDC 和兼容 Panabit 控制器流程
-- `serve` 用户态 DNS，包括 UDP、TCP 回退和 TTL 缓存
+- `forward` 用户态 DNS，包括 UDP、TCP 回退和 TTL 缓存
 
 ### 仍需部署验证
 
@@ -87,7 +88,7 @@ cargo install --path . --locked
 
 安装本身不需要提升权限。创建 TUN 或修改路由时，Linux/macOS 需要以 root 运行
 `connect`、`managed connect` 和 `managed all`，Windows 则需要使用管理员终端。
-`ping`、`auth`、`decode`、`serve`、托管登录与线路查看不需要提升权限。
+`ping`、`auth`、`decode`、`forward`、托管登录与线路查看不需要提升权限。
 
 ### Windows
 
@@ -136,28 +137,61 @@ Windows 请在管理员终端中运行不带 `sudo` 的等价命令。Linux 与 
 域名。Unix 参数都以独立参数调用系统工具，不经过 shell；Windows 使用原生 IP Helper
 API。客户端拒绝默认路由以及会覆盖当前 iWAN 数据端点的路由。
 
-### 不修改路由地访问 HTTP 或 HTTPS API
+### 不修改路由地转发 TCP 或 HTTP(S)
 
-将一个固定的组织内 HTTP 或 HTTPS origin 暴露为仅本机可访问的 HTTP 服务：
+`--target` 必须是 URI，其 scheme 决定转发模式。原始 TCP 服务必须显式指定非零
+端口：
 
 ```bash
-openiwan serve \
+openiwan forward \
   --server 192.0.2.10:6001 \
   --username alice \
   --encryption xor \
-  --upstream https://api.example.edu \
-  --listen 127.0.0.1:8080
+  --listen 127.0.0.1:3307 \
+  --target tcp://db.internal.example:3306
 ```
 
-例如，本地请求 `http://127.0.0.1:8080/v1/profile?full=true` 会通过 iWAN 用户态
-TCP/IP 栈访问 `https://api.example.edu/v1/profile?full=true`。请求方法、查询参数、
-流式请求体和 `Authorization` 等业务头会保留。对于 HTTPS，Host、SNI 和证书域名
-仍使用原始上游域名；也可以指定 `http://` 上游，此时通过 iWAN 内的明文 TCP 连接，
-不受 TLS 保护。
+连接 `127.0.0.1:3307` 后，字节流会通过 iWAN 用户态 TCP/IP 栈转发到
+`db.internal.example:3306`。OpeniWAN 只进行原样双向透传，不解析应用协议，也不
+终止 TLS。若应用需要机密性或服务端身份认证，请在本地客户端与目标服务之间配置 TLS。
 
-`serve` 不打开 TUN，不调用系统路由工具，也不接受 `--route` 参数。监听地址必须是
-回环地址；上游必须是没有路径、查询或用户信息的 HTTP 或 HTTPS origin。HTTPS 默认
-使用系统根证书，内部 CA 可通过可重复的 `--ca-cert organization-ca.pem` 添加。
+对于 HTTP 或 HTTPS origin，本地监听端始终是明文 HTTP/1.1：
+
+```bash
+openiwan forward \
+  --server 192.0.2.10:6001 \
+  --username alice \
+  --encryption xor \
+  --listen 127.0.0.1:8080 \
+  --target https://api.example.edu \
+  --ca-cert organization-ca.pem
+```
+
+例如，本地请求 `http://127.0.0.1:8080/v1/profile?full=true` 会代理到
+`https://api.example.edu/v1/profile?full=true`。请求方法、路径、查询、流式请求
+体和响应，以及 `Authorization` 等端到端业务头都会保留。OpeniWAN 会将 `Host`
+改写为目标 authority、删除 hop-by-hop 头，并把同源绝对 `Location` 改写为相对
+引用。HTTPS 域名目标使用目标主机名进行 TLS SNI 和证书校验；IP 字面量则作为 IP
+证书身份进行校验。默认加载系统根证书，也可重复传入 `--ca-cert` 添加私有 CA 文件。
+`--ca-cert` 仅可用于 `https://` 目标。`http://` 目标在 iWAN 内使用明文 TCP，
+不提供上游 TLS 保护。
+
+`forward` 不打开 TUN，不调用系统路由工具，也不接受 `--route` 参数。监听地址必须是
+回环地址，默认为 `127.0.0.1:8080`。裸 `HOST:PORT` 目标会被拒绝：
+
+- `tcp://HOST:PORT` 选择原始 TCP 转发，端口始终必填。
+- `http://HOST[:PORT]` 选择 HTTP 反向代理，默认端口为 80。
+- `https://HOST[:PORT]` 选择经过校验的 HTTPS 上游，默认端口为 443。
+
+例如，`http://example.com` 与 `https://example.com` 使用默认端口，而
+`http://example.com:12345` 与 `https://example.com:12345` 使用自定义端口。
+
+HTTP(S) 目标必须是 origin，不能包含用户信息、非根路径、查询或 fragment。IPv6
+字面量需加方括号，例如 `tcp://[2001:db8::10]:3306` 或
+`https://[2001:db8::10]`。不支持传入的 `CONNECT`、WebSocket 及其他 HTTP
+Upgrade 请求，也不支持 HTTP/2。`--connect-timeout-ms` 限制每个本地连接完成
+DNS、TCP 以及适用时 TLS 建连的总时长。转发器最多允许 256 个并发连接；达到上限时
+会关闭新连接。
 
 默认 `--dns-mode auto` 会优先通过 iWAN 用户态栈查询 OPENACK 或托管 provider
 提供的组织 DNS。它校验 DNS 事务和响应、支持 CNAME、按 TTL 缓存，并在 UDP
@@ -169,12 +203,14 @@ VPN 或代理无法观察查询或替换为 Fake-IP 答案。每个托管 provid
 dns_servers = []
 ```
 
-手动模式或临时覆盖可使用 `--dns-server 192.0.2.53`。指定
-`--dns-mode iwan` 可要求必须存在 iWAN DNS。`auto` 只有在没有任何 iWAN DNS
-配置时才使用系统解析；已经配置的组织 DNS 如果查询失败会直接失败，不会泄露域名到
-宿主机解析器。系统解析得到 `198.18.0.0/15` Fake-IP 时也会立即拒绝，而不是等待
-无意义的 TCP 超时。`--upstream-ip` 仍保留为紧急运维覆盖，但正常生产运行不需要
-预查 API 地址。
+手动模式或临时覆盖可使用 `--dns-server 192.0.2.53`，每次解析尝试的时限由
+`--dns-timeout-ms` 控制。指定 `--dns-mode iwan` 可要求必须存在 iWAN DNS。
+`auto` 只有在没有任何 iWAN DNS 配置时才使用系统解析；已经配置的组织 DNS 如果
+查询失败会直接失败，不会泄露域名到宿主机解析器。系统解析得到
+`198.18.0.0/15` Fake-IP 时也会立即拒绝，而不是等待无意义的 TCP 超时。
+如需跳过 DNS，可直接在目标 URI 中使用 IPv4 或方括号 IPv6 字面量，例如
+`tcp://192.0.2.25:22` 或 `https://[2001:db8::25]`。没有单独的
+`--target-ip` 覆盖参数。
 
 ### 统一认证并连接
 
@@ -205,7 +241,7 @@ sudo openiwan managed \
   connect --route-domain example.edu --route 10.0.0.0/8
 ```
 
-将动作换成 `all` 可以一次完成登录、选择和连接。`connect`、`all` 和 `serve`
+将动作换成 `all` 可以一次完成登录、选择和连接。`connect`、`all` 和 `forward`
 未指定线路选择参数时会先列出线路再提示选择；传入 `--line-index` 或 `--line-name`
 时会直接选择目标线路，不打印完整列表。access token 与解密后的线路密码不会写入
 磁盘。provider 结构、状态文件和安全模型参见
@@ -214,12 +250,14 @@ sudo openiwan managed \
 托管状态默认位于 Unix 的 `~/.config/openiwan/managed` 或 Windows 的
 `%APPDATA%\openiwan\managed`。
 
-也可以使用已经保存的托管线路启动无路由 HTTP 代理：
+也可以使用已经保存的托管线路启动相同的无路由转发器：
 
 ```bash
 openiwan managed \
   --provider "$HOME/.config/openiwan/providers/provider.toml" \
-  serve --line-index 1 --upstream https://api.example.edu
+  forward --line-index 1 \
+  --listen 127.0.0.1:3307 \
+  --target tcp://db.internal.example:3306
 ```
 
 也可以使用 TOML 配置。`require_auth_verify_echo` 和 `xor_key_bytes` 的取值取决于
@@ -255,7 +293,7 @@ Rust API 在构造客户端或加密器时同样要求显式传入 AUTH_VERIFY �
 ## Rust 库
 
 运行 `cargo add openiwan` 将 OpeniWAN 添加到 Rust 项目。如果只需要协议层，不需要
-默认启用的托管 provider 和 HTTP 代理功能，请使用
+默认启用的 `managed` 与 `forward` 功能，请使用
 `cargo add openiwan --no-default-features`。
 
 数据包和 TLV 编解码位于 `openiwan::protocol`，兼容加密位于

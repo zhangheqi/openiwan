@@ -1,24 +1,14 @@
 mod dns;
+mod http_forward;
 
-use bytes::Bytes;
-use futures::{Future, Sink, Stream};
-use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
-use hyper::body::Incoming;
-use hyper::header::{CONNECTION, HOST, HeaderName, HeaderValue, LOCATION};
-use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{HeaderMap, Request, Response, StatusCode, Uri, Version};
-use hyper_util::client::legacy::connect::{Connected, Connection};
-use hyper_util::client::legacy::{Client as HttpClient, Error as HttpClientError};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+// URI-driven TCP and HTTP(S) forwarding over one iWAN userspace network stack.
+
+use futures::{Sink, Stream};
+use hickory_proto::rr::Name;
 use openiwan::{Client, ConnectedSession, Error, PacketDevice, Result, SessionEnd, SessionInfo};
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, RootCertStore};
-use std::convert::Infallible;
-use std::error::Error as StdError;
-use std::fs::File;
-use std::io::{self, BufReader, ErrorKind};
+use std::future::Future;
+use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -26,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional};
 use tokio::net::{TcpListener, lookup_host};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::{
@@ -34,24 +25,19 @@ use tokio::sync::mpsc::{
 };
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
-use tokio_rustls::TlsConnector;
-use tokio_rustls::client::TlsStream;
 use tokio_smoltcp::device::{AsyncDevice, DeviceCapabilities};
 use tokio_smoltcp::smoltcp::iface;
 use tokio_smoltcp::smoltcp::phy::Medium;
 use tokio_smoltcp::smoltcp::wire::{HardwareAddress, IpAddress as SmolIpAddress, IpCidr};
 use tokio_smoltcp::{BufferSize, Net, NetConfig, TcpStream as UserTcpStream};
 use tokio_util::sync::{PollSendError, PollSender};
-use tower_service::Service;
 use tracing::{debug, info, warn};
-use url::Url;
-
-type BoxError = Box<dyn StdError + Send + Sync>;
-type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
-type ProxyClient = HttpClient<IwanConnector, Incoming>;
+use url::{Host, Url};
 
 const PACKET_QUEUE_CAPACITY: usize = 1_000;
 const TCP_BUFFER_SIZE: usize = 64 * 1_024;
+const MAX_CONNECTIONS: usize = 256;
+const ERROR_CLOSE_GRACE: Duration = Duration::from_millis(250);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 const SYSTEM_DNS_TTL: Duration = Duration::from_secs(60);
@@ -94,136 +80,234 @@ impl DnsConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct HttpProxyConfig {
+#[derive(Clone)]
+pub struct ForwardConfig {
     listen: SocketAddr,
-    upstream: Upstream,
-    upstream_ips: Vec<IpAddr>,
+    target: Target,
     dns: DnsConfig,
-    ca_certificates: Vec<PathBuf>,
-    upstream_timeout: Duration,
+    tls: Option<tokio_rustls::TlsConnector>,
+    connect_timeout: Duration,
 }
 
-impl HttpProxyConfig {
+impl ForwardConfig {
     pub fn new(
         listen: SocketAddr,
-        upstream: &str,
-        upstream_ips: Vec<IpAddr>,
+        target: &str,
         dns: DnsConfig,
         ca_certificates: Vec<PathBuf>,
-        upstream_timeout: Duration,
+        connect_timeout: Duration,
     ) -> Result<Self> {
         if !listen.ip().is_loopback() {
             return Err(Error::InvalidConfig(format!(
-                "HTTP proxy listen address {listen} is not a loopback address"
+                "forward listen address {listen} is not a loopback address"
             )));
         }
-        if upstream_timeout.is_zero() {
+        if connect_timeout.is_zero() {
             return Err(Error::InvalidConfig(
-                "upstream timeout must be greater than zero".into(),
+                "connect timeout must be greater than zero".into(),
             ));
         }
-        if upstream_ips
-            .iter()
-            .any(|address| address.is_unspecified() || address.is_multicast())
-        {
+        let target = Target::parse(target)?;
+        if !ca_certificates.is_empty() && !target.uses_tls() {
             return Err(Error::InvalidConfig(
-                "fixed upstream IPs must be unicast, non-unspecified addresses".into(),
+                "--ca-cert is only valid for an https:// target".into(),
             ));
         }
+        let tls = target
+            .uses_tls()
+            .then(|| http_forward::build_tls_connector(&ca_certificates))
+            .transpose()?;
         Ok(Self {
             listen,
-            upstream: Upstream::parse(upstream)?,
-            upstream_ips,
+            target,
             dns,
-            ca_certificates,
-            upstream_timeout,
+            tls,
+            connect_timeout,
         })
     }
 }
 
-#[derive(Debug, Clone)]
-struct Upstream {
-    url: Url,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetScheme {
+    Tcp,
+    Http,
+    Https,
+}
+
+impl TargetScheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    scheme: TargetScheme,
     host: String,
     authority: String,
     port: u16,
 }
 
-impl Upstream {
+impl Target {
     fn parse(value: &str) -> Result<Self> {
-        let url = Url::parse(value)
-            .map_err(|error| Error::InvalidConfig(format!("invalid upstream URL: {error}")))?;
-        if !matches!(url.scheme(), "http" | "https") {
+        let value = value.trim();
+        if value.is_empty() {
             return Err(Error::InvalidConfig(
-                "upstream URL must use http or https".into(),
+                "forward target must not be empty".into(),
             ));
         }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(Error::InvalidConfig(
-                "upstream URL must not contain user information".into(),
-            ));
-        }
-        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-            return Err(Error::InvalidConfig(
-                "upstream URL must be an origin without a path, query, or fragment".into(),
-            ));
-        }
-        let host = url
-            .host_str()
-            .ok_or_else(|| Error::InvalidConfig("upstream URL has no host".into()))?
-            .to_owned();
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| Error::InvalidConfig("upstream URL has no port".into()))?;
-        let display_host = if host.parse::<Ipv6Addr>().is_ok() {
-            format!("[{host}]")
-        } else {
-            host.clone()
+        let (_, remainder) = value.split_once("://").ok_or_else(|| {
+            Error::InvalidConfig(
+                "forward target must be an absolute URI using tcp://, http://, or https://".into(),
+            )
+        })?;
+        let raw_authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+        let url = Url::parse(value).map_err(|error| {
+            Error::InvalidConfig(format!(
+                "invalid forward target URI; use tcp://, http://, or https://: {error}"
+            ))
+        })?;
+        let scheme = match url.scheme() {
+            "tcp" => TargetScheme::Tcp,
+            "http" => TargetScheme::Http,
+            "https" => TargetScheme::Https,
+            scheme => {
+                return Err(Error::InvalidConfig(format!(
+                    "unsupported forward target scheme {scheme:?}; use tcp, http, or https"
+                )));
+            }
         };
-        let authority = url.port().map_or_else(
-            || display_host.clone(),
-            |port| format!("{display_host}:{port}"),
-        );
-        authority
-            .parse::<hyper::http::uri::Authority>()
-            .map_err(|error| {
-                Error::InvalidConfig(format!("invalid upstream authority: {error}"))
+        if raw_authority.contains('@') || !url.username().is_empty() || url.password().is_some() {
+            return Err(Error::InvalidConfig(
+                "forward target URI must not contain user information".into(),
+            ));
+        }
+        let has_valid_path = match scheme {
+            TargetScheme::Tcp => url.path().is_empty(),
+            TargetScheme::Http | TargetScheme::Https => url.path() == "/",
+        };
+        if !has_valid_path || url.query().is_some() || url.fragment().is_some() {
+            return Err(Error::InvalidConfig(
+                "forward target must be an origin without a path, query, or fragment".into(),
+            ));
+        }
+        let host = parse_target_host(&url)?;
+        let port = match scheme {
+            TargetScheme::Tcp => url.port().ok_or_else(|| {
+                Error::InvalidConfig("tcp:// forward targets must include an explicit port".into())
+            })?,
+            TargetScheme::Http | TargetScheme::Https => url
+                .port_or_known_default()
+                .expect("HTTP schemes have known default ports"),
+        };
+        if port == 0 {
+            return Err(Error::InvalidConfig(
+                "forward target port must be nonzero".into(),
+            ));
+        }
+        if scheme == TargetScheme::Https {
+            ServerName::try_from(host.clone()).map_err(|error| {
+                Error::InvalidConfig(format!(
+                    "HTTPS target host is not a valid TLS server identity: {error}"
+                ))
             })?;
+        }
+        let authority = target_authority(scheme, &host, port, url.port())?;
         Ok(Self {
-            url,
+            scheme,
             host,
             authority,
             port,
         })
     }
 
-    fn request_uri(&self, incoming: &Uri) -> Result<Uri> {
-        let path_and_query = incoming
-            .path_and_query()
-            .map_or("/", hyper::http::uri::PathAndQuery::as_str);
-        Uri::builder()
-            .scheme(self.url.scheme())
-            .authority(self.authority.as_str())
-            .path_and_query(path_and_query)
-            .build()
-            .map_err(|error| Error::Http(format!("build upstream request URI: {error}")))
+    fn display(&self) -> String {
+        format!("{}://{}", self.scheme.as_str(), self.authority)
     }
 
-    fn uses_tls(&self) -> bool {
-        self.url.scheme() == "https"
+    const fn is_http(&self) -> bool {
+        matches!(self.scheme, TargetScheme::Http | TargetScheme::Https)
     }
+
+    const fn uses_tls(&self) -> bool {
+        matches!(self.scheme, TargetScheme::Https)
+    }
+}
+
+fn parse_target_host(url: &Url) -> Result<String> {
+    let host = match url
+        .host()
+        .ok_or_else(|| Error::InvalidConfig("forward target URI has no host".into()))?
+    {
+        Host::Domain(domain) => {
+            let name = Name::from_ascii(domain).map_err(|error| {
+                Error::InvalidConfig(format!("invalid forward target host {domain:?}: {error}"))
+            })?;
+            if name.is_root() {
+                return Err(Error::InvalidConfig(
+                    "forward target URI must contain a non-root host".into(),
+                ));
+            }
+            domain.to_owned()
+        }
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => address.to_string(),
+    };
+    if let Ok(address) = host.parse::<IpAddr>()
+        && (address.is_unspecified() || address.is_multicast())
+    {
+        return Err(Error::InvalidConfig(
+            "forward target must be a unicast, non-unspecified address".into(),
+        ));
+    }
+    Ok(host)
+}
+
+fn target_authority(
+    scheme: TargetScheme,
+    host: &str,
+    port: u16,
+    explicit_port: Option<u16>,
+) -> Result<String> {
+    let display_host = if host.parse::<Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let authority = match (scheme, explicit_port) {
+        (TargetScheme::Tcp, _) => format!("{display_host}:{port}"),
+        (TargetScheme::Http | TargetScheme::Https, Some(port)) => {
+            format!("{display_host}:{port}")
+        }
+        (TargetScheme::Http | TargetScheme::Https, None) => display_host,
+    };
+    authority
+        .parse::<hyper::http::uri::Authority>()
+        .map_err(|error| {
+            Error::InvalidConfig(format!("invalid forward target authority: {error}"))
+        })?;
+    Ok(authority)
+}
+
+pub fn parse_target_argument(value: &str) -> std::result::Result<String, String> {
+    Target::parse(value)
+        .map(|_| value.trim().to_owned())
+        .map_err(|error| error.to_string())
 }
 
 pub fn run(
     client: Client,
     session: ConnectedSession,
-    config: HttpProxyConfig,
+    config: ForwardConfig,
     shutdown: Arc<AtomicBool>,
 ) -> Result<SessionEnd> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_name("openiwan-http")
+        .thread_name("openiwan-forward")
         .build()
         .map_err(Error::Io)?;
     runtime.block_on(run_async(client, session, config, shutdown))
@@ -232,53 +316,44 @@ pub fn run(
 async fn run_async(
     client: Client,
     session: ConnectedSession,
-    config: HttpProxyConfig,
+    config: ForwardConfig,
     shutdown: Arc<AtomicBool>,
 ) -> Result<SessionEnd> {
+    let ForwardConfig {
+        listen,
+        target,
+        dns,
+        tls,
+        connect_timeout,
+    } = config;
     let session_info = session.info().clone();
     let (packet_device, capture) = channel_packet_device(session_info.mtu);
     let net = build_userspace_net(capture, &session_info)?;
-    let tls = build_optional_tls(&config.upstream, &config.ca_certificates)?;
-    let dns_servers = effective_dns_servers(&config.dns.servers, &session_info);
-    let connector = IwanConnector::new(
+    let connector = build_tcp_connector(
         Arc::clone(&net),
         &session_info,
-        ConnectorSettings {
-            upstream: config.upstream.clone(),
-            upstream_ips: config.upstream_ips,
-            dns_mode: config.dns.mode,
-            dns_servers,
-            dns_timeout: config.dns.timeout,
-            tls,
-            timeout: config.upstream_timeout,
-        },
+        target.clone(),
+        dns,
+        connect_timeout,
     );
-    let listener = TcpListener::bind(config.listen).await.map_err(Error::Io)?;
+    let listener = TcpListener::bind(listen).await.map_err(Error::Io)?;
     let listen_address = listener.local_addr().map_err(Error::Io)?;
 
-    let tunnel_shutdown = Arc::clone(&shutdown);
-    let tunnel_device: Arc<dyn PacketDevice> = packet_device;
-    let mut tunnel = tokio::task::spawn_blocking(move || {
-        client.run_reconnecting_from(session, tunnel_device, tunnel_shutdown)
-    });
+    let mut tunnel = spawn_tunnel(client, session, packet_device, Arc::clone(&shutdown));
 
     if let Some(end) = preflight_connector(&connector, &mut tunnel, &shutdown).await? {
         return Ok(end);
     }
 
-    let http_client = HttpClient::builder(TokioExecutor::new()).build(connector);
-    let proxy_state = Arc::new(ProxyState {
-        client: http_client,
-        upstream: config.upstream,
-    });
-
-    announce_proxy(listen_address, &proxy_state.upstream);
+    let handler = ConnectionHandler::new(connector, &target, tls);
+    announce_forward(listen_address, &target);
 
     let mut connections = JoinSet::new();
     let mut shutdown_check = interval(SHUTDOWN_POLL);
     shutdown_check.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut tunnel_result = None;
     let mut accept_error = None;
+    let mut capacity_warning_active = false;
 
     loop {
         tokio::select! {
@@ -288,20 +363,29 @@ async fn run_async(
             }
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, peer)) => {
-                        let state = Arc::clone(&proxy_state);
-                        connections.spawn(async move {
-                            let service = service_fn(move |request| {
-                                proxy_request(request, Arc::clone(&state))
-                            });
-                            if let Err(error) = http1::Builder::new()
-                                .keep_alive(true)
-                                .serve_connection(TokioIo::new(stream), service)
-                                .await
-                            {
-                                debug!(%peer, %error, "local HTTP connection ended with an error");
+                    Ok((local, peer)) => {
+                        match capacity_decision(
+                            connections.len(),
+                            &mut capacity_warning_active,
+                        ) {
+                            CapacityDecision::Accept => {
+                                spawn_connection(
+                                    &mut connections,
+                                    local,
+                                    peer,
+                                    handler.clone(),
+                                );
                             }
-                        });
+                            CapacityDecision::RejectAndWarn => {
+                                warn!(
+                                    %peer,
+                                    limit = MAX_CONNECTIONS,
+                                    "rejecting forward connections at capacity"
+                                );
+                                drop(local);
+                            }
+                            CapacityDecision::Reject => drop(local),
+                        }
                     }
                     Err(error) => {
                         accept_error = Some(error);
@@ -311,8 +395,9 @@ async fn run_async(
             }
             joined = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = joined {
-                    warn!(%error, "local HTTP connection task failed");
+                    warn!(%error, "forward connection task failed");
                 }
+                reset_capacity_warning(connections.len(), &mut capacity_warning_active);
             }
             _ = shutdown_check.tick() => {
                 if shutdown.load(Ordering::Acquire) {
@@ -334,27 +419,221 @@ async fn run_async(
     if let Some(error) = accept_error {
         return Err(Error::Io(error));
     }
-    info!(?end, "route-free HTTP proxy stopped");
+    info!(?end, "route-free forward stopped");
     Ok(end)
 }
 
-fn build_optional_tls(
-    upstream: &Upstream,
-    ca_certificates: &[PathBuf],
-) -> Result<Option<TlsConnector>> {
-    upstream
-        .uses_tls()
-        .then(|| build_tls_connector(ca_certificates))
-        .transpose()
+fn spawn_tunnel(
+    client: Client,
+    session: ConnectedSession,
+    device: Arc<ChannelPacketDevice>,
+    shutdown: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<Result<SessionEnd>> {
+    let device: Arc<dyn PacketDevice> = device;
+    tokio::task::spawn_blocking(move || client.run_reconnecting_from(session, device, shutdown))
 }
 
-fn announce_proxy(listen_address: SocketAddr, upstream: &Upstream) {
-    println!(
-        "HTTP proxy listening on http://{listen_address} -> {}",
-        upstream.url
-    );
-    if !upstream.uses_tls() {
-        println!("warning: HTTP upstream traffic is not protected by TLS");
+fn build_tcp_connector(
+    net: Arc<Net>,
+    session: &SessionInfo,
+    target: Target,
+    dns: DnsConfig,
+    connect_timeout: Duration,
+) -> TcpConnector {
+    let dns_servers = effective_dns_servers(&dns.servers, session);
+    TcpConnector::new(
+        net,
+        session,
+        ConnectorSettings {
+            target,
+            dns_mode: dns.mode,
+            dns_servers,
+            dns_timeout: dns.timeout,
+            timeout: connect_timeout,
+        },
+    )
+}
+
+#[derive(Clone)]
+enum ConnectionHandler {
+    Tcp(TcpConnector),
+    Http(http_forward::HttpForwarder),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapacityDecision {
+    Accept,
+    RejectAndWarn,
+    Reject,
+}
+
+fn capacity_decision(active: usize, warning_active: &mut bool) -> CapacityDecision {
+    if active < MAX_CONNECTIONS {
+        CapacityDecision::Accept
+    } else if *warning_active {
+        CapacityDecision::Reject
+    } else {
+        *warning_active = true;
+        CapacityDecision::RejectAndWarn
+    }
+}
+
+fn reset_capacity_warning(active: usize, warning_active: &mut bool) {
+    if active < MAX_CONNECTIONS {
+        *warning_active = false;
+    }
+}
+
+impl ConnectionHandler {
+    fn new(
+        connector: TcpConnector,
+        target: &Target,
+        tls: Option<tokio_rustls::TlsConnector>,
+    ) -> Self {
+        if target.is_http() {
+            Self::Http(http_forward::HttpForwarder::new(
+                connector,
+                target.clone(),
+                tls,
+            ))
+        } else {
+            debug_assert!(tls.is_none());
+            Self::Tcp(connector)
+        }
+    }
+}
+
+fn spawn_connection(
+    connections: &mut JoinSet<()>,
+    local: tokio::net::TcpStream,
+    peer: SocketAddr,
+    handler: ConnectionHandler,
+) {
+    connections.spawn(async move {
+        match handler {
+            ConnectionHandler::Tcp(connector) => {
+                let mut local = local;
+                match connector.connect().await {
+                    Ok(remote) => match relay_connection(&mut local, remote).await {
+                        Ok((sent, received)) => {
+                            debug!(
+                                %peer,
+                                local_to_target = sent,
+                                target_to_local = received,
+                                "TCP forward connection closed"
+                            );
+                        }
+                        Err(error) => {
+                            debug!(%peer, %error, "TCP forward connection ended with an error");
+                        }
+                    },
+                    Err(error) => {
+                        warn!(%peer, %error, "cannot connect to TCP forward target");
+                    }
+                }
+            }
+            ConnectionHandler::Http(proxy) => proxy.serve(local, peer).await,
+        }
+    });
+}
+
+async fn relay_connection(
+    local: &mut tokio::net::TcpStream,
+    remote: UserTcpStream,
+) -> io::Result<(u64, u64)> {
+    // tokio-smoltcp waits through TCP TIME-WAIT in poll_shutdown. The adapter
+    // first drains acknowledged data, then initiates FIN while allowing
+    // copy_bidirectional to finish without retaining completed forwards through
+    // TIME-WAIT.
+    let mut remote = RelayTcpStream::new(remote);
+    let result = copy_bidirectional(local, &mut remote).await;
+    if result.is_err() {
+        remote.close_after_error().await;
+    }
+    tokio::task::yield_now().await;
+    result
+}
+
+struct RelayTcpStream {
+    inner: UserTcpStream,
+    write_flushed: bool,
+}
+
+impl RelayTcpStream {
+    const fn new(inner: UserTcpStream) -> Self {
+        Self {
+            inner,
+            write_flushed: false,
+        }
+    }
+
+    async fn close_after_error(&mut self) {
+        let close = tokio::io::AsyncWriteExt::shutdown(&mut self.inner);
+        let _ = timeout(ERROR_CLOSE_GRACE, close).await;
+    }
+}
+
+impl AsyncRead for RelayTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for RelayTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(context, buffer);
+        if matches!(&result, Poll::Ready(Ok(written)) if *written > 0) {
+            self.write_flushed = false;
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let result = Pin::new(&mut self.inner).poll_flush(context);
+        if matches!(&result, Poll::Ready(Ok(()))) {
+            self.write_flushed = true;
+        }
+        result
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.write_flushed {
+            match Pin::new(&mut self.inner).poll_flush(context) {
+                Poll::Ready(Ok(())) => self.write_flushed = true,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        match Pin::new(&mut self.inner).poll_shutdown(context) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+fn announce_forward(listen_address: SocketAddr, target: &Target) {
+    if target.is_http() {
+        println!(
+            "HTTP forward listening on http://{listen_address} -> {}",
+            target.display()
+        );
+        if !target.uses_tls() {
+            println!("warning: upstream HTTP traffic is not protected by TLS");
+        }
+    } else {
+        println!(
+            "TCP forward listening on tcp://{listen_address} -> {}",
+            target.display()
+        );
+        println!("TCP bytes, including TLS, are relayed unchanged");
     }
     println!("no TUN interface or host route was created; press Ctrl-C to stop");
 }
@@ -376,7 +655,7 @@ fn effective_dns_servers(configured: &[SocketAddr], session: &SessionInfo) -> Ve
 }
 
 async fn preflight_connector(
-    connector: &IwanConnector,
+    connector: &TcpConnector,
     tunnel: &mut tokio::task::JoinHandle<Result<SessionEnd>>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<Option<SessionEnd>> {
@@ -398,7 +677,7 @@ async fn finish_connections(connections: &mut JoinSet<()>) {
     if timeout(SHUTDOWN_GRACE, async {
         while let Some(result) = connections.join_next().await {
             if let Err(error) = result {
-                warn!(%error, "local HTTP connection task failed during shutdown");
+                warn!(%error, "forward connection task failed during shutdown");
             }
         }
     })
@@ -406,13 +685,18 @@ async fn finish_connections(connections: &mut JoinSet<()>) {
     .is_err()
     {
         connections.abort_all();
+        while connections.join_next().await.is_some() {}
     }
 }
 
 fn flatten_tunnel_result(
     result: std::result::Result<Result<SessionEnd>, JoinError>,
 ) -> Result<SessionEnd> {
-    result.map_err(|error| Error::Http(format!("iWAN session task failed: {error}")))?
+    result.map_err(|error| {
+        Error::Io(io::Error::other(format!(
+            "iWAN session task failed: {error}"
+        )))
+    })?
 }
 
 struct ChannelPacketDevice {
@@ -422,7 +706,7 @@ struct ChannelPacketDevice {
 
 impl PacketDevice for ChannelPacketDevice {
     fn name(&self) -> &'static str {
-        "userspace-http"
+        "userspace-forward"
     }
 
     fn read_packet(&self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -584,86 +868,25 @@ fn ipv4_mask_prefix(mask: Ipv4Addr) -> Result<u8> {
     Ok(prefix)
 }
 
-fn build_tls_connector(ca_certificates: &[PathBuf]) -> Result<TlsConnector> {
-    let native = rustls_native_certs::load_native_certs();
-    for error in &native.errors {
-        warn!(%error, "failed to load one native root certificate");
-    }
-    let mut roots = RootCertStore::empty();
-    let (native_added, native_ignored) = roots.add_parsable_certificates(native.certs);
-    if native_ignored > 0 {
-        warn!(
-            native_ignored,
-            "ignored invalid certificates from native root store"
-        );
-    }
-
-    let mut custom_added = 0_usize;
-    for path in ca_certificates {
-        let file = File::open(path).map_err(|error| {
-            Error::InvalidConfig(format!("cannot open CA file {}: {error}", path.display()))
-        })?;
-        let mut reader = BufReader::new(file);
-        let certificates = rustls_pemfile::certs(&mut reader)
-            .collect::<io::Result<Vec<_>>>()
-            .map_err(|error| {
-                Error::InvalidConfig(format!("cannot parse CA file {}: {error}", path.display()))
-            })?;
-        if certificates.is_empty() {
-            return Err(Error::InvalidConfig(format!(
-                "CA file {} contains no certificates",
-                path.display()
-            )));
-        }
-        for certificate in certificates {
-            roots.add(certificate).map_err(|error| {
-                Error::InvalidConfig(format!(
-                    "invalid certificate in CA file {}: {error}",
-                    path.display()
-                ))
-            })?;
-            custom_added += 1;
-        }
-    }
-    if native_added + custom_added == 0 {
-        return Err(Error::InvalidConfig(
-            "no usable TLS root certificates were loaded".into(),
-        ));
-    }
-
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut client_config = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|error| Error::Http(format!("select TLS protocol versions: {error}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(TlsConnector::from(Arc::new(client_config)))
-}
-
 #[derive(Clone)]
-struct IwanConnector {
+struct TcpConnector {
     net: Arc<Net>,
-    upstream: Upstream,
-    upstream_ips: Arc<[IpAddr]>,
+    target: Target,
     dns_mode: DnsMode,
     dns_servers: Arc<[SocketAddr]>,
     dns_timeout: Duration,
     dns_cache: Arc<TokioMutex<Option<CachedResolution>>>,
     next_dns_id: Arc<AtomicU16>,
-    tls: Option<TlsConnector>,
     timeout: Duration,
     ipv4: bool,
     synthetic_route: Arc<AtomicBool>,
 }
 
 struct ConnectorSettings {
-    upstream: Upstream,
-    upstream_ips: Vec<IpAddr>,
+    target: Target,
     dns_mode: DnsMode,
     dns_servers: Vec<SocketAddr>,
     dns_timeout: Duration,
-    tls: Option<TlsConnector>,
     timeout: Duration,
 }
 
@@ -681,7 +904,7 @@ enum ResolutionSource {
     SystemDns,
 }
 
-impl IwanConnector {
+impl TcpConnector {
     fn new(net: Arc<Net>, session: &SessionInfo, settings: ConnectorSettings) -> Self {
         let address = session
             .address
@@ -689,14 +912,12 @@ impl IwanConnector {
         let seed = session_random_seed(session);
         Self {
             net,
-            upstream: settings.upstream,
-            upstream_ips: settings.upstream_ips.into(),
+            target: settings.target,
             dns_mode: settings.dns_mode,
             dns_servers: settings.dns_servers.into(),
             dns_timeout: settings.dns_timeout,
             dns_cache: Arc::new(TokioMutex::new(None)),
             next_dns_id: Arc::new(AtomicU16::new(seed as u16)),
-            tls: settings.tls,
             timeout: settings.timeout,
             ipv4: address.is_ipv4(),
             synthetic_route: Arc::new(AtomicBool::new(
@@ -712,44 +933,44 @@ impl IwanConnector {
             .await
             .map_err(|_| {
                 Error::InvalidConfig(format!(
-                    "DNS resolution for upstream {} timed out",
-                    self.upstream.host
+                    "DNS resolution for target {} timed out",
+                    self.target.host
                 ))
             })?
             .map_err(|error| {
                 Error::InvalidConfig(format!(
-                    "cannot resolve upstream {}: {error}",
-                    self.upstream.host
+                    "cannot resolve target {}: {error}",
+                    self.target.host
                 ))
             })?;
         if resolution.addresses.is_empty() {
             let family = if self.ipv4 { "IPv4" } else { "IPv6" };
             return Err(Error::InvalidConfig(format!(
-                "upstream {} has no {family} address matching the iWAN session",
-                self.upstream.host
+                "target {} has no {family} address matching the iWAN session",
+                self.target.host
             )));
         }
         match resolution.source {
             ResolutionSource::Fixed => {
                 info!(
-                    upstream = %self.upstream.host,
+                    target = %self.target.host,
                     addresses = ?resolution.addresses,
-                    "using fixed upstream address; DNS was bypassed"
+                    "using fixed target address; DNS was bypassed"
                 );
             }
             ResolutionSource::IwanDns(server) => {
                 info!(
-                    upstream = %self.upstream.host,
+                    target = %self.target.host,
                     addresses = ?resolution.addresses,
                     %server,
-                    "resolved upstream through iWAN DNS"
+                    "resolved target through iWAN DNS"
                 );
             }
             ResolutionSource::SystemDns => {
                 info!(
-                    upstream = %self.upstream.host,
+                    target = %self.target.host,
                     addresses = ?resolution.addresses,
-                    "resolved upstream with the host DNS resolver"
+                    "resolved target with the host DNS resolver"
                 );
             }
         }
@@ -760,34 +981,20 @@ impl IwanConnector {
                 .any(|address| is_ipv4_benchmark_address(address.ip()))
         {
             warn!(
-                upstream = %self.upstream.host,
+                target = %self.target.host,
                 addresses = ?resolution.addresses,
                 "host DNS returned 198.18.0.0/15; this may be a VPN Fake-IP \
-                 rather than the real upstream address"
+                 rather than the real target address"
             );
         }
         self.ensure_userspace_route(resolution.addresses[0].ip())
-            .map_err(|error| Error::Http(format!("configure userspace route: {error}")))?;
+            .map_err(Error::Io)?;
         Ok(())
     }
 
     async fn resolve(&self) -> io::Result<CachedResolution> {
-        if !self.upstream_ips.is_empty() {
-            let mut addresses: Vec<_> = self
-                .upstream_ips
-                .iter()
-                .copied()
-                .map(|address| SocketAddr::new(address, self.upstream.port))
-                .collect();
-            self.normalize_addresses(&mut addresses);
-            return Ok(CachedResolution {
-                addresses,
-                source: ResolutionSource::Fixed,
-                expires_at: Instant::now() + MAX_DNS_TTL,
-            });
-        }
-        if let Ok(address) = self.upstream.host.parse::<IpAddr>() {
-            let mut addresses = vec![SocketAddr::new(address, self.upstream.port)];
+        if let Ok(address) = self.target.host.parse::<IpAddr>() {
+            let mut addresses = vec![SocketAddr::new(address, self.target.port)];
             self.normalize_addresses(&mut addresses);
             return Ok(CachedResolution {
                 addresses,
@@ -841,7 +1048,7 @@ impl IwanConnector {
             match dns::lookup(
                 &self.net,
                 server,
-                &self.upstream.host,
+                &self.target.host,
                 self.ipv4,
                 self.dns_timeout,
                 &self.next_dns_id,
@@ -852,7 +1059,7 @@ impl IwanConnector {
                     let mut addresses: Vec<_> = lookup
                         .addresses
                         .into_iter()
-                        .map(|address| SocketAddr::new(address, self.upstream.port))
+                        .map(|address| SocketAddr::new(address, self.target.port))
                         .collect();
                     self.normalize_addresses(&mut addresses);
                     if addresses.is_empty() {
@@ -883,7 +1090,7 @@ impl IwanConnector {
     }
 
     async fn resolve_system_dns(&self, reject_fake_ip: bool) -> io::Result<CachedResolution> {
-        let mut addresses: Vec<_> = lookup_host((self.upstream.host.as_str(), self.upstream.port))
+        let mut addresses: Vec<_> = lookup_host((self.target.host.as_str(), self.target.port))
             .await?
             .collect();
         self.normalize_addresses(&mut addresses);
@@ -913,8 +1120,13 @@ impl IwanConnector {
 
     fn normalize_addresses(&self, addresses: &mut Vec<SocketAddr>) {
         addresses.retain(|address| address.is_ipv4() == self.ipv4);
-        addresses.sort_unstable();
-        addresses.dedup();
+        let mut unique = Vec::with_capacity(addresses.len());
+        for address in addresses.drain(..) {
+            if !unique.contains(&address) {
+                unique.push(address);
+            }
+        }
+        *addresses = unique;
     }
 
     fn ensure_userspace_route(&self, address: IpAddr) -> io::Result<()> {
@@ -940,67 +1152,57 @@ impl IwanConnector {
         result
     }
 
-    async fn connect(&self, uri: &Uri) -> std::result::Result<IwanConnection, BoxError> {
-        if uri.scheme_str() != Some(self.upstream.url.scheme())
-            || uri.host() != Some(self.upstream.host.as_str())
-            || uri.port_u16().unwrap_or(self.upstream.port) != self.upstream.port
-        {
+    async fn connect(&self) -> io::Result<UserTcpStream> {
+        self.connect_with(|stream| std::future::ready(Ok(stream)))
+            .await
+    }
+
+    async fn connect_with<T, F, Fut>(&self, mut finish: F) -> io::Result<T>
+    where
+        F: FnMut(UserTcpStream) -> Fut,
+        Fut: Future<Output = io::Result<T>>,
+    {
+        let started = Instant::now();
+        let addresses = timeout(self.timeout, self.resolve())
+            .await
+            .map_err(|_| io::Error::new(ErrorKind::TimedOut, "target resolution timed out"))??
+            .addresses;
+        if addresses.is_empty() {
             return Err(io::Error::new(
-                ErrorKind::PermissionDenied,
-                "proxy connector rejected a non-configured destination",
-            )
-            .into());
+                ErrorKind::AddrNotAvailable,
+                "target DNS result does not match the iWAN address family",
+            ));
         }
 
-        let server_name = self
-            .upstream
-            .uses_tls()
-            .then(|| {
-                ServerName::try_from(self.upstream.host.clone())
-                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))
-            })
-            .transpose()?;
-        let operation = async {
-            let addresses = self.resolve().await?.addresses;
-            if addresses.is_empty() {
-                return Err(io::Error::new(
-                    ErrorKind::AddrNotAvailable,
-                    "upstream DNS result does not match the iWAN address family",
-                ));
+        let address_count = addresses.len();
+        let mut last_error = None;
+        for (index, address) in addresses.into_iter().enumerate() {
+            self.ensure_userspace_route(address.ip())?;
+            let remaining = self.timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                break;
             }
-            let mut last_error = None;
-            for address in addresses {
-                self.ensure_userspace_route(address.ip())?;
-                match self.net.tcp_connect(address).await {
-                    Ok(stream) => {
-                        let Some(server_name) = server_name.clone() else {
-                            return Ok(IwanConnection::Plain(TokioIo::new(stream)));
-                        };
-                        let tls = self
-                            .tls
-                            .as_ref()
-                            .expect("HTTPS upstream has a TLS connector");
-                        match tls.connect(server_name, stream).await {
-                            Ok(stream) => {
-                                return Ok(IwanConnection::Tls(Box::new(TokioIo::new(stream))));
-                            }
-                            Err(error) => last_error = Some(error),
-                        }
-                    }
-                    Err(error) => last_error = Some(error),
+            let attempts_left = u32::try_from(address_count - index).unwrap_or(u32::MAX);
+            let attempt_timeout = (remaining / attempts_left)
+                .max(Duration::from_millis(1))
+                .min(remaining);
+            let attempt = async {
+                let stream = self.net.tcp_connect(address).await?;
+                finish(stream).await
+            };
+            match timeout(attempt_timeout, attempt).await {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(error)) => last_error = Some(error),
+                Err(_) => {
+                    last_error = Some(io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!("connection setup for target address {address} timed out"),
+                    ));
                 }
             }
-            Err(last_error.unwrap_or_else(|| {
-                io::Error::new(
-                    ErrorKind::AddrNotAvailable,
-                    "upstream has no usable address",
-                )
-            }))
-        };
-        timeout(self.timeout, operation)
-            .await
-            .map_err(|_| io::Error::new(ErrorKind::TimedOut, "upstream connection timed out"))?
-            .map_err(Into::into)
+        }
+        Err(last_error
+            .unwrap_or_else(|| io::Error::new(ErrorKind::TimedOut, "target connection timed out")))
     }
 }
 
@@ -1018,237 +1220,12 @@ fn is_ipv4_benchmark_address(address: IpAddr) -> bool {
     }
 }
 
-impl Service<Uri> for IwanConnector {
-    type Response = IwanConnection;
-    type Error = BoxError;
-    type Future =
-        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(
-        &mut self,
-        _context: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, uri: Uri) -> Self::Future {
-        let connector = self.clone();
-        Box::pin(async move { connector.connect(&uri).await })
-    }
-}
-
-enum IwanConnection {
-    Plain(TokioIo<UserTcpStream>),
-    Tls(Box<TokioIo<TlsStream<UserTcpStream>>>),
-}
-
-impl Connection for IwanConnection {
-    fn connected(&self) -> Connected {
-        Connected::new()
-    }
-}
-
-impl HyperRead for IwanConnection {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: ReadBufCursor<'_>,
-    ) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Plain(stream) => HyperRead::poll_read(Pin::new(stream), context, buffer),
-            Self::Tls(stream) => HyperRead::poll_read(Pin::new(stream.as_mut()), context, buffer),
-        }
-    }
-}
-
-impl HyperWrite for IwanConnection {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match &mut *self {
-            Self::Plain(stream) => HyperWrite::poll_write(Pin::new(stream), context, buffer),
-            Self::Tls(stream) => HyperWrite::poll_write(Pin::new(stream.as_mut()), context, buffer),
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Plain(stream) => HyperWrite::poll_flush(Pin::new(stream), context),
-            Self::Tls(stream) => HyperWrite::poll_flush(Pin::new(stream.as_mut()), context),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Plain(stream) => HyperWrite::poll_shutdown(Pin::new(stream), context),
-            Self::Tls(stream) => HyperWrite::poll_shutdown(Pin::new(stream.as_mut()), context),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        match self {
-            Self::Plain(stream) => HyperWrite::is_write_vectored(stream),
-            Self::Tls(stream) => HyperWrite::is_write_vectored(stream.as_ref()),
-        }
-    }
-
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffers: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        match &mut *self {
-            Self::Plain(stream) => {
-                HyperWrite::poll_write_vectored(Pin::new(stream), context, buffers)
-            }
-            Self::Tls(stream) => {
-                HyperWrite::poll_write_vectored(Pin::new(stream.as_mut()), context, buffers)
-            }
-        }
-    }
-}
-
-struct ProxyState {
-    client: ProxyClient,
-    upstream: Upstream,
-}
-
-async fn proxy_request(
-    mut request: Request<Incoming>,
-    state: Arc<ProxyState>,
-) -> std::result::Result<Response<ProxyBody>, Infallible> {
-    let uri = match state.upstream.request_uri(request.uri()) {
-        Ok(uri) => uri,
-        Err(error) => {
-            warn!(%error, "rejected malformed local HTTP request");
-            return Ok(error_response(StatusCode::BAD_REQUEST));
-        }
-    };
-    strip_hop_by_hop(request.headers_mut());
-    let host = match HeaderValue::from_str(&state.upstream.authority) {
-        Ok(host) => host,
-        Err(error) => {
-            warn!(%error, "configured upstream authority is not a valid Host header");
-            return Ok(error_response(StatusCode::BAD_GATEWAY));
-        }
-    };
-    request.headers_mut().insert(HOST, host);
-    *request.uri_mut() = uri;
-    *request.version_mut() = Version::HTTP_11;
-
-    match state.client.request(request).await {
-        Ok(mut response) => {
-            strip_hop_by_hop(response.headers_mut());
-            rewrite_location(response.headers_mut(), &state.upstream);
-            Ok(response.map(|body| {
-                body.map_err(|error| -> BoxError { Box::new(error) })
-                    .boxed_unsync()
-            }))
-        }
-        Err(error) => {
-            let status = if is_timeout_error(&error) {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            warn!(%error, "upstream request failed");
-            Ok(error_response(status))
-        }
-    }
-}
-
-fn strip_hop_by_hop(headers: &mut HeaderMap) {
-    let connection_headers = headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
-        .collect::<Vec<_>>();
-    for name in connection_headers {
-        headers.remove(name);
-    }
-    for name in [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "proxy-connection",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    ] {
-        headers.remove(name);
-    }
-}
-
-fn rewrite_location(headers: &mut HeaderMap, upstream: &Upstream) {
-    let Some(value) = headers.get(LOCATION) else {
-        return;
-    };
-    let Ok(value) = value.to_str() else {
-        return;
-    };
-    let Ok(location) = Url::parse(value) else {
-        return;
-    };
-    if location.origin() != upstream.url.origin() {
-        return;
-    }
-    let mut relative = location.path().to_owned();
-    if let Some(query) = location.query() {
-        relative.push('?');
-        relative.push_str(query);
-    }
-    if let Some(fragment) = location.fragment() {
-        relative.push('#');
-        relative.push_str(fragment);
-    }
-    if let Ok(value) = HeaderValue::from_str(&relative) {
-        headers.insert(LOCATION, value);
-    }
-}
-
-fn is_timeout_error(error: &HttpClientError) -> bool {
-    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
-    while let Some(error) = current {
-        if error
-            .downcast_ref::<io::Error>()
-            .is_some_and(|error| error.kind() == ErrorKind::TimedOut)
-        {
-            return true;
-        }
-        current = error.source();
-    }
-    false
-}
-
-fn error_response(status: StatusCode) -> Response<ProxyBody> {
-    let message = match status {
-        StatusCode::BAD_REQUEST => "bad request\n",
-        StatusCode::GATEWAY_TIMEOUT => "upstream connection timed out\n",
-        _ => "upstream unavailable\n",
-    };
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(
-            Full::new(Bytes::from_static(message.as_bytes()))
-                .map_err(|never| -> BoxError { match never {} })
-                .boxed_unsync(),
-        )
-        .expect("static HTTP error response is valid")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use openiwan::EncryptionMethod;
 
-    fn test_session(address: Ipv4Addr) -> SessionInfo {
+    pub(super) fn test_session(address: Ipv4Addr) -> SessionInfo {
         SessionInfo {
             peer: "127.0.0.1:6001".parse().unwrap(),
             session_id: 1,
@@ -1264,7 +1241,7 @@ mod tests {
         }
     }
 
-    fn linked_userspace_nets(
+    pub(super) fn linked_userspace_nets(
         client_ip: Ipv4Addr,
         server_ip: Ipv4Addr,
     ) -> (
@@ -1312,36 +1289,22 @@ mod tests {
     }
 
     #[test]
-    fn validates_http_or_https_origin_and_loopback_listener() {
-        let secure_config = HttpProxyConfig::new(
+    fn validates_target_and_loopback_listener() {
+        let config = ForwardConfig::new(
             "127.0.0.1:8080".parse().unwrap(),
-            "https://api.example.test",
-            Vec::new(),
+            "tcp://db.example.test:5432",
             DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
             Vec::new(),
             Duration::from_secs(10),
         )
         .unwrap();
-        assert_eq!(secure_config.upstream.authority, "api.example.test");
-        assert!(secure_config.upstream.uses_tls());
-
-        let plain_config = HttpProxyConfig::new(
-            "127.0.0.1:8080".parse().unwrap(),
-            "http://api.example.test",
-            Vec::new(),
-            DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
-            Vec::new(),
-            Duration::from_secs(10),
-        )
-        .unwrap();
-        assert_eq!(plain_config.upstream.port, 80);
-        assert!(!plain_config.upstream.uses_tls());
+        assert_eq!(config.target.host, "db.example.test");
+        assert_eq!(config.target.port, 5432);
 
         assert!(
-            HttpProxyConfig::new(
+            ForwardConfig::new(
                 "0.0.0.0:8080".parse().unwrap(),
-                "https://api.example.test",
-                Vec::new(),
+                "tcp://db.example.test:5432",
                 DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
                 Vec::new(),
                 Duration::from_secs(10),
@@ -1349,24 +1312,12 @@ mod tests {
             .is_err()
         );
         assert!(
-            HttpProxyConfig::new(
+            ForwardConfig::new(
                 "127.0.0.1:8080".parse().unwrap(),
-                "ftp://api.example.test",
-                Vec::new(),
+                "tcp://db.example.test:5432",
                 DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
                 Vec::new(),
-                Duration::from_secs(10),
-            )
-            .is_err()
-        );
-        assert!(
-            HttpProxyConfig::new(
-                "127.0.0.1:8080".parse().unwrap(),
-                "https://api.example.test/base",
-                Vec::new(),
-                DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
-                Vec::new(),
-                Duration::from_secs(10),
+                Duration::ZERO,
             )
             .is_err()
         );
@@ -1381,6 +1332,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_domain_ipv4_and_bracketed_ipv6_targets() {
+        let tcp = Target::parse("tcp://db.example.test:5432").unwrap();
+        assert_eq!(tcp.scheme, TargetScheme::Tcp);
+        assert_eq!(tcp.host, "db.example.test");
+        assert_eq!(tcp.authority, "db.example.test:5432");
+        assert_eq!(tcp.port, 5432);
+
+        let ipv4 = Target::parse("tcp://192.0.2.25:22").unwrap();
+        assert_eq!(ipv4.host, "192.0.2.25");
+        assert_eq!(ipv4.port, 22);
+
+        let ipv6 = Target::parse("tcp://[2001:db8::25]:443").unwrap();
+        assert_eq!(ipv6.host, "2001:db8::25");
+        assert_eq!(ipv6.port, 443);
+        assert_eq!(ipv6.display(), "tcp://[2001:db8::25]:443");
+
+        let http = Target::parse("http://example.test").unwrap();
+        assert_eq!(http.scheme, TargetScheme::Http);
+        assert_eq!(http.port, 80);
+        assert_eq!(http.authority, "example.test");
+
+        let https = Target::parse("https://example.test:8443").unwrap();
+        assert_eq!(https.scheme, TargetScheme::Https);
+        assert_eq!(https.port, 8443);
+        assert_eq!(https.authority, "example.test:8443");
+
+        for invalid in [
+            "",
+            "db.example.test",
+            "db.example.test:5432",
+            "http:example.test",
+            "tcp://db.example.test",
+            "tcp://db.example.test:5432/",
+            "tcp://db.example.test:0",
+            "udp://db.example.test:53",
+            "http://user@example.test",
+            "http://@example.test",
+            "http://./",
+            "http://example.test/path",
+            "https://example.test?query=yes",
+            "2001:db8::25:443",
+            "tcp://0.0.0.0:80",
+            "tcp://[ff02::1]:80",
+        ] {
+            assert!(Target::parse(invalid).is_err(), "{invalid:?} was accepted");
+        }
+    }
+
+    #[test]
     fn identifies_common_vpn_fake_ip_range() {
         assert!(is_ipv4_benchmark_address("198.18.0.23".parse().unwrap()));
         assert!(is_ipv4_benchmark_address("198.19.255.254".parse().unwrap()));
@@ -1389,61 +1389,28 @@ mod tests {
     }
 
     #[test]
-    fn preserves_path_and_query_for_fixed_upstream() {
-        let secure_origin = Upstream::parse("https://api.example.test:8443").unwrap();
-        let uri = secure_origin
-            .request_uri(&"/v1/items?limit=5".parse().unwrap())
-            .unwrap();
+    fn enforces_connection_capacity_and_throttles_warnings() {
+        let mut warning_active = false;
         assert_eq!(
-            uri,
-            "https://api.example.test:8443/v1/items?limit=5"
-                .parse::<Uri>()
-                .unwrap()
+            capacity_decision(MAX_CONNECTIONS - 1, &mut warning_active),
+            CapacityDecision::Accept
         );
-
-        let plain_origin = Upstream::parse("http://api.example.test:8080").unwrap();
-        let uri = plain_origin
-            .request_uri(&"/v1/items?limit=5".parse().unwrap())
-            .unwrap();
         assert_eq!(
-            uri,
-            "http://api.example.test:8080/v1/items?limit=5"
-                .parse::<Uri>()
-                .unwrap()
+            capacity_decision(MAX_CONNECTIONS, &mut warning_active),
+            CapacityDecision::RejectAndWarn
         );
-    }
-
-    #[test]
-    fn strips_hop_headers_and_connection_nominations() {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, x-remove"));
-        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
-        headers.insert("x-remove", HeaderValue::from_static("yes"));
-        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
-        strip_hop_by_hop(&mut headers);
-        assert!(!headers.contains_key(CONNECTION));
-        assert!(!headers.contains_key("keep-alive"));
-        assert!(!headers.contains_key("x-remove"));
-        assert_eq!(headers["authorization"], "Bearer secret");
-    }
-
-    #[test]
-    fn rewrites_only_same_origin_absolute_locations() {
-        let upstream = Upstream::parse("https://api.example.test").unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            LOCATION,
-            HeaderValue::from_static("https://api.example.test/v2/items?next=1"),
+        assert!(warning_active);
+        assert_eq!(
+            capacity_decision(MAX_CONNECTIONS + 1, &mut warning_active),
+            CapacityDecision::Reject
         );
-        rewrite_location(&mut headers, &upstream);
-        assert_eq!(headers[LOCATION], "/v2/items?next=1");
 
-        headers.insert(
-            LOCATION,
-            HeaderValue::from_static("https://login.example.test/authorize"),
+        reset_capacity_warning(MAX_CONNECTIONS - 1, &mut warning_active);
+        assert!(!warning_active);
+        assert_eq!(
+            capacity_decision(MAX_CONNECTIONS, &mut warning_active),
+            CapacityDecision::RejectAndWarn
         );
-        rewrite_location(&mut headers, &upstream);
-        assert_eq!(headers[LOCATION], "https://login.example.test/authorize");
     }
 
     #[test]
@@ -1533,7 +1500,76 @@ mod tests {
     }
 
     #[test]
-    fn http_connector_sends_plain_http_over_userspace_tcp() {
+    fn resolved_target_timeout_falls_back_to_the_next_address() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client_ip = Ipv4Addr::new(198, 18, 0, 1);
+            let blackhole_ip = Ipv4Addr::new(198, 18, 0, 250);
+            let server_ip = Ipv4Addr::new(198, 18, 0, 200);
+            let (client_net, server_net, pumping, pump) =
+                linked_userspace_nets(client_ip, server_ip);
+            let server_address = SocketAddr::new(server_ip.into(), 9_000);
+            let mut listener = server_net.tcp_bind(server_address).await.unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4];
+                stream.read_exact(&mut request).await.unwrap();
+                assert_eq!(&request, b"ping");
+                stream.write_all(b"pong").await.unwrap();
+                stream.flush().await.unwrap();
+            });
+
+            let connector = TcpConnector::new(
+                client_net,
+                &test_session(client_ip),
+                ConnectorSettings {
+                    target: Target::parse("tcp://service.example.test:9000").unwrap(),
+                    dns_mode: DnsMode::Auto,
+                    dns_servers: Vec::new(),
+                    dns_timeout: Duration::from_secs(1),
+                    timeout: Duration::from_secs(1),
+                },
+            );
+            *connector.dns_cache.lock().await = Some(CachedResolution {
+                addresses: vec![
+                    SocketAddr::new(blackhole_ip.into(), 9_000),
+                    SocketAddr::new(server_ip.into(), 9_000),
+                ],
+                source: ResolutionSource::SystemDns,
+                expires_at: Instant::now() + Duration::from_secs(60),
+            });
+            assert_eq!(
+                connector.resolve().await.unwrap().addresses,
+                vec![
+                    SocketAddr::new(blackhole_ip.into(), 9_000),
+                    SocketAddr::new(server_ip.into(), 9_000),
+                ]
+            );
+            let mut stream = timeout(Duration::from_secs(2), connector.connect())
+                .await
+                .unwrap()
+                .unwrap();
+            stream.write_all(b"ping").await.unwrap();
+            stream.flush().await.unwrap();
+            let mut response = [0_u8; 4];
+            stream.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"pong");
+            server.await.unwrap();
+
+            pumping.store(false, Ordering::Release);
+            pump.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn forwards_arbitrary_tcp_bytes_and_preserves_half_close() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1545,44 +1581,138 @@ mod tests {
                 linked_userspace_nets(client_ip, server_ip);
             let server_address = SocketAddr::new(server_ip.into(), 8_080);
             let mut listener = server_net.tcp_bind(server_address).await.unwrap();
+            let request = (0_u32..70_000)
+                .map(|value| (value.wrapping_mul(31) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            let expected_request = request.clone();
+            let response = vec![0, 0xff, 0x16, 0x03, 0x01, 0, 4, 1, 2, 3, 4];
+            let expected_response = response.clone();
             let server = tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let service = service_fn(|request: Request<Incoming>| async move {
-                    assert_eq!(request.uri().path(), "/health");
-                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"ready"))))
-                });
-                let _ = http1::Builder::new()
-                    .keep_alive(false)
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                stream.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received, expected_request);
+                stream.write_all(&response).await.unwrap();
+                stream.shutdown().await.unwrap();
             });
 
-            let connector = IwanConnector::new(
+            let connector = TcpConnector::new(
                 client_net,
                 &test_session(client_ip),
                 ConnectorSettings {
-                    upstream: Upstream::parse("http://api.example.test:8080").unwrap(),
-                    upstream_ips: vec![server_ip.into()],
+                    target: Target::parse(&format!("tcp://{server_ip}:8080")).unwrap(),
                     dns_mode: DnsMode::Auto,
                     dns_servers: Vec::new(),
                     dns_timeout: Duration::from_secs(1),
-                    tls: None,
                     timeout: Duration::from_secs(2),
                 },
             );
-            let http_client: HttpClient<IwanConnector, Full<Bytes>> =
-                HttpClient::builder(TokioExecutor::new()).build(connector);
-            let request = Request::builder()
-                .uri("http://api.example.test:8080/health")
-                .body(Full::new(Bytes::new()))
+
+            let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let local_address = local_listener.local_addr().unwrap();
+            let local_client = tokio::spawn(async move {
+                let mut stream = tokio::net::TcpStream::connect(local_address).await.unwrap();
+                stream.write_all(&request).await.unwrap();
+                stream.shutdown().await.unwrap();
+                let mut received = Vec::new();
+                stream.read_to_end(&mut received).await.unwrap();
+                received
+            });
+            let (mut local, _) = local_listener.accept().await.unwrap();
+            let remote = connector.connect().await.unwrap();
+            let relay =
+                tokio::spawn(async move { relay_connection(&mut local, remote).await.unwrap() });
+
+            let received = timeout(Duration::from_secs(5), local_client)
+                .await
+                .unwrap()
                 .unwrap();
-            let response = http_client.request(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response.into_body().collect().await.unwrap().to_bytes(),
-                "ready"
+            assert_eq!(received, expected_response);
+            timeout(Duration::from_secs(5), relay)
+                .await
+                .unwrap()
+                .unwrap();
+            timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+
+            pumping.store(false, Ordering::Release);
+            pump.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn preserves_late_upload_when_target_half_closes_first() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client_ip = Ipv4Addr::new(198, 18, 0, 1);
+            let server_ip = Ipv4Addr::new(198, 18, 0, 2);
+            let (client_net, server_net, pumping, pump) =
+                linked_userspace_nets(client_ip, server_ip);
+            let server_address = SocketAddr::new(server_ip.into(), 8_081);
+            let mut listener = server_net.tcp_bind(server_address).await.unwrap();
+            let request = (0_u32..200_000)
+                .map(|value| (value.wrapping_mul(17) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            let expected_request = request.clone();
+            let response = [0xde, 0xad, 0xbe, 0xef];
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = RelayTcpStream::new(stream);
+                stream.write_all(&response).await.unwrap();
+                stream.shutdown().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let mut received = Vec::new();
+                stream.read_to_end(&mut received).await.unwrap();
+                received
+            });
+
+            let connector = TcpConnector::new(
+                client_net,
+                &test_session(client_ip),
+                ConnectorSettings {
+                    target: Target::parse(&format!("tcp://{server_ip}:8081")).unwrap(),
+                    dns_mode: DnsMode::Auto,
+                    dns_servers: Vec::new(),
+                    dns_timeout: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                },
             );
-            server.await.unwrap();
+            let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let local_address = local_listener.local_addr().unwrap();
+            let local_client = tokio::spawn(async move {
+                let mut stream = tokio::net::TcpStream::connect(local_address).await.unwrap();
+                let mut received = [0_u8; 4];
+                stream.read_exact(&mut received).await.unwrap();
+                assert_eq!(received, response);
+                assert_eq!(stream.read(&mut [0_u8; 1]).await.unwrap(), 0);
+                stream.write_all(&request).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let (mut local, _) = local_listener.accept().await.unwrap();
+            let remote = connector.connect().await.unwrap();
+            let relay =
+                tokio::spawn(async move { relay_connection(&mut local, remote).await.unwrap() });
+
+            timeout(Duration::from_secs(10), local_client)
+                .await
+                .unwrap()
+                .unwrap();
+            let received = timeout(Duration::from_secs(10), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received, expected_request);
+            timeout(Duration::from_secs(10), relay)
+                .await
+                .unwrap()
+                .unwrap();
 
             pumping.store(false, Ordering::Release);
             pump.join().unwrap();

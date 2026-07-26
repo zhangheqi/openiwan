@@ -974,19 +974,6 @@ impl TcpConnector {
                 );
             }
         }
-        if matches!(resolution.source, ResolutionSource::SystemDns)
-            && resolution
-                .addresses
-                .iter()
-                .any(|address| is_ipv4_benchmark_address(address.ip()))
-        {
-            warn!(
-                target = %self.target.host,
-                addresses = ?resolution.addresses,
-                "host DNS returned 198.18.0.0/15; this may be a VPN Fake-IP \
-                 rather than the real target address"
-            );
-        }
         self.ensure_userspace_route(resolution.addresses[0].ip())
             .map_err(Error::Io)?;
         Ok(())
@@ -1017,10 +1004,10 @@ impl TcpConnector {
     async fn resolve_uncached(&self) -> io::Result<CachedResolution> {
         match self.dns_mode {
             DnsMode::Iwan => self.resolve_iwan_dns().await,
-            DnsMode::System => self.resolve_system_dns(false).await,
+            DnsMode::System => self.resolve_system_dns().await,
             DnsMode::Auto => {
                 if self.dns_servers.is_empty() {
-                    self.resolve_system_dns(true).await
+                    self.resolve_system_dns().await
                 } else {
                     self.resolve_iwan_dns().await
                 }
@@ -1089,7 +1076,7 @@ impl TcpConnector {
         }))
     }
 
-    async fn resolve_system_dns(&self, reject_fake_ip: bool) -> io::Result<CachedResolution> {
+    async fn resolve_system_dns(&self) -> io::Result<CachedResolution> {
         let mut addresses: Vec<_> = lookup_host((self.target.host.as_str(), self.target.port))
             .await?
             .collect();
@@ -1098,17 +1085,6 @@ impl TcpConnector {
             return Err(io::Error::new(
                 ErrorKind::AddrNotAvailable,
                 "host DNS result does not match the iWAN session address family",
-            ));
-        }
-        if reject_fake_ip
-            && addresses
-                .iter()
-                .any(|address| is_ipv4_benchmark_address(address.ip()))
-        {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "host DNS returned an address in 198.18.0.0/15, likely a VPN Fake-IP; \
-                 configure an organization DNS server with --dns-server or provider dns_servers",
             ));
         }
         Ok(CachedResolution {
@@ -1210,16 +1186,6 @@ fn clamp_dns_ttl(ttl: Duration) -> Duration {
     ttl.clamp(MIN_DNS_TTL, MAX_DNS_TTL)
 }
 
-fn is_ipv4_benchmark_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            let octets = address.octets();
-            octets[0] == 198 && matches!(octets[1], 18 | 19)
-        }
-        IpAddr::V6(_) => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1269,15 +1235,21 @@ mod tests {
             while pump_running.load(Ordering::Acquire) {
                 let mut moved = false;
                 if let Ok(length) = client_device.read_packet(&mut client_buffer) {
-                    server_device
+                    if server_device
                         .write_packet(&client_buffer[..length])
-                        .unwrap();
+                        .is_err()
+                    {
+                        break;
+                    }
                     moved = true;
                 }
                 if let Ok(length) = server_device.read_packet(&mut server_buffer) {
-                    client_device
+                    if client_device
                         .write_packet(&server_buffer[..length])
-                        .unwrap();
+                        .is_err()
+                    {
+                        break;
+                    }
                     moved = true;
                 }
                 if !moved {
@@ -1378,14 +1350,6 @@ mod tests {
         ] {
             assert!(Target::parse(invalid).is_err(), "{invalid:?} was accepted");
         }
-    }
-
-    #[test]
-    fn identifies_common_vpn_fake_ip_range() {
-        assert!(is_ipv4_benchmark_address("198.18.0.23".parse().unwrap()));
-        assert!(is_ipv4_benchmark_address("198.19.255.254".parse().unwrap()));
-        assert!(!is_ipv4_benchmark_address("198.20.0.1".parse().unwrap()));
-        assert!(!is_ipv4_benchmark_address("2001:db8::1".parse().unwrap()));
     }
 
     #[test]

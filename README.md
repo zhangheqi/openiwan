@@ -222,11 +222,11 @@ concurrent connections and closes new connections while at capacity.
 The default `--dns-mode auto` first queries organization resolvers advertised
 by OPENACK or configured by the managed provider through the iWAN userspace
 stack. It validates transactions and responses, follows CNAMEs, caches by TTL,
-and retries truncated UDP responses over DNS-over-TCP. Because these queries
-stay inside iWAN, host-side VPNs and proxies cannot observe them or substitute
-Fake-IP answers. Every managed provider must explicitly declare its
-organization resolvers; use an empty list when the deployment relies only on
-OPENACK DNS attributes:
+and retries truncated UDP responses over DNS-over-TCP. These queries use the
+configured organization resolver through iWAN rather than the host resolver
+path. Every managed provider must explicitly declare its organization
+resolvers; use an empty list when the deployment relies only on OPENACK DNS
+attributes:
 
 ```toml
 dns_servers = []
@@ -236,11 +236,12 @@ Manual mode and temporary overrides can pass `--dns-server 192.0.2.53`;
 `--dns-timeout-ms` bounds each resolver attempt. `--dns-mode iwan` requires an
 iWAN resolver. `auto` uses host DNS only when no iWAN resolver is available;
 failure of a configured organization resolver is fail-closed and does not leak
-the hostname to the host resolver. Host answers in `198.18.0.0/15` are rejected
-instead of causing a useless TCP timeout. To bypass DNS, put a literal IPv4 or
-bracketed IPv6 address directly in the target URI, for example
-`tcp://192.0.2.25:22` or `https://[2001:db8::25]`. There is no separate
-`--target-ip` override.
+the hostname to the host resolver. The host component of the target URI is the
+name passed to the selected resolver. For an HTTPS domain target, that same
+host is used for TLS SNI and certificate verification. A literal IPv4 or
+bracketed IPv6 target, for example `tcp://192.0.2.25:22` or
+`https://[2001:db8::25]`, bypasses DNS; an HTTPS IP literal remains the
+certificate identity.
 
 ### Managed login and connection
 

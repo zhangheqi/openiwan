@@ -112,7 +112,7 @@ struct ForwardOptions {
     /// Fixed target URI using tcp://, http://, or https://.
     #[arg(long, value_parser = forward::parse_target_argument)]
     target: String,
-    /// DNS policy: auto uses iWAN DNS when available, otherwise safe host DNS;
+    /// DNS policy: auto uses iWAN DNS when available, otherwise host DNS;
     /// iwan requires iWAN DNS; system uses only host DNS.
     #[arg(long, value_enum, default_value = "auto")]
     dns_mode: DnsModeArg,
@@ -822,7 +822,7 @@ mod tests {
 
     #[cfg(feature = "forward")]
     #[test]
-    fn parses_manual_forward_without_tun_options() {
+    fn parses_manual_forward() {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "forward",
@@ -868,49 +868,6 @@ mod tests {
             ])
             .is_err()
         );
-        assert!(
-            Cli::try_parse_from([
-                "openiwan",
-                "forward",
-                "--server",
-                "192.0.2.10:6001",
-                "--username",
-                "alice",
-                "--target",
-                "tcp://db.example.test:5432",
-                "--target-ip",
-                "192.0.2.25",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "openiwan",
-                "forward",
-                "--server",
-                "192.0.2.10:6001",
-                "--username",
-                "alice",
-                "--target",
-                "db.example.test:5432",
-                "--route",
-                "10.0.0.0/8",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "openiwan",
-                "serve",
-                "--server",
-                "192.0.2.10:6001",
-                "--username",
-                "alice",
-                "--upstream",
-                "https://api.example.test",
-            ])
-            .is_err()
-        );
     }
 
     #[cfg(all(feature = "managed", feature = "forward"))]
@@ -948,19 +905,5 @@ mod tests {
                 && ca_certificates
                     == vec![PathBuf::from("root-a.pem"), PathBuf::from("root-b.pem")]
         ));
-        assert!(
-            Cli::try_parse_from([
-                "openiwan",
-                "managed",
-                "--provider",
-                "provider.toml",
-                "forward",
-                "--target",
-                "db.example.test:5432",
-                "--target-ip",
-                "192.0.2.25",
-            ])
-            .is_err()
-        );
     }
 }

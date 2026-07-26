@@ -93,7 +93,8 @@ The `forward` command accepts one fixed URI target and a loopback listen
 address. Bare `HOST:PORT` values are rejected: `tcp://HOST:PORT` selects raw
 TCP, while `http://HOST[:PORT]` and `https://HOST[:PORT]` select an HTTP/1.1
 reverse proxy with default ports 80 and 443. The destination cannot be selected
-from an incoming connection, and there is no `--target-ip` override.
+from an incoming connection. The target URI's host fixes the upstream name or
+address and, for HTTPS, the TLS identity.
 
 For a `tcp://` target, each accepted connection carries arbitrary bytes
 unchanged in both directions through the iWAN userspace TCP/IP stack. OpeniWAN
@@ -117,8 +118,8 @@ TLS confidentiality or server authentication.
 Organization DNS queries can run through the iWAN userspace stack. The client
 checks transaction IDs, response metadata and questions, bounds CNAME depth,
 caches positive results with bounded TTLs, and retries truncated UDP replies
-over TCP. `auto` rejects host-DNS answers in the common `198.18.0.0/15`
-Fake-IP range. `--dns-mode iwan` prohibits host-DNS fallback, while
+over TCP. `auto` uses an iWAN resolver when one is configured and otherwise
+uses the host resolver. `--dns-mode iwan` prohibits host-DNS fallback, while
 `--dns-mode system` explicitly exposes the target hostname to the host
 resolver. `--dns-timeout-ms` bounds each resolver attempt, while
 `--connect-timeout-ms` bounds the complete DNS, TCP, and, for HTTPS, TLS setup.

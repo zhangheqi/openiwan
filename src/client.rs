@@ -138,7 +138,6 @@ impl Client {
         )?;
 
         let mut receive_buffer = vec![0_u8; 65_535];
-        let mut last_timeout = None;
         for attempt in 1..=self.config.auth_attempts {
             debug!(attempt, peer = %peer, "sending OPEN");
             socket.send(&open)?;
@@ -195,13 +194,11 @@ impl Client {
                 Err(error)
                     if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
                 {
-                    last_timeout = Some(error);
                     debug!(attempt, "OPEN response timed out");
                 }
                 Err(error) => return Err(Error::Io(error)),
             }
         }
-        let _ = last_timeout;
         Err(Error::Timeout("authentication"))
     }
 

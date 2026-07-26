@@ -55,8 +55,8 @@ Provider files contain controller application material. Copy them with mode
 `dns_servers` is a required list of recursive resolver IP addresses reachable
 inside iWAN. Use `[]` when a deployment relies only on DNS attributes from
 OPENACK. `managed forward` queries configured resolvers through the userspace
-iWAN stack, so another VPN cannot replace answers with Fake-IP records.
-Resolver addresses must be unicast; provider addresses use DNS port 53.
+iWAN stack instead of the host resolver path. Resolver addresses must be
+unicast; provider addresses use DNS port 53.
 
 `require_auth_verify_echo` controls compatibility with data endpoints that omit
 the AUTH_VERIFY TLV from OPENACK. The client always sends AUTH_VERIFY and always
@@ -139,9 +139,11 @@ targets. CONNECT, WebSocket/Upgrade, and HTTP/2 are not supported.
 Organization DNS comes from `dns_servers` or OPENACK and runs inside iWAN with
 TTL caching and DNS-over-TCP fallback. `--dns-mode iwan` forbids host-DNS
 fallback, `--dns-server` supplies an explicit resolver, and
-`--dns-timeout-ms` bounds each resolver attempt. A literal IPv4 or bracketed
-IPv6 address in the target URI bypasses resolution; there is no `--target-ip`
-override. `--connect-timeout-ms` bounds DNS, TCP, and, for HTTPS, TLS setup for
+`--dns-timeout-ms` bounds each resolver attempt. The target URI's host is the
+name passed to the selected resolver and, for an HTTPS domain target, the TLS
+SNI and certificate identity. A literal IPv4 or bracketed IPv6 target bypasses
+resolution; for HTTPS, the literal IP remains the verified certificate
+identity. `--connect-timeout-ms` bounds DNS, TCP, and, for HTTPS, TLS setup for
 each local connection. The managed state must already exist; run `fetch` first
 when it does not.
 

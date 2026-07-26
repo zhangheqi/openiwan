@@ -204,11 +204,11 @@ CNAME chains are validated. Answers are cached using bounded TTLs. UDP
 truncation triggers a query to the same resolver over userspace TCP. Resolver
 selection prefers CLI/provider/OPENACK servers inside iWAN. `auto` uses host DNS
 only when no iWAN resolver exists; failure of a configured iWAN resolver is
-fail-closed. Host `198.18.0.0/15` Fake-IP answers are rejected. `iwan` requires
-an iWAN resolver, while `system` explicitly selects host DNS.
-`--dns-timeout-ms` bounds each resolver attempt. A literal IPv4 or bracketed
-IPv6 address in the target URI bypasses resolution; there is no separate
-`--target-ip` path. For HTTPS, the literal IP remains the verified certificate
+fail-closed. `iwan` requires an iWAN resolver, while `system` explicitly selects
+host DNS. `--dns-timeout-ms` bounds each resolver attempt. The target URI's host
+is the name passed to the selected resolver and, for an HTTPS domain target,
+the TLS SNI and certificate identity. A literal IPv4 or bracketed IPv6 target
+bypasses resolution; for HTTPS, the literal IP remains the verified certificate
 identity.
 
 Only the outer iWAN UDP socket uses existing host networking. The route-free

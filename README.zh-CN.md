@@ -195,9 +195,9 @@ DNS、TCP 以及适用时 TLS 建连的总时长。转发器最多允许 256 个
 
 默认 `--dns-mode auto` 会优先通过 iWAN 用户态栈查询 OPENACK 或托管 provider
 提供的组织 DNS。它校验 DNS 事务和响应、支持 CNAME、按 TTL 缓存，并在 UDP
-响应被截断时自动改用 DNS-over-TCP。由于查询始终位于 iWAN 内部，宿主机上的其他
-VPN 或代理无法观察查询或替换为 Fake-IP 答案。每个托管 provider 都必须显式声明
-组织 DNS；仅依赖 OPENACK DNS 属性时使用空列表：
+响应被截断时自动改用 DNS-over-TCP。这些查询通过 iWAN 使用配置的组织解析器，而
+不是宿主机解析路径。每个托管 provider 都必须显式声明组织 DNS；仅依赖 OPENACK
+DNS 属性时使用空列表：
 
 ```toml
 dns_servers = []
@@ -206,11 +206,10 @@ dns_servers = []
 手动模式或临时覆盖可使用 `--dns-server 192.0.2.53`，每次解析尝试的时限由
 `--dns-timeout-ms` 控制。指定 `--dns-mode iwan` 可要求必须存在 iWAN DNS。
 `auto` 只有在没有任何 iWAN DNS 配置时才使用系统解析；已经配置的组织 DNS 如果
-查询失败会直接失败，不会泄露域名到宿主机解析器。系统解析得到
-`198.18.0.0/15` Fake-IP 时也会立即拒绝，而不是等待无意义的 TCP 超时。
-如需跳过 DNS，可直接在目标 URI 中使用 IPv4 或方括号 IPv6 字面量，例如
-`tcp://192.0.2.25:22` 或 `https://[2001:db8::25]`。没有单独的
-`--target-ip` 覆盖参数。
+查询失败会直接失败，不会泄露域名到宿主机解析器。目标 URI 的 host 是传给所选
+解析器的名称；对于 HTTPS 域名目标，同一个 host 也用于 TLS SNI 和证书校验。
+IPv4 或方括号 IPv6 字面量目标（例如 `tcp://192.0.2.25:22` 或
+`https://[2001:db8::25]`）会跳过 DNS；HTTPS IP 字面量仍作为证书身份。
 
 ### 统一认证并连接
 

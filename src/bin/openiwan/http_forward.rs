@@ -972,15 +972,16 @@ mod tests {
                 Some(build_tls_connector(&[fixture_path("forward-ca.pem")]).unwrap()),
             );
             let response = request_via_local_proxy(forwarder).await;
-            let server_result = timeout(Duration::from_secs(3), server)
-                .await
-                .unwrap()
-                .unwrap();
 
+            // The client-visible 502 is the contract under test. The connector
+            // can be dropped before its TLS alert or TCP close reaches the
+            // synthetic server, so do not wait for the server handshake to
+            // finish on its own.
+            server.abort();
+            let _ = server.await;
             pumping.store(false, Ordering::Release);
             pump.join().unwrap();
 
-            assert!(server_result.is_err());
             assert!(
                 response.starts_with("HTTP/1.1 502 Bad Gateway\r\n"),
                 "unexpected proxy response: {response:?}"

@@ -44,6 +44,7 @@ cipher = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
 futures = { version = "0.3", optional = true }
+fs2 = { version = "0.4", optional = true }
 getrandom = "0.3"
 hickory-proto = { version = "0.25", default-features = false, features = ["std"], optional = true }
 hmac = { version = "0.12", optional = true }
@@ -109,6 +110,7 @@ forward = [
 ]
 managed = [
     "dep:base64",
+    "dep:fs2",
     "dep:hmac",
     "dep:rand",
     "dep:ring",

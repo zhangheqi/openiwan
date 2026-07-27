@@ -34,5 +34,6 @@ pub use posture::{
     POSTURE_GATE_TIMEOUT_SECONDS, PostureDecision, PostureEvaluation, posture_version,
 };
 pub use workflow::{
-    DiscoveredDomain, DomainClient, PendingDomainAuthorization, PreparedConnection, SelectedIngress,
+    DiscoveredDomain, DomainClient, LinePreference, LineProbe, OidcLoginOptions,
+    PendingDomainAuthorization, PreparedConnection, SelectedIngress,
 };

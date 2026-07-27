@@ -24,10 +24,12 @@ A Rust client and protocol library for iWAN-compatible networks.
 - Segment Routing headers, directional paths, inner and outer encryption,
   fragmentation, reassembly, and monitoring;
 - customer-domain discovery with primary/fallback lookup, retries,
-  canonical-domain handling, consent gating, and a seven-day optional cache;
+  canonical-domain handling, and a seven-day optional cache;
 - credential and OIDC Authorization Code + PKCE S256 authentication;
 - controller configuration, generated per-server credentials, posture and
   device-binding gates, ingress probing, and traditional/SR selection;
+- versioned non-secret CLI profiles, persistent line preferences, bounded
+  parallel line probing, and stable JSON output for automation;
 - native TUN integration and route/DNS transactions on Linux, macOS, and
   Windows;
 - route-free TCP and HTTP(S) forwarding through a userspace IP stack;
@@ -157,19 +159,18 @@ and supports repeatable `--ca-cert` roots. The listener must be loopback.
 
 ## Managed connection
 
-Managed connections start with a customer domain and require explicit
-privacy/network consent.
+Managed connections start with a customer domain and device identifier.
 
 Discover the service and authentication method:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier --consent discover
+openiwan managed --domain iwan.example --device-id device-identifier discover
 ```
 
 Complete authentication and ingress selection without creating a TUN:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier --consent login --username alice
+openiwan managed --domain iwan.example --device-id device-identifier login --username alice
 ```
 
 For an OIDC domain, `--username` is ignored and the CLI prints the PKCE
@@ -180,14 +181,68 @@ temporary UDP session.
 Establish the persistent tunnel on Unix:
 
 ```console
-sudo openiwan managed --domain iwan.example --device-id device-identifier --consent connect --username alice
+sudo openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
 ```
 
 In elevated PowerShell:
 
 ```powershell
-openiwan managed --domain iwan.example --device-id device-identifier --consent connect --username alice
+openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
 ```
+
+For repeated use, create a non-secret profile and make it the default:
+
+```console
+openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
+```
+
+The first profile becomes the default automatically. Use
+`openiwan profile use NAME` when more than one profile exists. Then inspect or
+connect without repeating the domain, device ID, or username:
+
+```console
+openiwan profile list
+openiwan managed discover
+sudo openiwan managed connect
+```
+
+Passwords and OIDC tokens are never written to the profile store. Passwords
+continue to come from the environment, a protected file, or the no-echo
+prompt. Each new `managed login`, `managed lines`, or `managed connect`
+process authenticates again. A running `managed connect` keeps credentials
+only in memory, so automatic tunnel reconnections do not prompt again.
+
+List and re-test all selectable lines:
+
+```console
+openiwan managed lines
+openiwan managed lines --json
+```
+
+Traditional lines have stable IDs such as `iwan:7`; SR lines use a stable group
+ID such as `sr:3`. Save a preference after validating it against the current
+controller configuration:
+
+```console
+openiwan managed lines --save iwan:7
+```
+
+`auto` chooses the reachable line with the lowest measured latency. A saved SR
+group retains the controller's primary/failover ordering within that group. A
+one-shot `--line iwan:7` or `--line sr:3` on `login`, `connect`, or `lines`
+overrides the saved preference without modifying it.
+
+Profiles are stored as a versioned TOML document with an inter-process lock and
+atomic replacement. Unix directories use mode `0700` and files use `0600`.
+The default locations are `%LOCALAPPDATA%\OpeniWAN` on Windows,
+`~/Library/Application Support/openiwan` on macOS, and
+`$XDG_STATE_HOME/openiwan` (or `~/.local/state/openiwan`) on other Unix
+systems. `--state-dir` and `OPENIWAN_STATE_DIR` override the location.
+
+If `sudo` changes `HOME`, pass the unprivileged user's state directory
+explicitly, for example `sudo openiwan --state-dir "$HOME/.local/state/openiwan"
+managed connect` on a default Linux setup. Do not create a second root-owned
+profile store.
 
 Local posture results can be supplied as a JSON array with
 `--posture-results`. Managed connect applies controller routing, IP-filter,

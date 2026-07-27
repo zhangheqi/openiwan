@@ -25,6 +25,8 @@
 - 密码认证与 OIDC Authorization Code + PKCE S256；
 - 控制器配置、按服务器生成的凭据、posture 与设备绑定门禁、入口探测和
   传统/SR 选择；
+- 版本化的非敏感 CLI profile、持久线路偏好、有并发上限的线路探测，以及面向自动化的
+  稳定 JSON 输出；
 - Linux、macOS 和 Windows 的原生 TUN、路由与 DNS 事务；
 - 通过用户态 IP 栈实现的不改路由 TCP 和 HTTP(S) 转发；
 - 控制器 keepalive 鉴权和指标模型。
@@ -146,18 +148,18 @@ openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.int
 
 ## 托管连接
 
-托管连接从客户域开始，并要求显式确认隐私与联网授权。
+托管连接从客户域和设备标识开始。
 
 查询服务和认证方式：
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier --consent discover
+openiwan managed --domain iwan.example --device-id device-identifier discover
 ```
 
 完成认证和入口选择，但不创建 TUN：
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier --consent login --username alice
+openiwan managed --domain iwan.example --device-id device-identifier login --username alice
 ```
 
 OIDC 域会忽略 `--username` 并输出 PKCE 授权地址；按提示粘贴完整回调 URL。密码域
@@ -166,14 +168,62 @@ OIDC 域会忽略 `--username` 并输出 PKCE 授权地址；按提示粘贴完�
 在 Unix 上建立持久隧道：
 
 ```console
-sudo openiwan managed --domain iwan.example --device-id device-identifier --consent connect --username alice
+sudo openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
 ```
 
 在管理员 PowerShell 中：
 
 ```powershell
-openiwan managed --domain iwan.example --device-id device-identifier --consent connect --username alice
+openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
 ```
+
+重复使用时，可创建不含秘密信息的 profile，并将其设为默认：
+
+```console
+openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
+```
+
+首个 profile 会自动成为默认项；存在多个 profile 时用 `openiwan profile use NAME`
+切换。之后无需重复输入 domain、设备 ID 和用户名：
+
+```console
+openiwan profile list
+openiwan managed discover
+sudo openiwan managed connect
+```
+
+profile 存储绝不会写入密码或 OIDC token。密码仍然来自环境变量、权限受保护的文件或
+无回显交互提示。每次新运行 `managed login`、`managed lines` 或
+`managed connect` 都会重新认证；已运行的 `managed connect` 只在内存中保留凭据，
+因此隧道自动重连时不会再次提示。
+
+列出并重新测试所有可选线路：
+
+```console
+openiwan managed lines
+openiwan managed lines --json
+```
+
+传统线路使用 `iwan:7` 这样的稳定 ID；SR 线路使用 `sr:3` 这样的稳定组 ID。根据
+当前控制器配置验证后，可以保存偏好：
+
+```console
+openiwan managed lines --save iwan:7
+```
+
+`auto` 会选择实测延迟最低的可达线路。选择 SR 组后，组内仍遵守控制器的主路径/故障
+切换顺序。在 `login`、`connect` 或 `lines` 上使用一次性的 `--line iwan:7` 或
+`--line sr:3` 可以覆盖本次选择，但不会修改已保存的偏好。
+
+profile 使用版本化 TOML、跨进程文件锁和原子替换。Unix 上目录权限为 `0700`，文件为
+`0600`。Windows 默认位于 `%LOCALAPPDATA%\OpeniWAN`，macOS 位于
+`~/Library/Application Support/openiwan`，其他 Unix 位于
+`$XDG_STATE_HOME/openiwan`（或 `~/.local/state/openiwan`）。可用 `--state-dir`
+或 `OPENIWAN_STATE_DIR` 覆盖。
+
+如果 `sudo` 会修改 `HOME`，应显式传入普通用户的状态目录。例如默认 Linux 环境可使用
+`sudo openiwan --state-dir "$HOME/.local/state/openiwan" managed connect`，不要另建
+一份 root 所有的 profile。
 
 本地 posture 结果可通过 `--posture-results` 传入 JSON 数组。托管连接会应用控制器
 下发的路由、IP filter、DNS、split DNS 和 MTU 策略。详见

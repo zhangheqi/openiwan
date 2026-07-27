@@ -202,26 +202,12 @@ impl<T: HttpTransport> LookupClient<T> {
         self
     }
 
-    pub fn lookup(
-        &self,
-        domain: &str,
-        device_id: &str,
-        consent_granted: bool,
-    ) -> Result<LookupResult> {
-        self.lookup_at(domain, device_id, consent_granted, SystemTime::now())
+    pub fn lookup(&self, domain: &str, device_id: &str) -> Result<LookupResult> {
+        self.lookup_at(domain, device_id, SystemTime::now())
     }
 
-    fn lookup_at(
-        &self,
-        domain: &str,
-        device_id: &str,
-        consent_granted: bool,
-        now: SystemTime,
-    ) -> Result<LookupResult> {
+    fn lookup_at(&self, domain: &str, device_id: &str, now: SystemTime) -> Result<LookupResult> {
         validate_domain(domain)?;
-        if !consent_granted {
-            return Err(Error::ConsentRequired);
-        }
         if device_id.trim().is_empty() {
             return Err(Error::ManagedFlow("device id must not be empty".into()));
         }
@@ -477,7 +463,7 @@ mod tests {
         };
         let client = LookupClient::with_transport(transport)
             .with_endpoints(vec![LOOKUP_PRIMARY.into(), LOOKUP_FALLBACK.into()]);
-        let result = client.lookup("iwan.ustc", "device", true).unwrap();
+        let result = client.lookup("iwan.ustc", "device").unwrap();
         assert_eq!(result.active_domain(), "iwan.ustc.edu.cn");
         assert_eq!(result.service_type, ServiceType::Controller);
         let requests = client.transport.requests.lock().unwrap();
@@ -526,7 +512,7 @@ mod tests {
             .with_cache(&directory)
             .with_endpoints(vec![LOOKUP_PRIMARY.into(), LOOKUP_FALLBACK.into()]);
         let result = client
-            .lookup_at("example", "device", true, now + Duration::from_secs(60))
+            .lookup_at("example", "device", now + Duration::from_secs(60))
             .unwrap();
         assert_eq!(result.source, LookupSource::Cache);
         let _ = fs::remove_dir_all(directory);
@@ -562,7 +548,7 @@ mod tests {
         let result = LookupClient::with_transport(transport)
             .with_cache(&directory)
             .with_endpoints(vec![LOOKUP_PRIMARY.into()])
-            .lookup_at("example", "device", true, now + Duration::from_secs(60))
+            .lookup_at("example", "device", now + Duration::from_secs(60))
             .unwrap();
         assert_eq!(result.source, LookupSource::Cache);
         let _ = fs::remove_dir_all(directory);
@@ -589,7 +575,7 @@ mod tests {
         let error = LookupClient::with_transport(transport)
             .with_cache(&directory)
             .with_endpoints(vec![LOOKUP_PRIMARY.into()])
-            .lookup_at("example", "device", true, now + Duration::from_secs(60))
+            .lookup_at("example", "device", now + Duration::from_secs(60))
             .unwrap_err();
         assert!(matches!(error, Error::Http(ref message) if message == "offline"));
         let _ = fs::remove_dir_all(directory);
@@ -684,18 +670,6 @@ mod tests {
         let cache = LookupCache::new("/tmp/openiwan-lookup-cache-path-test");
         assert_ne!(cache.path("a@b"), cache.path("a#b"));
         assert_ne!(cache.path("a#b"), cache.path("a$b"));
-    }
-
-    #[test]
-    fn consent_blocks_network_and_cache() {
-        let transport = MockTransport {
-            responses: Mutex::new(VecDeque::new()),
-            requests: Mutex::new(Vec::new()),
-        };
-        let error = LookupClient::with_transport(transport)
-            .lookup("example", "device", false)
-            .unwrap_err();
-        assert!(matches!(error, Error::ConsentRequired));
     }
 
     fn header_value<'a>(request: &'a HttpRequest, name: &str) -> &'a str {

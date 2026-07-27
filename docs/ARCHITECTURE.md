@@ -64,7 +64,7 @@ off and consist of exactly two datagrams.
 
 The `managed` feature contains:
 
-- primary/fallback lookup, consent gating, exact domain validation, retries,
+- primary/fallback lookup, exact domain validation, retries,
   canonical-domain handling, the seven-day lookup cache, and platform HMAC
   authentication;
 - the exact lookup-provided controller auth endpoint, controller-app-ID
@@ -75,6 +75,8 @@ The `managed` feature contains:
   posture, device-binding, routing, IP/domain-filter, and SR-group members;
 - best-ingress UDP probing, the temporary credential-login OPEN, and creation
   of a client that performs the persistent second OPEN;
+- stable traditional-server and SR-group line preferences plus bounded
+  concurrent reachability probing;
 - the complete HTTP keepalive model and shared mobile-API signer.
 
 Managed connection turns the `all`, `ipfilter`, or `custom` setting
@@ -86,6 +88,12 @@ back with the route transaction; Windows uses Wintun DNS, Linux uses
 
 Unknown nested policy fields remain `serde_json::Value`. Traditional
 top-level `serverlist` and SR `sites` are mutually exclusive.
+
+The CLI state boundary is separate from controller configuration. It persists
+only non-secret profile metadata and a stable line preference. Controller
+payloads can contain generated passwords and SR keys, so they are intentionally
+kept in memory and never serialized into the profile store. State updates use
+an inter-process lock and atomic replacement.
 
 ## Packet devices
 

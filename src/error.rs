@@ -78,8 +78,11 @@ pub enum Error {
     #[error("managed client flow failed: {0}")]
     ManagedFlow(String),
 
-    #[error("privacy/network consent is required before domain lookup")]
-    ConsentRequired,
+    #[error("managed line {0} does not exist in the current controller configuration")]
+    LineNotFound(String),
+
+    #[error("managed line {line} is unavailable: {reason}")]
+    LineUnavailable { line: String, reason: String },
 
     #[error("HTTP operation failed: {0}")]
     Http(String),

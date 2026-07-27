@@ -5,7 +5,7 @@ policy, ingress selection, and persistent tunnel setup.
 
 ## Domain discovery
 
-Before network access, the caller must explicitly grant consent. Domains:
+Domains:
 
 - must not be empty;
 - must contain at most 128 characters;
@@ -279,19 +279,19 @@ application's responsibility.
 Inspect discovery:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier --consent discover
+openiwan managed --domain iwan.example --device-id device-identifier discover
 ```
 
 Complete login without creating TUN:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier --consent login --username alice
+openiwan managed --domain iwan.example --device-id device-identifier login --username alice
 ```
 
 Establish the tunnel:
 
 ```console
-sudo openiwan managed --domain iwan.example --device-id device-identifier --consent connect --username alice
+sudo openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
 ```
 
 Windows users run the same connect command without `sudo` in an elevated
@@ -301,6 +301,63 @@ augment the managed routing policy.
 Credential passwords are read from `OPENIWAN_PASSWORD`, a protected
 `--password-file`, or a no-echo prompt. OIDC prints the authorization URL and
 accepts the complete callback URL.
+
+## CLI profiles and line selection
+
+The CLI persists only non-secret managed-client preferences. A profile contains
+the customer domain, device ID, optional username, and line preference.
+Passwords, access tokens, refresh tokens, controller configurations, generated
+server credentials, and SR encryption keys are never written to the profile
+store. Every new `managed login`, `managed lines`, or `managed connect`
+process authenticates again. A running connection retains its derived
+credentials only in memory and can reconnect the data-plane session without
+prompting again.
+
+The state document has an explicit schema version. Updates hold an
+inter-process lock, write and sync a same-directory temporary file, atomically
+replace the destination, and sync the parent directory on Unix. Unix state
+directories and files use modes `0700` and `0600`; symlinked state paths are
+rejected. `--state-dir` or `OPENIWAN_STATE_DIR` can override the platform
+location.
+
+Privilege elevation must not silently select a second profile store. When
+`sudo` changes `HOME`, the caller should pass the original user's state
+directory with `--state-dir` or explicitly preserve `OPENIWAN_STATE_DIR`.
+
+Create a profile:
+
+```console
+openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
+```
+
+`profile list`, `profile show`, `profile use`, and `profile remove` provide
+explicit lifecycle operations. The first profile becomes the default
+automatically; later changes are explicit through `profile use`. `profile list
+--json` and `profile show --json` produce stable machine-readable output.
+
+Managed line preferences use these canonical forms:
+
+- `auto`: probe all lines and choose the lowest-latency reachable candidate;
+- `iwan:<server-id>`: select one traditional server by controller ID;
+- `sr:<group-id>`: select one SR group by controller ID.
+
+An SR group is the stable selection unit. Its entries remain ordered
+primary/failover paths; runtime-only SR IDs are deliberately not persisted.
+`managed lines` authenticates using an automatic recovery selection, then
+probes controller lines with at most 16 concurrent workers. This means a stale
+saved preference cannot prevent the user from listing and replacing it.
+
+```console
+openiwan managed lines
+openiwan managed lines --json
+openiwan managed lines --save iwan:7
+```
+
+`--save` requires an explicit or default profile and validates that the line
+exists in the current controller configuration. An unavailable but existing
+line may still be saved, with a warning, because temporary reachability must
+not silently rewrite user intent. `--line` is a one-shot override and never
+changes persisted state.
 
 ## HTTP keepalive
 

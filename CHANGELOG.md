@@ -12,8 +12,8 @@ All notable changes to OpeniWAN are documented here. The project follows
   handshakes, counters, and peer-down timing.
 - Byte-vector coverage for OPEN, ping, signed close, XOR, AES, SR headers,
   fragment words, SR outer AES, and keepalive HMAC.
-- Customer-domain lookup with primary/fallback endpoints, consent gating,
-  retries, canonical-domain handling, a seven-day cache, and platform
+- Customer-domain lookup with primary/fallback endpoints, retries,
+  canonical-domain handling, a seven-day cache, and platform
   `X-Auth-*` authentication.
 - Controller authentication with signed requests, credential/OIDC selection,
   Authorization Code + PKCE, posture evaluation, device-binding gates,
@@ -27,6 +27,10 @@ All notable changes to OpeniWAN are documented here. The project follows
 - HTTP keepalive request/response metric models, Java-compatible URL
   canonicalization, HMAC headers, timeouts, and retry behavior.
 - Standalone `SREntry` serialization model.
+- Versioned CLI profiles for domain, device ID, username, and stable
+  line preferences, with locked atomic writes and strict Unix permissions.
+- Managed line listing with bounded parallel probes, stable human/JSON output,
+  one-shot selection, persisted selection, and automatic stale-line recovery.
 
 ### Changed
 

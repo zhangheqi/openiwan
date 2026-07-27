@@ -1,12 +1,16 @@
 #[cfg(feature = "forward")]
 #[path = "openiwan/forward.rs"]
 mod forward;
+#[cfg(feature = "managed")]
+#[path = "openiwan/state.rs"]
+mod state;
 
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
 #[cfg(feature = "managed")]
 use openiwan::managed::{
-    AuthMethod, DiscoveredDomain, DomainClient, PreparedConnection, RoutingMode, SelectedIngress,
+    AuthMethod, DiscoveredDomain, DomainClient, LinePreference, LineProbe, OidcLoginOptions,
+    PreparedConnection, RoutingMode, SelectedIngress,
 };
 use openiwan::protocol::{self, Tlv};
 #[cfg(feature = "managed")]
@@ -34,6 +38,12 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
+    /// Override the platform CLI state directory. `OPENIWAN_STATE_DIR` is also
+    /// honored. The state file never stores passwords or authentication tokens.
+    #[cfg(feature = "managed")]
+    #[arg(long, global = true, value_name = "DIR")]
+    state_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -54,6 +64,9 @@ enum Command {
     /// Discover a customer domain, authenticate, select an ingress, and connect.
     #[cfg(feature = "managed")]
     Managed(ManagedArgs),
+    /// Create and manage persistent, non-secret managed-client profiles.
+    #[cfg(feature = "managed")]
+    Profile(ProfileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -188,15 +201,16 @@ struct DecodeArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedArgs {
+    /// Persistent profile. When domain and device ID are omitted, the default
+    /// profile is used.
+    #[arg(long)]
+    profile: Option<String>,
     /// Customer domain resolved through the production lookup service.
     #[arg(long)]
-    domain: String,
+    domain: Option<String>,
     /// Controller device identifier.
     #[arg(long)]
-    device_id: String,
-    /// Confirm that the user granted privacy/network access.
-    #[arg(long)]
-    consent: bool,
+    device_id: Option<String>,
     /// Directory for the seven-day lookup cache.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
@@ -216,6 +230,8 @@ enum ManagedCommand {
     Login(ManagedLoginArgs),
     /// Complete login and establish the persistent VPN tunnel.
     Connect(ManagedConnectArgs),
+    /// Authenticate, probe every selectable line, and optionally save one.
+    Lines(ManagedLinesArgs),
 }
 
 #[cfg(feature = "managed")]
@@ -239,6 +255,10 @@ struct ManagedLoginArgs {
     /// Cached local posture version sent to `/config`.
     #[arg(long)]
     posture_version: Option<i64>,
+    /// One-shot line preference: auto, iwan:<server-id>, or sr:<group-id>.
+    /// Defaults to the selected profile's saved preference.
+    #[arg(long)]
+    line: Option<LinePreference>,
 }
 
 #[cfg(feature = "managed")]
@@ -253,6 +273,65 @@ struct ManagedConnectArgs {
     routes: RouteArgs,
 }
 
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ManagedLinesArgs {
+    #[command(flatten)]
+    login: ManagedLoginArgs,
+    /// Save this preference to the active persistent profile after validating
+    /// that the line exists in the current controller configuration.
+    #[arg(long, value_name = "LINE")]
+    save: Option<LinePreference>,
+    /// Emit a stable JSON array for scripts.
+    #[arg(long)]
+    json: bool,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ProfileArgs {
+    #[command(subcommand)]
+    command: ProfileCommand,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Subcommand)]
+enum ProfileCommand {
+    /// List profiles without printing sensitive authentication material.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one profile, or the current default profile when NAME is omitted.
+    Show {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create or update a profile. New profiles require domain and device ID.
+    Set(ProfileSetArgs),
+    /// Select the default profile used by `openiwan managed`.
+    Use { name: String },
+    /// Remove a profile.
+    Remove { name: String },
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ProfileSetArgs {
+    name: String,
+    #[arg(long)]
+    domain: Option<String>,
+    #[arg(long)]
+    device_id: Option<String>,
+    #[arg(long, conflicts_with = "clear_username")]
+    username: Option<String>,
+    #[arg(long)]
+    clear_username: bool,
+    #[arg(long)]
+    line: Option<LinePreference>,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error}");
@@ -263,6 +342,8 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
+    #[cfg(feature = "managed")]
+    let state_directory = cli.state_dir;
     match cli.command {
         Command::Ping(arguments) => {
             let address = ClientConfig::new(arguments.server).resolve_server()?;
@@ -283,7 +364,15 @@ fn run() -> Result<()> {
         Command::Forward(arguments) => forward(arguments)?,
         Command::Decode(arguments) => decode(&arguments.hex)?,
         #[cfg(feature = "managed")]
-        Command::Managed(arguments) => managed(arguments)?,
+        Command::Managed(arguments) => {
+            let store = state::StateStore::new(state_directory)?;
+            managed(arguments, &store)?;
+        }
+        #[cfg(feature = "managed")]
+        Command::Profile(arguments) => {
+            let store = state::StateStore::new(state_directory)?;
+            profile(arguments, &store)?;
+        }
     }
     Ok(())
 }
@@ -377,17 +466,34 @@ fn run_forward(
 }
 
 #[cfg(feature = "managed")]
-fn managed(arguments: ManagedArgs) -> Result<()> {
-    let client = DomainClient::new(arguments.cache_dir);
-    let discovered = client.discover(&arguments.domain, &arguments.device_id, arguments.consent)?;
+#[derive(Debug)]
+struct ManagedContext {
+    profile_name: Option<String>,
+    domain: String,
+    device_id: String,
+    username: Option<String>,
+    line: LinePreference,
+}
+
+#[cfg(feature = "managed")]
+fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
+    let context = resolve_managed_context(&arguments, store)?;
+    let cache_directory = arguments
+        .cache_dir
+        .clone()
+        .or_else(|| Some(store.cache_directory()));
+    let client = DomainClient::new(cache_directory);
+    let discovered = client.discover(&context.domain, &context.device_id)?;
     match arguments.action {
         ManagedCommand::Discover => print_discovery(&discovered),
         ManagedCommand::Login(login) => {
             let prepared = prepare_managed(
                 &client,
                 &discovered,
-                &arguments.device_id,
+                &context.device_id,
                 &login,
+                context.username.as_deref(),
+                &context.line,
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
             print_prepared(&prepared);
@@ -396,15 +502,357 @@ fn managed(arguments: ManagedArgs) -> Result<()> {
             let prepared = prepare_managed(
                 &client,
                 &discovered,
-                &arguments.device_id,
+                &context.device_id,
                 &connect.login,
+                context.username.as_deref(),
+                &context.line,
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
             print_prepared(&prepared);
             run_managed_client(prepared, connect.tun.as_deref(), &connect.routes)?;
         }
+        ManagedCommand::Lines(lines) => {
+            // A stale saved preference must not prevent the recovery command
+            // from listing current controller lines.
+            let prepared = prepare_managed(
+                &client,
+                &discovered,
+                &context.device_id,
+                &lines.login,
+                context.username.as_deref(),
+                &LinePreference::Auto,
+                Duration::from_millis(arguments.ping_timeout_ms),
+            )?;
+            let probes = prepared.probe_lines(Duration::from_millis(arguments.ping_timeout_ms))?;
+            print_line_probes(&probes, lines.json)?;
+            if let Some(preference) = lines.save {
+                let profile_name = context.profile_name.as_deref().ok_or_else(|| {
+                    Error::InvalidConfig(
+                        "--save requires --profile or a configured default profile".into(),
+                    )
+                })?;
+                save_profile_line(store, profile_name, &preference, &probes)?;
+                println!("saved line {preference} to profile {profile_name}");
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn resolve_managed_context(
+    arguments: &ManagedArgs,
+    store: &state::StateStore,
+) -> Result<ManagedContext> {
+    let persisted = store.load()?;
+    let explicit_endpoint = arguments.domain.is_some() || arguments.device_id.is_some();
+    let profile_name = if let Some(name) = &arguments.profile {
+        state::validate_profile_name(name)?;
+        Some(name.clone())
+    } else if !explicit_endpoint {
+        persisted.default_profile.clone()
+    } else {
+        None
+    };
+    let profile = profile_name
+        .as_ref()
+        .map(|name| {
+            persisted.profiles.get(name).cloned().ok_or_else(|| {
+                Error::InvalidConfig(format!("managed profile {name:?} does not exist"))
+            })
+        })
+        .transpose()?;
+
+    if arguments.profile.is_none()
+        && explicit_endpoint
+        && (arguments.domain.is_none() || arguments.device_id.is_none())
+    {
+        return Err(Error::InvalidConfig(
+            "--domain and --device-id must be provided together".into(),
+        ));
+    }
+    let domain = arguments
+        .domain
+        .clone()
+        .or_else(|| profile.as_ref().map(|profile| profile.domain.clone()))
+        .ok_or_else(|| {
+            Error::InvalidConfig(
+                "--domain and --device-id are required when no default profile exists".into(),
+            )
+        })?;
+    let device_id = arguments
+        .device_id
+        .clone()
+        .or_else(|| profile.as_ref().map(|profile| profile.device_id.clone()))
+        .ok_or_else(|| {
+            Error::InvalidConfig(
+                "--domain and --device-id are required when no default profile exists".into(),
+            )
+        })?;
+    openiwan::managed::validate_domain(&domain)?;
+    if device_id.trim().is_empty() {
+        return Err(Error::InvalidConfig("device ID must not be empty".into()));
+    }
+    Ok(ManagedContext {
+        profile_name,
+        domain,
+        device_id,
+        username: profile
+            .as_ref()
+            .and_then(|profile| profile.username.clone()),
+        line: profile
+            .as_ref()
+            .map_or_else(LinePreference::default, |profile| profile.line.clone()),
+    })
+}
+
+#[cfg(feature = "managed")]
+fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
+    match arguments.command {
+        ProfileCommand::List { json } => {
+            let persisted = store.load()?;
+            print_profiles(&persisted, json)?;
+        }
+        ProfileCommand::Show { name, json } => {
+            let persisted = store.load()?;
+            let name = name
+                .or_else(|| persisted.default_profile.clone())
+                .ok_or_else(|| {
+                    Error::InvalidConfig("profile name is required when no default exists".into())
+                })?;
+            let profile = persisted.profiles.get(&name).ok_or_else(|| {
+                Error::InvalidConfig(format!("managed profile {name:?} does not exist"))
+            })?;
+            print_profile(&name, profile, persisted.default_profile.as_deref(), json)?;
+        }
+        ProfileCommand::Set(arguments) => {
+            let name = arguments.name.clone();
+            state::validate_profile_name(&name)?;
+            store.update(|persisted| {
+                let was_empty = persisted.profiles.is_empty();
+                let mut profile = if let Some(profile) = persisted.profiles.get(&name) {
+                    profile.clone()
+                } else {
+                    let domain = arguments.domain.clone().ok_or_else(|| {
+                        Error::InvalidConfig("--domain is required for a new profile".into())
+                    })?;
+                    let device_id = arguments.device_id.clone().ok_or_else(|| {
+                        Error::InvalidConfig("--device-id is required for a new profile".into())
+                    })?;
+                    state::ManagedProfile::new(domain, device_id)?
+                };
+                if let Some(domain) = &arguments.domain {
+                    profile.domain.clone_from(domain);
+                }
+                if let Some(device_id) = &arguments.device_id {
+                    profile.device_id.clone_from(device_id);
+                }
+                if let Some(username) = &arguments.username {
+                    profile.username = Some(username.clone());
+                } else if arguments.clear_username {
+                    profile.username = None;
+                }
+                if let Some(line) = &arguments.line {
+                    profile.line = line.clone();
+                }
+                profile.validate()?;
+                persisted.profiles.insert(name.clone(), profile);
+                if was_empty && persisted.default_profile.is_none() {
+                    persisted.default_profile = Some(name.clone());
+                }
+                Ok(())
+            })?;
+            let persisted = store.load()?;
+            print_profile(
+                &name,
+                &persisted.profiles[&name],
+                persisted.default_profile.as_deref(),
+                false,
+            )?;
+        }
+        ProfileCommand::Use { name } => {
+            state::validate_profile_name(&name)?;
+            store.update(|persisted| {
+                if !persisted.profiles.contains_key(&name) {
+                    return Err(Error::InvalidConfig(format!(
+                        "managed profile {name:?} does not exist"
+                    )));
+                }
+                persisted.default_profile = Some(name.clone());
+                Ok(())
+            })?;
+            println!("default profile: {name}");
+        }
+        ProfileCommand::Remove { name } => {
+            state::validate_profile_name(&name)?;
+            store.update(|persisted| {
+                if persisted.profiles.remove(&name).is_none() {
+                    return Err(Error::InvalidConfig(format!(
+                        "managed profile {name:?} does not exist"
+                    )));
+                }
+                if persisted.default_profile.as_deref() == Some(name.as_str()) {
+                    persisted.default_profile = None;
+                }
+                Ok(())
+            })?;
+            println!("removed profile {name}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn print_profiles(persisted: &state::CliState, json: bool) -> Result<()> {
+    if json {
+        let profiles = persisted
+            .profiles
+            .iter()
+            .map(|(name, profile)| {
+                profile_json(name, profile, persisted.default_profile.as_deref())
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&profiles).map_err(|error| {
+                Error::InvalidConfig(format!("serialize profile output: {error}"))
+            })?
+        );
+        return Ok(());
+    }
+    if persisted.profiles.is_empty() {
+        println!("no profiles configured");
+        return Ok(());
+    }
+    for (name, profile) in &persisted.profiles {
+        let marker = if persisted.default_profile.as_deref() == Some(name.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        println!(
+            "{marker} {name}: domain={} user={} line={}",
+            profile.domain,
+            profile.username.as_deref().unwrap_or("<prompt>"),
+            profile.line
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn print_profile(
+    name: &str,
+    profile: &state::ManagedProfile,
+    default_profile: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&profile_json(name, profile, default_profile)).map_err(
+                |error| Error::InvalidConfig(format!("serialize profile output: {error}"))
+            )?
+        );
+        return Ok(());
+    }
+    println!("profile: {name}");
+    println!("  default: {}", default_profile == Some(name));
+    println!("  domain: {}", profile.domain);
+    println!("  device ID: {}", profile.device_id);
+    println!(
+        "  username: {}",
+        profile.username.as_deref().unwrap_or("<prompt>")
+    );
+    println!("  line: {}", profile.line);
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn profile_json(
+    name: &str,
+    profile: &state::ManagedProfile,
+    default_profile: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "default": default_profile == Some(name),
+        "domain": profile.domain,
+        "device_id": profile.device_id,
+        "username": profile.username,
+        "line": profile.line.to_string(),
+    })
+}
+
+#[cfg(feature = "managed")]
+fn print_line_probes(probes: &[LineProbe], json: bool) -> Result<()> {
+    if json {
+        let output = probes
+            .iter()
+            .map(|probe| {
+                serde_json::json!({
+                    "id": probe.preference.to_string(),
+                    "name": probe.name,
+                    "name_en": probe.name_en,
+                    "endpoint": probe.endpoint,
+                    "reachable": probe.reachable(),
+                    "latency_us": probe.latency.map(|latency| latency.as_micros()),
+                    "error": probe.error,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).map_err(|error| {
+                Error::InvalidConfig(format!("serialize line output: {error}"))
+            })?
+        );
+        return Ok(());
+    }
+    println!("ID\tLATENCY\tENDPOINT\tNAME");
+    for probe in probes {
+        let latency = probe.latency.map_or_else(
+            || "unreachable".into(),
+            |latency| format!("{:.3} ms", latency.as_secs_f64() * 1_000.0),
+        );
+        println!(
+            "{}\t{}\t{}\t{}",
+            probe.preference,
+            latency,
+            probe.endpoint.as_deref().unwrap_or("-"),
+            probe.name
+        );
+        if let Some(error) = &probe.error {
+            println!("  error: {error}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn save_profile_line(
+    store: &state::StateStore,
+    profile_name: &str,
+    preference: &LinePreference,
+    probes: &[LineProbe],
+) -> Result<()> {
+    if !matches!(preference, LinePreference::Auto)
+        && !probes.iter().any(|probe| &probe.preference == preference)
+    {
+        return Err(Error::LineNotFound(preference.to_string()));
+    }
+    if let Some(probe) = probes.iter().find(|probe| &probe.preference == preference)
+        && !probe.reachable()
+    {
+        tracing::warn!(line = %preference, "saving a currently unreachable managed line");
+    }
+    store.update(|persisted| {
+        let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
+            Error::InvalidConfig(format!("managed profile {profile_name:?} does not exist"))
+        })?;
+        profile.line = preference.clone();
+        Ok(())
+    })
 }
 
 #[cfg(feature = "managed")]
@@ -612,15 +1060,29 @@ fn prepare_managed(
     discovered: &DiscoveredDomain,
     device_id: &str,
     arguments: &ManagedLoginArgs,
+    profile_username: Option<&str>,
+    profile_line: &LinePreference,
     ping_timeout: Duration,
 ) -> Result<PreparedConnection> {
+    let line = arguments.line.as_ref().unwrap_or(profile_line);
     match discovered.auth.method {
         AuthMethod::Credential => {
-            let username = arguments.username.as_deref().ok_or_else(|| {
-                Error::InvalidConfig("--username is required for this credential domain".into())
-            })?;
+            let username = arguments
+                .username
+                .as_deref()
+                .or(profile_username)
+                .ok_or_else(|| {
+                    Error::InvalidConfig("--username is required for this credential domain".into())
+                })?;
             let password = read_managed_secret(arguments)?;
-            client.password_login(discovered, device_id, username, password, ping_timeout)
+            client.password_login_with_line(
+                discovered,
+                device_id,
+                username,
+                password,
+                ping_timeout,
+                line,
+            )
         }
         AuthMethod::Oidc => {
             let pending = client.begin_oidc(discovered, &arguments.redirect_uri)?;
@@ -631,13 +1093,16 @@ fn prepare_managed(
             let redirect = prompt_line("Paste the complete callback URL: ")?;
             let identity = client.complete_oidc(&pending, &redirect)?;
             let posture_results = read_posture_results(arguments.posture_results.as_deref())?;
-            client.oidc_login(
+            client.oidc_login_with_options(
                 discovered,
                 device_id,
                 &identity,
-                &posture_results,
-                arguments.posture_version,
-                ping_timeout,
+                OidcLoginOptions {
+                    posture_check_results: &posture_results,
+                    posture_version: arguments.posture_version,
+                    ping_timeout,
+                    line,
+                },
             )
         }
     }
@@ -666,6 +1131,7 @@ fn print_discovery(discovered: &DiscoveredDomain) {
 #[cfg(feature = "managed")]
 fn print_prepared(prepared: &PreparedConnection) {
     println!("login ready for domain {}", prepared.domain);
+    println!("selected line: {}", prepared.ingress.line_preference());
     match &prepared.ingress {
         SelectedIngress::Iwan { server, latency } => println!(
             "best server: {} ({}, {:.3} ms)",
@@ -998,7 +1464,6 @@ mod tests {
             "iwan.ustc",
             "--device-id",
             "device-1",
-            "--consent",
             "login",
             "--username",
             "alice",
@@ -1011,17 +1476,68 @@ mod tests {
             Command::Managed(ManagedArgs {
                 domain,
                 device_id,
-                consent: true,
                 action: ManagedCommand::Login(ManagedLoginArgs {
                     posture_version: Some(version),
                     username: Some(username),
                     ..
                 }),
                 ..
-            }) if domain == "iwan.ustc"
-                && device_id == "device-1"
+            }) if domain.as_deref() == Some("iwan.ustc")
+                && device_id.as_deref() == Some("device-1")
                 && username == "alice"
                 && version == 2
+        ));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn parses_profile_and_line_commands() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "profile",
+            "set",
+            "work",
+            "--domain",
+            "iwan.example",
+            "--device-id",
+            "device-1",
+            "--line",
+            "iwan:7",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Profile(ProfileArgs {
+                command: ProfileCommand::Set(ProfileSetArgs {
+                    name,
+                    line: Some(LinePreference::Iwan { server_id }),
+                    ..
+                })
+            }) if name == "work" && server_id == "7"
+        ));
+
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "managed",
+            "--profile",
+            "work",
+            "lines",
+            "--save",
+            "sr:3",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Managed(ManagedArgs {
+                profile: Some(name),
+                action: ManagedCommand::Lines(ManagedLinesArgs {
+                    save: Some(LinePreference::SegmentRouting { group_id: 3 }),
+                    json: true,
+                    ..
+                }),
+                ..
+            }) if name == "work"
         ));
     }
 

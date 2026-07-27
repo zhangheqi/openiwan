@@ -1,5 +1,5 @@
 use super::auth::{self, AuthMethod, ControllerAuth};
-use super::controller::{self, ControllerConfiguration, ServerInfo, SrEntry};
+use super::controller::{self, ControllerConfiguration, ServerInfo, SrEntry, SrGroup};
 use super::http::{HttpRequest, HttpTransport, UreqTransport};
 use super::keepalive::{self, KeepaliveCredentials, KeepaliveRequest, KeepaliveResponse};
 use super::lookup::{LookupClient, LookupResult, ServiceType};
@@ -10,12 +10,15 @@ use crate::client;
 use crate::config::SegmentRoutingConfig;
 use crate::sr::SrEncryptionAlgorithm;
 use crate::{Client, ClientConfig, Error, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::net::Ipv4Addr;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::Duration;
@@ -23,6 +26,7 @@ use url::Url;
 use zeroize::Zeroize;
 
 static NEXT_LOCAL_SR_ID: AtomicU32 = AtomicU32::new(0);
+const MAX_CONCURRENT_LINE_PROBES: usize = 16;
 
 #[derive(Debug)]
 pub struct DiscoveredDomain {
@@ -56,6 +60,92 @@ impl PendingDomainAuthorization {
     }
 }
 
+/// A stable, non-secret preference for a controller-managed line.
+///
+/// Traditional lines are keyed by the controller's server ID. Segment-routing
+/// lines are keyed by group because entries inside a group are ordered
+/// primary/failover paths and may receive runtime-only IDs during validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LinePreference {
+    #[default]
+    Auto,
+    Iwan {
+        server_id: String,
+    },
+    SegmentRouting {
+        group_id: i32,
+    },
+}
+
+impl fmt::Display for LinePreference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => formatter.write_str("auto"),
+            Self::Iwan { server_id } => write!(formatter, "iwan:{server_id}"),
+            Self::SegmentRouting { group_id } => write!(formatter, "sr:{group_id}"),
+        }
+    }
+}
+
+impl FromStr for LinePreference {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        let (kind, id) = value
+            .split_once(':')
+            .ok_or_else(|| "line must be auto, iwan:<server-id>, or sr:<group-id>".to_owned())?;
+        match kind.to_ascii_lowercase().as_str() {
+            "iwan" => {
+                let id = id
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|id| *id != -1)
+                    .ok_or_else(|| "iWAN server ID must be an integer other than -1".to_owned())?;
+                Ok(Self::Iwan {
+                    server_id: id.to_string(),
+                })
+            }
+            "sr" => {
+                let group_id = id
+                    .parse::<i32>()
+                    .map_err(|_| "SR group ID must be an integer".to_owned())?;
+                Ok(Self::SegmentRouting { group_id })
+            }
+            _ => Err("line must be auto, iwan:<server-id>, or sr:<group-id>".to_owned()),
+        }
+    }
+}
+
+/// Reachability result for one selectable controller-managed line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineProbe {
+    pub preference: LinePreference,
+    pub name: String,
+    pub name_en: String,
+    pub endpoint: Option<String>,
+    pub latency: Option<Duration>,
+    pub error: Option<String>,
+}
+
+impl LineProbe {
+    pub const fn reachable(&self) -> bool {
+        self.latency.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OidcLoginOptions<'a> {
+    pub posture_check_results: &'a [Value],
+    pub posture_version: Option<i64>,
+    pub ping_timeout: Duration,
+    pub line: &'a LinePreference,
+}
+
 #[derive(Debug, Clone)]
 pub enum SelectedIngress {
     Iwan {
@@ -73,6 +163,17 @@ impl SelectedIngress {
     pub const fn latency(&self) -> Duration {
         match self {
             Self::Iwan { latency, .. } | Self::SegmentRouting { latency, .. } => *latency,
+        }
+    }
+
+    pub fn line_preference(&self) -> LinePreference {
+        match self {
+            Self::Iwan { server, .. } => LinePreference::Iwan {
+                server_id: server.id.clone(),
+            },
+            Self::SegmentRouting { group_id, .. } => LinePreference::SegmentRouting {
+                group_id: *group_id,
+            },
         }
     }
 }
@@ -133,6 +234,14 @@ impl PreparedConnection {
             self.credentials.password.clone(),
         )
     }
+
+    /// Probe all selectable lines in the retained controller configuration.
+    ///
+    /// Probes are bounded to avoid creating an unbounded number of threads for
+    /// a malformed controller response. Result order matches controller order.
+    pub fn probe_lines(&self, timeout: Duration) -> Result<Vec<LineProbe>> {
+        probe_lines(&self.configuration, timeout)
+    }
 }
 
 pub struct DomainClient<T = UreqTransport> {
@@ -162,13 +271,8 @@ impl<T: HttpTransport> DomainClient<T> {
         }
     }
 
-    pub fn discover(
-        &self,
-        domain: &str,
-        device_id: &str,
-        consent_granted: bool,
-    ) -> Result<DiscoveredDomain> {
-        let lookup = self.lookup.lookup(domain, device_id, consent_granted)?;
+    pub fn discover(&self, domain: &str, device_id: &str) -> Result<DiscoveredDomain> {
+        let lookup = self.lookup.lookup(domain, device_id)?;
         let auth = auth::fetch_or_credential(&lookup, device_id, self.lookup.transport());
         Ok(DiscoveredDomain { lookup, auth })
     }
@@ -224,6 +328,25 @@ impl<T: HttpTransport> DomainClient<T> {
         password: impl Into<String>,
         ping_timeout: Duration,
     ) -> Result<PreparedConnection> {
+        self.password_login_with_line(
+            domain,
+            device_id,
+            username,
+            password,
+            ping_timeout,
+            &LinePreference::Auto,
+        )
+    }
+
+    pub fn password_login_with_line(
+        &self,
+        domain: &DiscoveredDomain,
+        device_id: &str,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        ping_timeout: Duration,
+        line: &LinePreference,
+    ) -> Result<PreparedConnection> {
         if domain.auth.method == AuthMethod::Oidc {
             return Err(Error::ManagedFlow(
                 "this domain uses single sign-on authentication".into(),
@@ -237,7 +360,7 @@ impl<T: HttpTransport> DomainClient<T> {
             ));
         }
         let configuration = self.fetch_configuration(domain, device_id, None, None, None)?;
-        let ingress = select_ingress(&configuration, ping_timeout)?;
+        let ingress = select_ingress(&configuration, ping_timeout, line)?;
         let credentials =
             credentials_for_ingress(&ingress, Some((&username, &password)), &configuration)?;
         // The login-screen OPEN is a one-shot authentication probe. Closing
@@ -261,6 +384,26 @@ impl<T: HttpTransport> DomainClient<T> {
         posture_version: Option<i64>,
         ping_timeout: Duration,
     ) -> Result<PreparedConnection> {
+        self.oidc_login_with_options(
+            domain,
+            device_id,
+            identity,
+            OidcLoginOptions {
+                posture_check_results,
+                posture_version,
+                ping_timeout,
+                line: &LinePreference::Auto,
+            },
+        )
+    }
+
+    pub fn oidc_login_with_options(
+        &self,
+        domain: &DiscoveredDomain,
+        device_id: &str,
+        identity: &OidcIdentity,
+        options: OidcLoginOptions<'_>,
+    ) -> Result<PreparedConnection> {
         if domain.auth.method != AuthMethod::Oidc {
             return Err(Error::ManagedFlow(
                 "this domain uses credential authentication".into(),
@@ -271,11 +414,11 @@ impl<T: HttpTransport> DomainClient<T> {
             device_id,
             Some(identity.access_token.as_str()),
             Some(&identity.username),
-            posture_version,
+            options.posture_version,
         )?;
         let posture_version = match configuration.posture() {
             Some(posture_config) => posture::posture_gate_version(posture_config)?,
-            None => posture_version,
+            None => options.posture_version,
         };
         if let Some(version) = posture_version {
             let evaluation = posture::evaluate(
@@ -284,13 +427,13 @@ impl<T: HttpTransport> DomainClient<T> {
                 Some(identity.access_token.as_str()),
                 &identity.user_id,
                 version,
-                posture_check_results,
+                options.posture_check_results,
             )?;
             if !evaluation.allowed() {
                 return Err(Error::PostureDenied);
             }
         }
-        let ingress = select_ingress(&configuration, ping_timeout)?;
+        let ingress = select_ingress(&configuration, options.ping_timeout, options.line)?;
         let credentials = credentials_for_ingress(&ingress, None, &configuration)?;
         Ok(PreparedConnection {
             domain: domain.active_domain().to_owned(),
@@ -398,8 +541,9 @@ fn validate_https_endpoint(name: &str, value: &str) -> Result<()> {
 fn select_ingress(
     configuration: &ControllerConfiguration,
     timeout: Duration,
+    preference: &LinePreference,
 ) -> Result<SelectedIngress> {
-    select_ingress_with(configuration, |endpoint| {
+    select_ingress_with_preference(configuration, preference, |endpoint| {
         ping_endpoint(endpoint, timeout).map(|(_, latency)| latency)
     })
 }
@@ -415,15 +559,7 @@ fn select_ingress_with(
         }
     }
     for group in sanitize_sr_groups(configuration.sr_groups()?) {
-        let mut entries = group.entries;
-        let primary = usize::try_from(group.primary_index)
-            .ok()
-            .filter(|index| *index < entries.len())
-            .unwrap_or(0);
-        if primary < entries.len() {
-            entries.swap(0, primary);
-        }
-        for entry in entries {
+        for entry in ordered_sr_entries(&group) {
             let Ok(endpoint) =
                 format_endpoint(&entry.ingress.server_name, entry.ingress.server_port)
             else {
@@ -449,6 +585,201 @@ fn select_ingress_with(
                 .unwrap_or(Ordering::Equal)
         })
         .ok_or(Error::Timeout("no ingress server answered ping"))
+}
+
+fn select_ingress_with_preference(
+    configuration: &ControllerConfiguration,
+    preference: &LinePreference,
+    mut ping: impl FnMut(&str) -> Result<Duration>,
+) -> Result<SelectedIngress> {
+    match preference {
+        LinePreference::Auto => select_ingress_with(configuration, ping),
+        LinePreference::Iwan { server_id } => {
+            let server = configuration
+                .iwan_servers()?
+                .into_iter()
+                .find(|server| &server.id == server_id)
+                .ok_or_else(|| Error::LineNotFound(preference.to_string()))?;
+            let endpoint = server.endpoint();
+            let latency = ping(&endpoint).map_err(|error| Error::LineUnavailable {
+                line: preference.to_string(),
+                reason: error.to_string(),
+            })?;
+            Ok(SelectedIngress::Iwan { server, latency })
+        }
+        LinePreference::SegmentRouting { group_id } => {
+            let mut groups = sanitize_sr_groups(configuration.sr_groups()?)
+                .into_iter()
+                .filter(|group| group.id == *group_id);
+            let group = groups
+                .next()
+                .ok_or_else(|| Error::LineNotFound(preference.to_string()))?;
+            if groups.next().is_some() {
+                return Err(Error::InvalidConfig(format!(
+                    "controller returned duplicate SR group ID {group_id}"
+                )));
+            }
+            select_sr_group_with(group, &mut ping).map_err(|error| Error::LineUnavailable {
+                line: preference.to_string(),
+                reason: error.to_string(),
+            })
+        }
+    }
+}
+
+fn select_sr_group_with(
+    group: SrGroup,
+    ping: &mut impl FnMut(&str) -> Result<Duration>,
+) -> Result<SelectedIngress> {
+    let group_id = group.id;
+    let mut last_error = None;
+    for entry in ordered_sr_entries(&group) {
+        let endpoint = match format_endpoint(&entry.ingress.server_name, entry.ingress.server_port)
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        match ping(&endpoint) {
+            Ok(latency) => {
+                return Ok(SelectedIngress::SegmentRouting {
+                    group_id,
+                    entry,
+                    latency,
+                });
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        Error::InvalidConfig(format!("SR group {group_id} contains no valid entry"))
+    }))
+}
+
+fn ordered_sr_entries(group: &SrGroup) -> Vec<SrEntry> {
+    let mut entries = group.entries.clone();
+    let primary = usize::try_from(group.primary_index)
+        .ok()
+        .filter(|index| *index < entries.len())
+        .unwrap_or(0);
+    if primary < entries.len() {
+        entries.swap(0, primary);
+    }
+    entries
+}
+
+#[derive(Debug)]
+enum LineTarget {
+    Iwan(ServerInfo),
+    SegmentRouting(SrGroup),
+}
+
+fn probe_lines(
+    configuration: &ControllerConfiguration,
+    timeout: Duration,
+) -> Result<Vec<LineProbe>> {
+    let mut targets = configuration
+        .iwan_servers()?
+        .into_iter()
+        .map(LineTarget::Iwan)
+        .collect::<Vec<_>>();
+    targets.extend(
+        sanitize_sr_groups(configuration.sr_groups()?)
+            .into_iter()
+            .map(LineTarget::SegmentRouting),
+    );
+
+    let mut targets = targets.into_iter();
+    let mut probes = Vec::new();
+    loop {
+        let batch = targets
+            .by_ref()
+            .take(MAX_CONCURRENT_LINE_PROBES)
+            .collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        let batch_probes = thread::scope(|scope| {
+            batch
+                .into_iter()
+                .map(|target| scope.spawn(move || probe_line_target(target, timeout)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|worker| {
+                    worker.join().map_err(|_| {
+                        Error::ManagedFlow("managed line probe worker panicked".into())
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        probes.extend(batch_probes);
+    }
+    Ok(probes)
+}
+
+fn probe_line_target(target: LineTarget, timeout: Duration) -> LineProbe {
+    match target {
+        LineTarget::Iwan(server) => {
+            let endpoint = server.endpoint();
+            let result = ping_endpoint(&endpoint, timeout).map(|(_, latency)| latency);
+            LineProbe {
+                preference: LinePreference::Iwan {
+                    server_id: server.id,
+                },
+                name: server.name,
+                name_en: server.name_en,
+                endpoint: Some(endpoint),
+                latency: result.as_ref().ok().copied(),
+                error: result.err().map(|error| error.to_string()),
+            }
+        }
+        LineTarget::SegmentRouting(group) => {
+            let preference = LinePreference::SegmentRouting { group_id: group.id };
+            let name = group.name.clone();
+            let name_en = group.name_en.clone();
+            let mut selected_endpoint = None;
+            let mut latency = None;
+            let mut last_error = None;
+            for entry in ordered_sr_entries(&group) {
+                let endpoint =
+                    match format_endpoint(&entry.ingress.server_name, entry.ingress.server_port) {
+                        Ok(endpoint) => endpoint,
+                        Err(error) => {
+                            last_error = Some(error.to_string());
+                            continue;
+                        }
+                    };
+                match ping_endpoint(&endpoint, timeout) {
+                    Ok((_, measured)) => {
+                        selected_endpoint = Some(endpoint);
+                        latency = Some(measured);
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        selected_endpoint = Some(endpoint);
+                        last_error = Some(error.to_string());
+                    }
+                }
+            }
+            LineProbe {
+                preference,
+                name,
+                name_en,
+                endpoint: selected_endpoint,
+                latency,
+                error: if latency.is_some() {
+                    None
+                } else {
+                    last_error.or_else(|| {
+                        Some(format!("SR group {} contains no reachable entry", group.id))
+                    })
+                },
+            }
+        }
+    }
 }
 
 fn ping_endpoint(endpoint: &str, timeout: Duration) -> Result<(SocketAddr, Duration)> {
@@ -786,7 +1117,7 @@ mod tests {
             requests: Mutex::new(Vec::new()),
         };
         let client = DomainClient::with_transport(transport, None);
-        let discovered = client.discover("example", "device", true).unwrap();
+        let discovered = client.discover("example", "device").unwrap();
         let configuration = client
             .fetch_configuration(&discovered, "device", None, None, None)
             .unwrap();
@@ -839,6 +1170,123 @@ mod tests {
             } if id == "2"
         ));
         assert_eq!(credentials.username, "fast-user");
+    }
+
+    #[test]
+    fn line_preferences_have_stable_cli_and_state_representations() {
+        let auto = "AUTO".parse::<LinePreference>().unwrap();
+        let iwan = "iwan:007".parse::<LinePreference>().unwrap();
+        let sr = "SR:9".parse::<LinePreference>().unwrap();
+        assert_eq!(auto.to_string(), "auto");
+        assert_eq!(iwan.to_string(), "iwan:7");
+        assert_eq!(sr.to_string(), "sr:9");
+        assert!("iwan:-1".parse::<LinePreference>().is_err());
+        assert_eq!(
+            "iwan:-2".parse::<LinePreference>().unwrap().to_string(),
+            "iwan:-2"
+        );
+        assert!("unknown:1".parse::<LinePreference>().is_err());
+
+        let encoded = toml::to_string(&iwan).unwrap();
+        assert_eq!(toml::from_str::<LinePreference>(&encoded).unwrap(), iwan);
+    }
+
+    #[test]
+    fn manual_iwan_preference_overrides_latency_order() {
+        let configuration = controller_configuration(serde_json::json!({
+            "serverlist": [
+                {
+                    "id": 1,
+                    "name": "slow",
+                    "serverName": "slow.example",
+                    "serverPort": 6001,
+                    "userName": "slow-user",
+                    "passWord": "slow-pass"
+                },
+                {
+                    "id": 2,
+                    "name": "fast",
+                    "serverName": "fast.example",
+                    "serverPort": 6002,
+                    "userName": "fast-user",
+                    "passWord": "fast-pass"
+                }
+            ]
+        }));
+        let preference = LinePreference::Iwan {
+            server_id: "1".into(),
+        };
+        let selected = select_ingress_with_preference(&configuration, &preference, |endpoint| {
+            Ok(if endpoint.starts_with("slow") {
+                Duration::from_millis(20)
+            } else {
+                Duration::from_millis(1)
+            })
+        })
+        .unwrap();
+        assert_eq!(selected.line_preference(), preference);
+        assert_eq!(selected.latency(), Duration::from_millis(20));
+
+        let missing = LinePreference::Iwan {
+            server_id: "99".into(),
+        };
+        assert!(matches!(
+            select_ingress_with_preference(&configuration, &missing, |_| {
+                Ok(Duration::from_millis(1))
+            }),
+            Err(Error::LineNotFound(line)) if line == "iwan:99"
+        ));
+    }
+
+    #[test]
+    fn manual_sr_preference_keeps_group_failover_semantics() {
+        let configuration = controller_configuration(serde_json::json!({
+            "sites": [{
+                "id": 9,
+                "name": "group",
+                "primary_index": 0,
+                "sr": [
+                    {
+                        "id": 1,
+                        "ip": "192.0.2.1",
+                        "ingress": {
+                            "serverName": "primary.example",
+                            "serverPort": 6001,
+                            "userName": "primary",
+                            "passWord": "primary"
+                        },
+                        "path": {"links": [11]}
+                    },
+                    {
+                        "id": 2,
+                        "ip": "192.0.2.2",
+                        "ingress": {
+                            "serverName": "fallback.example",
+                            "serverPort": 6002,
+                            "userName": "fallback",
+                            "passWord": "fallback"
+                        },
+                        "path": {"links": [12]}
+                    }
+                ]
+            }]
+        }));
+        let preference = LinePreference::SegmentRouting { group_id: 9 };
+        let selected = select_ingress_with_preference(&configuration, &preference, |endpoint| {
+            if endpoint.starts_with("primary") {
+                Err(Error::Timeout("test primary"))
+            } else {
+                Ok(Duration::from_millis(3))
+            }
+        })
+        .unwrap();
+        assert!(matches!(
+            selected,
+            SelectedIngress::SegmentRouting {
+                entry: SrEntry { id: 2, .. },
+                ..
+            }
+        ));
     }
 
     #[test]

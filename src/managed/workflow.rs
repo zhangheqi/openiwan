@@ -776,7 +776,7 @@ mod tests {
         let transport = MockTransport {
             responses: Mutex::new(VecDeque::from([
                 Ok(http_json(
-                    r#"{"success":true,"data":{"serviceType":"controller","serverlistaddress":"https://controller.example/serverlist","controller_info":{"app_id":"controller-example","url":{"auth":"https://controller.example/auth","config":"https://controller.example/config","serverlist":"https://controller.example/serverlist"}}}}"#,
+                    r#"{"success":true,"data":{"type":"controller","serverlistaddress":"https://controller.example/serverlist","controller_info":{"app_id":"controller-example","url":{"auth":"https://controller.example/auth","config":"https://controller.example/config","serverlist":"https://controller.example/serverlist"}}}}"#,
                 )),
                 Ok(http_json(r#"{"auth":{"method":"credential"}}"#)),
                 Ok(http_json(

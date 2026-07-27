@@ -27,6 +27,10 @@ HMAC-SHA256 over the HTTP method, decoded path, canonical query, exact body
 hash, timestamp, and nonce. Timestamp, nonce, and signature are regenerated
 for every retry.
 
+The request body uses `serviceType: "fgb"`. A successful response wraps the
+resolved service type in `data.type`; these names are intentionally different
+and are both retained exactly.
+
 The only accepted service types are:
 
 - `serverlist`;

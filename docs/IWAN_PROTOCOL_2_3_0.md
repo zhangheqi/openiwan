@@ -168,8 +168,10 @@ must remain dynamic below the confirmed outer fields.
 
 The recovered client begins with `POST /lookup` against
 `lookup.gsase.com`, then `lookupbak.hypersase.com`, with two attempts per
-server and a seven-day cache fallback. It accepts only `serverlist`, `saas`,
-and `controller`. Controller domains POST to the exact auth URL returned by
+server and a seven-day cache fallback. The request sends
+`serviceType: "fgb"` while the successful response carries the resolved
+service type in `data.type`. It accepts only `serverlist`, `saas`, and
+`controller`. Controller domains POST to the exact auth URL returned by
 lookup; the domain is in the body and is not appended to the URL.
 `credential` selects password login and `oidc` selects Authorization Code +
 PKCE S256. The auth request is signed with the controller `app_id` and its

@@ -348,7 +348,7 @@ fn parse_response(domain: &str, raw: Value, source: LookupSource) -> Result<Look
     let object = raw
         .as_object()
         .ok_or_else(|| Error::ManagedFlow("lookup data must be a JSON object".into()))?;
-    let service_type = required_string(object, &["serviceType"])?;
+    let service_type = required_string(object, &["type"])?;
     let service_type = ServiceType::parse(service_type)?;
     let is_fuzzy_match = object
         .get("isFuzzyMatch")
@@ -470,7 +470,7 @@ mod tests {
                 Err(Error::Http("offline".into())),
                 Ok(response(
                     200,
-                    r#"{"success":true,"data":{"serviceType":"controller","completeDomain":"iwan.ustc.edu.cn","originalDomain":"iwan.ustc","isFuzzyMatch":true,"controller_info":{"app_id":"controller-example","url":{"auth":"https://controller.example/m/auth","config":"https://controller.example/m/config"}}}}"#,
+                    r#"{"success":true,"data":{"type":"controller","completeDomain":"iwan.ustc.edu.cn","originalDomain":"iwan.ustc","isFuzzyMatch":true,"controller_info":{"app_id":"controller-example","url":{"auth":"https://controller.example/m/auth","config":"https://controller.example/m/config"}}}}"#,
                 )),
             ])),
             requests: Mutex::new(Vec::new()),
@@ -483,6 +483,9 @@ mod tests {
         let requests = client.transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         for request in requests.iter() {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["serviceType"], "fgb");
+            assert!(body.get("type").is_none());
             for name in [
                 "X-Auth-AppId",
                 "X-Auth-Timestamp",
@@ -505,7 +508,7 @@ mod tests {
         let cache = LookupCache::new(&directory);
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         let raw = serde_json::json!({
-            "serviceType": "serverlist",
+            "type": "serverlist",
             "serverlistaddress": "https://config.example/list",
             "originalDomain": "example"
         });
@@ -538,7 +541,7 @@ mod tests {
         let cache = LookupCache::new(&directory);
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         let cached = serde_json::json!({
-            "serviceType": "serverlist",
+            "type": "serverlist",
             "serverlistaddress": "https://config.example/list",
             "originalDomain": "example"
         });
@@ -547,11 +550,11 @@ mod tests {
             responses: Mutex::new(VecDeque::from([
                 Ok(response(
                     200,
-                    r#"{"success":true,"data":{"serviceType":"invented"}}"#,
+                    r#"{"success":true,"data":{"type":"invented"}}"#,
                 )),
                 Ok(response(
                     200,
-                    r#"{"success":true,"data":{"serviceType":"invented"}}"#,
+                    r#"{"success":true,"data":{"type":"invented"}}"#,
                 )),
             ])),
             requests: Mutex::new(Vec::new()),
@@ -574,11 +577,7 @@ mod tests {
         let cache = LookupCache::new(&directory);
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         cache
-            .write(
-                "example",
-                &serde_json::json!({"serviceType": "invented"}),
-                now,
-            )
+            .write("example", &serde_json::json!({"type": "invented"}), now)
             .unwrap();
         let transport = MockTransport {
             responses: Mutex::new(VecDeque::from([
@@ -606,7 +605,7 @@ mod tests {
         let result = parse_response(
             "entered.example",
             serde_json::json!({
-                "serviceType": "serverlist",
+                "type": "serverlist",
                 "serverlistaddress": "https://config.example/list",
                 "originalDomain": "server-controlled.example",
                 "completeDomain": "also-server-controlled.example",
@@ -624,7 +623,7 @@ mod tests {
         let result = parse_response(
             "iwan.ustc",
             serde_json::json!({
-                "serviceType": "controller",
+                "type": "controller",
                 "domain": "iwan.ustc",
                 "serverlistaddress": "https://controller.example/m/config",
                 "controller_info": {
@@ -654,18 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unrecovered_lookup_field_aliases() {
+    fn rejects_unrecovered_service_type_field_alias() {
         assert!(
             parse_response(
                 "iwan.ustc",
                 serde_json::json!({
-                    "type": "controller",
-                    "controllerInfo": {
-                        "appId": "controller-example",
-                        "url": {
-                            "auth": "https://controller.example/m/auth"
-                        }
-                    }
+                    "serviceType": "controller"
                 }),
                 LookupSource::Network,
             )
@@ -678,7 +671,7 @@ mod tests {
         let error = parse_response(
             "entered.example",
             serde_json::json!({
-                "serviceType": "controller",
+                "type": "controller",
                 "completeDomain": "../escape",
                 "isFuzzyMatch": true
             }),

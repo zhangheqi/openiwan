@@ -5,6 +5,11 @@ All notable changes to OpeniWAN are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Parse the recovered lookup response service type from `data.type` while
+  retaining `serviceType: "fgb"` only in the signed request body.
+
 ## [0.3.0] - 2026-07-27
 
 ### Added

@@ -34,6 +34,10 @@ All notable changes to OpeniWAN are documented here. The project follows
 - Remembered password and OIDC authentication in the operating-system
   credential store, refresh-token rotation, explicit logout/reauthentication,
   and non-interactive service startup.
+- Managed route-free TCP and HTTP(S) forwarding using controller discovery,
+  authentication, line selection, and DNS policy.
+- Automatic installation-wide Device ID generation and persistence, with
+  optional CLI overrides for existing enrollments.
 
 ### Changed
 

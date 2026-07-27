@@ -160,18 +160,21 @@ and supports repeatable `--ca-cert` roots. The listener must be loopback.
 
 ## Managed connection
 
-Managed connections start with a customer domain and device identifier.
+Managed connections start with a customer domain. OpeniWAN creates an
+installation-wide UUID on first use and reuses it as the Device ID, matching
+the official app's no-input workflow. `--device-id` remains available when an
+existing controller enrollment must be preserved.
 
 Discover the service and authentication method:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier discover
+openiwan managed --domain iwan.example discover
 ```
 
 Complete authentication and ingress selection without creating a TUN:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier login --username alice
+openiwan managed --domain iwan.example login --username alice
 ```
 
 For an OIDC domain, `--username` is ignored and the CLI prints the PKCE
@@ -182,19 +185,25 @@ temporary UDP session.
 Establish the persistent tunnel on Unix:
 
 ```console
-sudo openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
+sudo openiwan managed --domain iwan.example connect --username alice
 ```
 
 In elevated PowerShell:
 
 ```powershell
-openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
+openiwan managed --domain iwan.example connect --username alice
+```
+
+Managed authentication can also use route-free forwarding:
+
+```console
+openiwan managed --domain iwan.example forward --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
 ```
 
 For repeated use, create a non-secret profile and make it the default:
 
 ```console
-openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
+openiwan profile set work --domain iwan.example --username alice
 ```
 
 The first profile becomes the default automatically. Use

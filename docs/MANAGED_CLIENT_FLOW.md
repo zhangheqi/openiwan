@@ -282,24 +282,36 @@ application's responsibility.
 Inspect discovery:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier discover
+openiwan managed --domain iwan.example discover
 ```
 
 Complete login without creating TUN:
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier login --username alice
+openiwan managed --domain iwan.example login --username alice
 ```
 
 Establish the tunnel:
 
 ```console
-sudo openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
+sudo openiwan managed --domain iwan.example connect --username alice
 ```
 
 Windows users run the same connect command without `sudo` in an elevated
 PowerShell session. Extra `--route`, `--route-ip`, and `--route-domain` values
 augment the managed routing policy.
+
+Forward one fixed target through the managed connection without creating TUN
+or modifying host routes:
+
+```console
+openiwan managed --domain iwan.example forward --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
+```
+
+On first use the CLI generates an installation-wide UUID and persists it as
+the Device ID. All managed commands and newly created profiles reuse it
+automatically. `--device-id` is an optional override for preserving an
+existing controller enrollment; `managed discover` prints the effective ID.
 
 Credential passwords are read from `OPENIWAN_PASSWORD`, a protected
 `--password-file`, or a no-echo prompt. OIDC prints the authorization URL and
@@ -307,8 +319,9 @@ accepts the complete callback URL.
 
 ## CLI profiles and line selection
 
-The CLI persists only non-secret managed-client preferences. A profile contains
-the customer domain, device ID, optional username, and line preference.
+The CLI persists only non-secret managed-client preferences. State contains
+the generated installation Device ID, and each profile contains the customer
+domain, its effective Device ID, optional username, and line preference.
 Passwords, access tokens, refresh tokens, controller configurations, generated
 server credentials, and SR encryption keys are never written to the profile
 store. `managed login --remember` writes only the verified password or OIDC
@@ -342,7 +355,7 @@ revoked, or mismatched authentication fails instead of waiting on stdin.
 Create a profile:
 
 ```console
-openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
+openiwan profile set work --domain iwan.example --username alice
 ```
 
 `profile list`, `profile show`, `profile use`, `profile logout`, and `profile

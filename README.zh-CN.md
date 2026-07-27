@@ -148,18 +148,20 @@ openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.int
 
 ## 托管连接
 
-托管连接从客户域和设备标识开始。
+托管连接从客户域开始。OpeniWAN 首次使用时会生成安装级 UUID，后续稳定复用为
+Device ID，和官方 App 一样不需要用户填写。需要沿用控制器中已有的设备注册时，仍可用
+`--device-id` 显式覆盖。
 
 查询服务和认证方式：
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier discover
+openiwan managed --domain iwan.example discover
 ```
 
 完成认证和入口选择，但不创建 TUN：
 
 ```console
-openiwan managed --domain iwan.example --device-id device-identifier login --username alice
+openiwan managed --domain iwan.example login --username alice
 ```
 
 OIDC 域会忽略 `--username` 并输出 PKCE 授权地址；按提示粘贴完整回调 URL。密码域
@@ -168,19 +170,25 @@ OIDC 域会忽略 `--username` 并输出 PKCE 授权地址；按提示粘贴完�
 在 Unix 上建立持久隧道：
 
 ```console
-sudo openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
+sudo openiwan managed --domain iwan.example connect --username alice
 ```
 
 在管理员 PowerShell 中：
 
 ```powershell
-openiwan managed --domain iwan.example --device-id device-identifier connect --username alice
+openiwan managed --domain iwan.example connect --username alice
+```
+
+托管认证也可以直接使用不改路由的转发：
+
+```console
+openiwan managed --domain iwan.example forward --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
 ```
 
 重复使用时，可创建不含秘密信息的 profile，并将其设为默认：
 
 ```console
-openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
+openiwan profile set work --domain iwan.example --username alice
 ```
 
 首个 profile 会自动成为默认项；存在多个 profile 时用 `openiwan profile use NAME`

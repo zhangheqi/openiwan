@@ -18,6 +18,8 @@ static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[serde(deny_unknown_fields)]
 pub struct CliState {
     version: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
     #[serde(default)]
@@ -28,6 +30,7 @@ impl Default for CliState {
     fn default() -> Self {
         Self {
             version: STATE_VERSION,
+            device_id: String::new(),
             default_profile: None,
             profiles: BTreeMap::new(),
         }
@@ -41,6 +44,9 @@ impl CliState {
                 "unsupported CLI state version {}; expected {STATE_VERSION}",
                 self.version
             )));
+        }
+        if !self.device_id.is_empty() {
+            validate_device_id(&self.device_id, "generated device ID")?;
         }
         if let Some(name) = &self.default_profile
             && !self.profiles.contains_key(name)
@@ -85,11 +91,7 @@ impl ManagedProfile {
 
     pub fn validate(&self) -> Result<()> {
         validate_domain(&self.domain)?;
-        if self.device_id.trim().is_empty() || self.device_id.len() > 256 {
-            return Err(Error::InvalidConfig(
-                "profile device ID must contain 1..=256 characters".into(),
-            ));
-        }
+        validate_device_id(&self.device_id, "profile device ID")?;
         if self
             .username
             .as_ref()
@@ -147,6 +149,21 @@ impl StateStore {
 
     pub fn cache_directory(&self) -> PathBuf {
         self.directory.join("cache")
+    }
+
+    /// Return the installation-wide device ID, generating and persisting it
+    /// atomically on first use.
+    pub fn device_id(&self) -> Result<String> {
+        let state = self.load()?;
+        if !state.device_id.is_empty() {
+            return Ok(state.device_id);
+        }
+        self.update(|state| {
+            if state.device_id.is_empty() {
+                state.device_id = new_device_id()?;
+            }
+            Ok(state.device_id.clone())
+        })
     }
 
     pub fn load(&self) -> Result<CliState> {
@@ -277,6 +294,43 @@ fn new_credential_id() -> Result<String> {
             .map_err(|_| Error::Crypto("could not format credential identifier"))?;
     }
     Ok(identifier)
+}
+
+fn new_device_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| Error::Crypto("system randomness is unavailable"))?;
+    // RFC 9562 UUIDv4 version and variant bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-\
+         {:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
+}
+
+fn validate_device_id(device_id: &str, label: &str) -> Result<()> {
+    if device_id.trim().is_empty() || device_id.len() > 256 {
+        return Err(Error::InvalidConfig(format!(
+            "{label} must contain 1..=256 characters"
+        )));
+    }
+    Ok(())
 }
 
 fn default_state_directory() -> Result<PathBuf> {
@@ -536,6 +590,25 @@ mod tests {
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
         assert_eq!(profile.ensure_credential_id().unwrap(), identifier);
+    }
+
+    #[test]
+    fn device_identifier_is_created_lazily_and_remains_stable() {
+        let store = test_store("device-id");
+        let first = store.device_id().unwrap();
+        let second = store.device_id().unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 36);
+        assert_eq!(first.as_bytes()[8], b'-');
+        assert_eq!(first.as_bytes()[13], b'-');
+        assert_eq!(first.as_bytes()[14], b'4');
+        assert_eq!(first.as_bytes()[18], b'-');
+        assert!(matches!(first.as_bytes()[19], b'8' | b'9' | b'A' | b'B'));
+        assert_eq!(first.as_bytes()[23], b'-');
+        assert_eq!(store.load().unwrap().device_id, first);
+
+        fs::remove_dir_all(store.directory()).unwrap();
     }
 
     #[test]

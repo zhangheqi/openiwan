@@ -90,10 +90,11 @@ Unknown nested policy fields remain `serde_json::Value`. Traditional
 top-level `serverlist` and SR `sites` are mutually exclusive.
 
 The CLI state boundary is separate from controller configuration. It persists
-only non-secret profile metadata and a stable line preference. Controller
-payloads can contain generated passwords and SR keys, so they are intentionally
-kept in memory and never serialized into the profile store. State updates use
-an inter-process lock and atomic replacement.
+an automatically generated installation Device ID, non-secret profile
+metadata, and a stable line preference. Controller payloads can contain
+generated passwords and SR keys, so they are intentionally kept in memory and
+never serialized into the profile store. State updates use an inter-process
+lock and atomic replacement.
 
 Remembered authentication is a separate boundary implemented by
 `src/bin/openiwan/credentials.rs`. Passwords and OIDC refresh tokens are
@@ -108,6 +109,7 @@ authentication.
 `PacketDevice` is the data-plane boundary. `TunDevice` implements it with the
 `tun` crate and host route management. The optional `forward` feature
 implements it with bounded in-memory channels and a userspace TCP/IP stack.
+Both direct and managed authentication feed the same forward data plane.
 
 Because NETMASK is not applied to the active session, host integration uses
 host prefixes (`/32` for IPv4 and `/128` for IPv6).

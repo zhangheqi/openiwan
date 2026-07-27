@@ -204,14 +204,14 @@ struct DecodeArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedArgs {
-    /// Persistent profile. When domain and device ID are omitted, the default
-    /// profile is used.
+    /// Persistent profile. When the domain is omitted, the default profile is
+    /// used.
     #[arg(long)]
     profile: Option<String>,
     /// Customer domain resolved through the production lookup service.
     #[arg(long)]
     domain: Option<String>,
-    /// Controller device identifier.
+    /// Override the automatically generated, installation-wide device ID.
     #[arg(long)]
     device_id: Option<String>,
     /// Directory for the seven-day lookup cache.
@@ -233,6 +233,10 @@ enum ManagedCommand {
     Login(ManagedLoginArgs),
     /// Complete login and establish the persistent VPN tunnel.
     Connect(ManagedConnectArgs),
+    /// Complete managed login and forward one TCP or HTTP(S) target without
+    /// creating a TUN interface.
+    #[cfg(feature = "forward")]
+    Forward(ManagedForwardArgs),
     /// Authenticate, probe every selectable line, and optionally save one.
     Lines(ManagedLinesArgs),
 }
@@ -286,6 +290,15 @@ struct ManagedConnectArgs {
     routes: RouteArgs,
 }
 
+#[cfg(all(feature = "managed", feature = "forward"))]
+#[derive(Debug, Args)]
+struct ManagedForwardArgs {
+    #[command(flatten)]
+    login: ManagedLoginArgs,
+    #[command(flatten)]
+    forward: ForwardOptions,
+}
+
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedLinesArgs {
@@ -321,7 +334,8 @@ enum ProfileCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Create or update a profile. New profiles require domain and device ID.
+    /// Create or update a profile. New profiles require a domain; Device ID is
+    /// generated automatically unless overridden.
     Set(ProfileSetArgs),
     /// Select the default profile used by `openiwan managed`.
     Use { name: String },
@@ -337,6 +351,7 @@ struct ProfileSetArgs {
     name: String,
     #[arg(long)]
     domain: Option<String>,
+    /// Override the installation-wide Device ID for this profile.
     #[arg(long)]
     device_id: Option<String>,
     #[arg(long, conflicts_with = "clear_username")]
@@ -451,6 +466,20 @@ fn run_forward(
     arguments: &ForwardOptions,
     configured_dns_servers: &[IpAddr],
 ) -> Result<()> {
+    let config = build_forward_config(arguments, configured_dns_servers)?;
+    let session = client.authenticate()?;
+    print_session(session.info());
+    let shutdown = install_shutdown_handler()?;
+    let end = forward::run(client, session, config, shutdown)?;
+    println!("session ended: {end:?}");
+    Ok(())
+}
+
+#[cfg(feature = "forward")]
+fn build_forward_config(
+    arguments: &ForwardOptions,
+    configured_dns_servers: &[IpAddr],
+) -> Result<forward::ForwardConfig> {
     let mut dns_servers = arguments.dns_servers.clone();
     if dns_servers.is_empty() {
         dns_servers.extend(
@@ -465,19 +494,13 @@ fn run_forward(
         dns_servers,
         Duration::from_millis(arguments.dns_timeout_ms),
     )?;
-    let config = forward::ForwardConfig::new(
+    forward::ForwardConfig::new(
         arguments.listen,
         &arguments.target,
         dns,
         arguments.ca_certificates.clone(),
         Duration::from_millis(arguments.connect_timeout_ms),
-    )?;
-    let session = client.authenticate()?;
-    print_session(session.info());
-    let shutdown = install_shutdown_handler()?;
-    let end = forward::run(client, session, config, shutdown)?;
-    println!("session ended: {end:?}");
-    Ok(())
+    )
 }
 
 #[cfg(feature = "managed")]
@@ -501,7 +524,7 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
     let client = DomainClient::new(cache_directory);
     let discovered = client.discover(&context.domain, &context.device_id)?;
     match arguments.action {
-        ManagedCommand::Discover => print_discovery(&discovered),
+        ManagedCommand::Discover => print_discovery(&discovered, &context.device_id),
         ManagedCommand::Login(login) => {
             let line = context.line.clone();
             let prepared = prepare_managed(
@@ -528,6 +551,21 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
             )?;
             print_prepared(&prepared);
             run_managed_client(prepared, connect.tun.as_deref(), &connect.routes)?;
+        }
+        #[cfg(feature = "forward")]
+        ManagedCommand::Forward(forward) => {
+            let line = context.line.clone();
+            let prepared = prepare_managed(
+                &client,
+                &discovered,
+                store,
+                &mut context,
+                &forward.login,
+                &line,
+                Duration::from_millis(arguments.ping_timeout_ms),
+            )?;
+            print_prepared(&prepared);
+            run_managed_forward(&prepared, &forward.forward)?;
         }
         ManagedCommand::Lines(lines) => {
             // A stale saved preference must not prevent the recovery command
@@ -563,11 +601,11 @@ fn resolve_managed_context(
     store: &state::StateStore,
 ) -> Result<ManagedContext> {
     let persisted = store.load()?;
-    let explicit_endpoint = arguments.domain.is_some() || arguments.device_id.is_some();
+    let explicit_domain = arguments.domain.is_some();
     let profile_name = if let Some(name) = &arguments.profile {
         state::validate_profile_name(name)?;
         Some(name.clone())
-    } else if !explicit_endpoint {
+    } else if !explicit_domain {
         persisted.default_profile.clone()
     } else {
         None
@@ -581,32 +619,18 @@ fn resolve_managed_context(
         })
         .transpose()?;
 
-    if arguments.profile.is_none()
-        && explicit_endpoint
-        && (arguments.domain.is_none() || arguments.device_id.is_none())
-    {
-        return Err(Error::InvalidConfig(
-            "--domain and --device-id must be provided together".into(),
-        ));
-    }
     let domain = arguments
         .domain
         .clone()
         .or_else(|| profile.as_ref().map(|profile| profile.domain.clone()))
         .ok_or_else(|| {
-            Error::InvalidConfig(
-                "--domain and --device-id are required when no default profile exists".into(),
-            )
+            Error::InvalidConfig("--domain is required when no default profile exists".into())
         })?;
     let device_id = arguments
         .device_id
         .clone()
         .or_else(|| profile.as_ref().map(|profile| profile.device_id.clone()))
-        .ok_or_else(|| {
-            Error::InvalidConfig(
-                "--domain and --device-id are required when no default profile exists".into(),
-            )
-        })?;
+        .map_or_else(|| store.device_id(), Ok)?;
     openiwan::managed::validate_domain(&domain)?;
     if device_id.trim().is_empty() {
         return Err(Error::InvalidConfig("device ID must not be empty".into()));
@@ -672,6 +696,11 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
     let name = arguments.name.clone();
     state::validate_profile_name(&name)?;
     let existing = store.load()?.profiles.get(&name).cloned();
+    let generated_device_id = if existing.is_none() && arguments.device_id.is_none() {
+        Some(store.device_id()?)
+    } else {
+        None
+    };
     let authentication_changed = existing.as_ref().is_some_and(|profile| {
         arguments
             .domain
@@ -703,9 +732,11 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
             let domain = arguments.domain.clone().ok_or_else(|| {
                 Error::InvalidConfig("--domain is required for a new profile".into())
             })?;
-            let device_id = arguments.device_id.clone().ok_or_else(|| {
-                Error::InvalidConfig("--device-id is required for a new profile".into())
-            })?;
+            let device_id = arguments
+                .device_id
+                .clone()
+                .or_else(|| generated_device_id.clone())
+                .expect("generated above for a new profile");
             state::ManagedProfile::new(domain, device_id)?
         };
         if let Some(domain) = &arguments.domain {
@@ -1049,6 +1080,19 @@ fn run_managed_client(
 
     let shutdown = install_shutdown_handler()?;
     let end = client.run_reconnecting_from(session, device, shutdown)?;
+    println!("session ended: {end:?}");
+    Ok(())
+}
+
+#[cfg(all(feature = "managed", feature = "forward"))]
+fn run_managed_forward(prepared: &PreparedConnection, arguments: &ForwardOptions) -> Result<()> {
+    let client = prepared.client()?;
+    let session = client.authenticate()?;
+    print_session(session.info());
+    let dns_servers = effective_managed_dns(prepared, session.info())?;
+    let config = build_forward_config(arguments, &dns_servers)?;
+    let shutdown = install_shutdown_handler()?;
+    let end = forward::run(client, session, config, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
@@ -1435,8 +1479,9 @@ fn load_stored_credential(
 }
 
 #[cfg(feature = "managed")]
-fn print_discovery(discovered: &DiscoveredDomain) {
+fn print_discovery(discovered: &DiscoveredDomain, device_id: &str) {
     println!("domain: {}", discovered.active_domain());
+    println!("device ID: {device_id}");
     println!("lookup type: {}", discovered.lookup.service_type.as_str());
     println!(
         "lookup source: {}",
@@ -1743,6 +1788,17 @@ fn init_logging(verbosity: u8) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "managed")]
+    fn test_state_store(name: &str) -> state::StateStore {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        state::StateStore::new(Some(std::env::temp_dir().join(format!(
+            "openiwan-cli-test-{}-{name}-{counter}",
+            std::process::id()
+        ))))
+        .unwrap()
+    }
+
     #[test]
     fn hex_decoder_accepts_capture_formats() {
         assert_eq!(decode_hex("11:22 aa-bb").unwrap(), [0x11, 0x22, 0xaa, 0xbb]);
@@ -1817,6 +1873,88 @@ mod tests {
                 && username == "alice"
                 && version == 2
         ));
+    }
+
+    #[cfg(all(feature = "managed", feature = "forward"))]
+    #[test]
+    fn parses_managed_forward_command() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "managed",
+            "--domain",
+            "iwan.ustc",
+            "forward",
+            "--username",
+            "alice",
+            "--target",
+            "tcp://db.internal.example:5432",
+            "--listen",
+            "127.0.0.1:9543",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Managed(ManagedArgs {
+                domain,
+                device_id: None,
+                action: ManagedCommand::Forward(ManagedForwardArgs {
+                    login: ManagedLoginArgs {
+                        username: Some(username),
+                        ..
+                    },
+                    forward: ForwardOptions { target, listen, .. },
+                }),
+                ..
+            }) if domain.as_deref() == Some("iwan.ustc")
+                && username == "alice"
+                && target == "tcp://db.internal.example:5432"
+                && listen == "127.0.0.1:9543".parse().unwrap()
+        ));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn managed_context_generates_and_reuses_device_id() {
+        let store = test_state_store("context-device-id");
+        let arguments = ManagedArgs {
+            profile: None,
+            domain: Some("iwan.example".into()),
+            device_id: None,
+            cache_dir: None,
+            ping_timeout_ms: 2_000,
+            action: ManagedCommand::Discover,
+        };
+
+        let first = resolve_managed_context(&arguments, &store).unwrap();
+        let second = resolve_managed_context(&arguments, &store).unwrap();
+        assert_eq!(first.device_id, second.device_id);
+        assert_eq!(first.device_id, store.load().unwrap().device_id);
+
+        fs::remove_dir_all(store.directory()).unwrap();
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn new_profile_uses_generated_device_id() {
+        let store = test_state_store("profile-device-id");
+        set_profile(
+            ProfileSetArgs {
+                name: "work".into(),
+                domain: Some("iwan.example".into()),
+                device_id: None,
+                username: Some("alice".into()),
+                clear_username: false,
+                line: None,
+            },
+            &store,
+        )
+        .unwrap();
+
+        let state = store.load().unwrap();
+        assert!(!state.device_id.is_empty());
+        assert_eq!(state.profiles["work"].device_id, state.device_id);
+
+        fs::remove_dir_all(store.directory()).unwrap();
     }
 
     #[cfg(feature = "managed")]

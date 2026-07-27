@@ -11,8 +11,8 @@ const MINIMUM_PAYLOAD_LENGTH: usize = NONCE_LENGTH + TAG_LENGTH + 1;
 
 /// Decrypt a controller-generated `SaaS` ingress password.
 ///
-/// The recovered client selects the controller secret from the controller app
-/// ID saved during lookup. The AES-256 key is SHA-256 over the UTF-8 string
+/// The controller secret is selected by the app ID saved during lookup. The
+/// AES-256 key is SHA-256 over the UTF-8 string
 /// `secret|complete_domain|username`. The standard Base64 payload is
 /// `nonce[12] || ciphertext || tag[16]`; AES-GCM authenticates the UTF-8 AAD
 /// `complete_domain|username`.
@@ -94,7 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decrypts_recovered_saas_payload_layout() {
+    fn decrypts_saas_payload_layout() {
         let encoded = encrypt_for_test(
             "controller-example",
             "example.test",

@@ -332,8 +332,8 @@ impl<T: HttpTransport> DomainClient<T> {
                 },
             )?
         } else {
-            // The recovered credential path uses the controller-provided
-            // serverlist endpoint. `/config` belongs to the OIDC path.
+            // The credential path uses the controller-provided serverlist
+            // endpoint. `/config` belongs to the OIDC path.
             fetch_serverlist(&domain.lookup, self.lookup.transport())?
         };
         configuration.enforce_device_binding()?;
@@ -456,8 +456,8 @@ fn ping_endpoint(endpoint: &str, timeout: Duration) -> Result<(SocketAddr, Durat
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| Error::InvalidConfig("server resolved to no address".into()))?;
-    // Android launches three independent PING_REQUEST probes and uses the
-    // lowest successful RTT. Failed probes do not discard successful ones.
+    // Launch three independent PING_REQUEST probes and use the lowest
+    // successful RTT. Failed probes do not discard successful ones.
     let latency = thread::scope(|scope| {
         let attempts = (0..3)
             .map(|_| scope.spawn(move || client::ping(address, timeout)))
@@ -879,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn sr_sanitizer_matches_recovered_mtu_crypto_keepalive_and_local_id_rules() {
+    fn sr_sanitizer_applies_mtu_crypto_keepalive_and_local_id_rules() {
         let configuration = controller_configuration(serde_json::json!({
             "sites": [{
                 "id": 9,

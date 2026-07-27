@@ -197,7 +197,7 @@ struct ManagedArgs {
     /// Confirm that the user granted privacy/network access.
     #[arg(long)]
     consent: bool,
-    /// Directory for the recovered seven-day lookup cache.
+    /// Directory for the seven-day lookup cache.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
     /// Timeout for each UDP ingress probe.
@@ -230,7 +230,7 @@ struct ManagedLoginArgs {
     /// Read the first password line from this mode-0600 file.
     #[arg(long)]
     password_file: Option<PathBuf>,
-    /// OIDC redirect URI registered by the original Android client.
+    /// OIDC redirect URI registered for this client.
     #[arg(long, default_value = "com.panabit.mobile://oauth2redirect")]
     redirect_uri: String,
     /// JSON array containing locally evaluated posture check results.
@@ -345,12 +345,12 @@ fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
 fn run_forward(
     client: Client,
     arguments: &ForwardOptions,
-    provider_dns_servers: &[IpAddr],
+    configured_dns_servers: &[IpAddr],
 ) -> Result<()> {
     let mut dns_servers = arguments.dns_servers.clone();
     if dns_servers.is_empty() {
         dns_servers.extend(
-            provider_dns_servers
+            configured_dns_servers
                 .iter()
                 .copied()
                 .map(|address| SocketAddr::new(address, 53)),
@@ -520,7 +520,7 @@ fn valid_filter_cidrs(values: &[String]) -> Vec<String> {
             if valid {
                 Some(value.clone())
             } else {
-                tracing::warn!(rule = %value, "ignoring invalid recovered IP-filter rule");
+                tracing::warn!(rule = %value, "ignoring invalid IP-filter rule");
                 None
             }
         })

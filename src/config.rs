@@ -47,7 +47,7 @@ impl Default for ReconnectPolicy {
     }
 }
 
-/// Runtime SR path selected from an Android-compatible controller entry.
+/// Runtime segment-routing path selected from a controller entry.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SegmentRoutingConfig {
@@ -59,7 +59,7 @@ pub struct SegmentRoutingConfig {
     #[serde(default)]
     pub encrypt_key: String,
     pub links: Vec<u32>,
-    /// Runtime-only value. The serialized Android `SREntry` does not contain it.
+    /// Runtime-only value that is not part of the serialized `SREntry`.
     #[serde(skip)]
     pub local_sr_id: Option<u32>,
 }
@@ -108,7 +108,7 @@ impl SegmentRoutingConfig {
     }
 }
 
-/// Android iWAN 2.3.0 data-plane settings.
+/// iWAN data-plane settings.
 ///
 /// Authentication and heartbeat timing are protocol constants rather than
 /// deployment knobs. Passwords are passed separately to [`crate::Client::new`].
@@ -187,7 +187,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minimal_configuration_has_only_confirmed_protocol_knobs() {
+    fn minimal_configuration_uses_protocol_defaults() {
         let config: ClientConfig = toml::from_str("server = \"127.0.0.1:6001\"").unwrap();
         assert_eq!(config.mtu, 1400);
         assert_eq!(config.encryption, EncryptionMethod::Xor);

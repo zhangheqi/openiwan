@@ -11,27 +11,35 @@ contribution policy.
   boundaries, and extension points
 - [Managed Client Flow](MANAGED_CLIENT_FLOW.md) — lookup, auth selection, OIDC,
   `/config`, posture, ingress selection, and keepalive contracts
-- [iWAN Android 2.3.0 Protocol](IWAN_PROTOCOL_2_3_0.md) — traditional, SR,
-  controller, and keepalive quick reference
-- [Reverse-Engineering Evidence and Limitations](REVERSE_ENGINEERING.md) —
-  analyzed artifacts, evidence levels, reproducibility, and unknowns
+- [Protocol Reference](PROTOCOL.md) — traditional, SR, controller, and
+  keepalive wire contracts
+- [Protocol Provenance](PROTOCOL_PROVENANCE.md) — interoperability evidence,
+  reproducibility, and unresolved details
 - [Security Policy](../SECURITY.md) — supported versions and private reporting
 - [Contributing](../CONTRIBUTING.md) — development workflow and evidence
   requirements
 
 ## Documentation Principles
 
-1. Separate observed facts from inference.
-2. Name the client version and evidence level behind every protocol claim.
+1. Describe the supported contract rather than implementation history.
+2. Record protocol evidence in the provenance document.
 3. Use synthetic examples; never publish credentials or private captures.
-4. State compatibility boundaries prominently.
-5. Keep commands copyable and avoid environment-specific assumptions.
+4. State protocol and security boundaries prominently.
+5. Keep commands single-line or provide explicit POSIX and PowerShell forms.
 6. Update the English source before updating translated README files.
 7. Keep deployment-specific names and parameters out of the repository unless
    they are part of a reproducible evidence record.
 
 API documentation is generated from the Rust source:
 
-```bash
+POSIX shell:
+
+```console
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --open
+```
+
+PowerShell:
+
+```powershell
+$env:RUSTDOCFLAGS = "-D warnings"; cargo doc --no-deps --all-features --open; Remove-Item Env:RUSTDOCFLAGS
 ```

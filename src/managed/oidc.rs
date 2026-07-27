@@ -325,7 +325,7 @@ fn extract_username(claims: &Value) -> Result<String> {
         }
     }
     Err(Error::Oidc(
-        "ID token does not contain a recovered username claim".into(),
+        "ID token does not contain a supported username claim".into(),
     ))
 }
 
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn performs_recovered_pkce_oidc_exchange() {
+    fn performs_pkce_oidc_exchange() {
         let oidc = oidc();
         let transport = MockTransport::default();
         let pending = begin(&oidc).unwrap();
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn username_claims_match_recovered_precedence() {
+    fn username_claims_follow_protocol_precedence() {
         assert_eq!(
             extract_username(&serde_json::json!({
                 "preferred_username": "preferred",
@@ -488,7 +488,7 @@ mod tests {
             .unwrap(),
             "person@example.test"
         );
-        assert!(extract_username(&serde_json::json!({"name": "speculative"})).is_err());
+        assert!(extract_username(&serde_json::json!({"name": "Display Name"})).is_err());
     }
 
     #[test]

@@ -46,8 +46,8 @@ pub(crate) struct ConfigParameters<'a> {
 
 /// Dynamically decoded `/config` response.
 ///
-/// The Android/Flutter artifacts do not retain one authoritative aggregate
-/// response schema, so callers must interpret deployment-specific members.
+/// Callers can inspect the raw object for deployment-specific members while
+/// using typed accessors for the protocol-defined configuration.
 #[derive(Clone)]
 pub struct ControllerConfiguration {
     raw: Value,
@@ -145,11 +145,10 @@ impl ControllerConfiguration {
         self.raw.get("ipfilter")
     }
 
-    /// Decode the recovered IP-filter cache format.
+    /// Decode the IP-filter cache format.
     ///
     /// The version belongs to the outer object while rules may be nested in
-    /// an `ipfilter` member. Empty and non-string rules are ignored, matching
-    /// the Android parser.
+    /// an `ipfilter` member. Empty and non-string rules are ignored.
     pub fn ip_filter(&self) -> Result<Option<IpFilterConfiguration>> {
         let Some(raw) = self.ip_filter_raw() else {
             return Ok(None);
@@ -265,7 +264,7 @@ impl ControllerConfiguration {
         }))
     }
 
-    /// Routes that the recovered Android backend installs in `custom` mode.
+    /// Routes installed in `custom` mode.
     ///
     /// Other modes need platform VPN exclusion semantics and are therefore
     /// represented by [`Self::routing`] instead of being silently flattened
@@ -338,9 +337,8 @@ impl ControllerConfiguration {
     }
 
     pub fn server_credentials(&self) -> Result<HashMap<String, ServerCredentials>> {
-        // The controller response embeds generated OIDC credentials in each
-        // line. Flutter removes them from the public ServerInfo model and
-        // constructs the native backend's `server_credentials` array.
+        // The controller response embeds generated credentials in each server
+        // entry. Keep them separate from public server metadata.
         let servers = match self.raw.get("serverlist") {
             Some(Value::Array(servers)) => Some(servers),
             Some(Value::Object(serverlist)) => {
@@ -639,9 +637,8 @@ impl ServerInfo {
     }
 
     pub fn endpoint(&self) -> String {
-        // Android's server manager resolves and pings `serverName`. The
-        // optional `ip` is retained as controller metadata and must not
-        // replace the ingress host here.
+        // `serverName` is the ingress host. The optional `ip` remains
+        // controller metadata and does not replace it.
         let host = &self.server_name;
         if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]:{}", self.server_port)
@@ -819,7 +816,7 @@ fn exact_https_endpoint(name: &str, endpoint: &str) -> Result<String> {
     Ok(endpoint.to_owned())
 }
 
-/// Confirmed nine-field Android `SREntry` serializer.
+/// Nine-field segment-routing entry returned by the controller.
 #[derive(Clone, Deserialize)]
 pub struct SrEntry {
     pub id: i32,
@@ -836,7 +833,7 @@ pub struct SrEntry {
     pub ip: String,
     pub ingress: SrIngress,
     pub path: SrPath,
-    /// Runtime-only identifier assigned by the recovered SR sanitizer.
+    /// Runtime-only identifier assigned during SR validation.
     #[serde(skip)]
     pub local_sr_id: Option<u32>,
 }
@@ -941,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn config_request_matches_confirmed_aot_contract() {
+    fn config_request_matches_protocol_contract() {
         let transport = MockTransport {
             request: Mutex::new(None),
         };
@@ -1027,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_confirmed_sr_entry_shape() {
+    fn decodes_sr_entry_shape() {
         let entry: SrEntry = serde_json::from_value(serde_json::json!({
             "id": 1,
             "name": "line",
@@ -1054,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn sr_entry_defaults_match_android_serializer() {
+    fn sr_entry_defaults_match_wire_schema() {
         let entry: SrEntry = serde_json::from_value(serde_json::json!({
             "id": 1,
             "ip": "192.0.2.10",
@@ -1075,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_android_serverlist_and_credentials() {
+    fn parses_serverlist_and_credentials() {
         let encrypted_password = crate::managed::password::encrypt_for_test(
             "controller-example",
             "example.test",
@@ -1176,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn android_server_parser_accepts_negative_ids_except_minus_one() {
+    fn server_parser_accepts_negative_ids_except_minus_one() {
         let configuration = ControllerConfiguration::from_raw(serde_json::json!({
             "serverlist": [
                 {
@@ -1199,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn recovered_device_binding_codes_block_login_and_connect() {
+    fn device_binding_codes_block_login_and_connect() {
         for (raw, expected) in [
             (serde_json::json!(8000), DeviceBindingStatus::Pending),
             (
@@ -1228,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_unknown_device_binding_status_does_not_invent_a_gate() {
+    fn absent_or_unknown_device_binding_status_is_allowed() {
         ControllerConfiguration::from_raw(serde_json::json!({}))
             .enforce_device_binding()
             .unwrap();
@@ -1240,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_recovered_routing_modes_and_custom_routes() {
+    fn parses_routing_modes_and_custom_routes() {
         let configuration = ControllerConfiguration::from_raw(serde_json::json!({
             "routing": {
                 "mode": "custom",
@@ -1307,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_recovered_domain_filter_shape() {
+    fn parses_domain_filter_shape() {
         let configuration = ControllerConfiguration::from_raw(serde_json::json!({
             "domainfilter": {
                 "version": "v3",
@@ -1358,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_confirmed_sr_group_shape() {
+    fn parses_sr_group_shape() {
         let encrypted_password = crate::managed::password::encrypt_for_test(
             "controller-example",
             "example.test",

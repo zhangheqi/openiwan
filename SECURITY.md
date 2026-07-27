@@ -49,8 +49,8 @@ Reports are especially useful for:
 - OIDC callback, token, or controller-configuration validation failures
 - lookup cache poisoning, permission, or canonical-domain validation failures
 
-The use of MD5, repeating XOR, and AES-ECB is a known property of the legacy
-iWAN compatibility protocol. A report should demonstrate an implementation
+The use of MD5, repeating XOR, and AES-ECB is a known property of the iWAN
+wire protocol. A report should demonstrate an implementation
 issue beyond those documented protocol limitations.
 
 ## Protocol Limitations
@@ -74,24 +74,20 @@ directory because controller addresses and customer-domain metadata may still
 be sensitive. Do not attach callback URLs, tokens, credentials, caches, or
 controller responses to public reports.
 
-The Android 2.3.0 compatibility target embeds platform-wide lookup
-credentials and a controller-app-ID secret-selection rule used to sign lookup
-controller-auth, and controller-config requests. OpeniWAN must carry the same
-recovered values and derivation for wire compatibility. They are distributed
-client constants, not confidential per-user credentials, and servers must not
-treat possession of them as proof of a trusted device or official client.
-OIDC `/config` uses both the recovered `X-Auth-*` headers and its Bearer token.
+The protocol uses platform-wide lookup credentials and a controller-app-ID
+secret-selection rule to sign lookup, controller-auth, and controller-config
+requests. These are distributed client constants, not confidential per-user
+credentials. Servers must not treat possession of them as proof of a trusted
+device. OIDC `/config` uses both `X-Auth-*` headers and a Bearer token.
 
-The recovered AppAuth service-configuration path uses controller-supplied
-authorization and token endpoints directly. OpeniWAN checks callback state,
-redirect URI, PKCE, and ID-token nonce, but does not add a mandatory discovery
-or JWKS request absent from that recovered path. Authenticity therefore
-depends on the HTTPS controller configuration and token endpoint, as it does
-in the compatibility target.
+OpeniWAN uses controller-supplied authorization and token endpoints directly.
+It checks callback state, redirect URI, PKCE, and ID-token nonce, but does not
+perform a mandatory discovery or JWKS request. Authenticity therefore depends
+on the HTTPS controller configuration and token endpoint.
 
 ## Windows TUN deployment
 
-The official Wintun 0.14.1 x86_64 and ARM64 binaries and their prebuilt-binary
+The upstream Wintun 0.14.1 x86_64 and ARM64 binaries and their prebuilt-binary
 license are distributed with the crate. Only the active architecture is
 embedded in an executable. Before each load, OpeniWAN validates the versioned
 LocalAppData cache against the embedded size and SHA-256; replacement uses an
@@ -154,7 +150,7 @@ For raw TCP, application-level confidentiality, integrity, and server
 authentication remain the responsibility of the local client and target
 service; end-to-end TLS passes through unchanged when those endpoints use it.
 For an HTTPS target, the proxy's upstream TLS protects the HTTP payload. HTTP
-and non-TLS TCP targets receive no such protection from the legacy iWAN data
+and non-TLS TCP targets receive no such protection from the iWAN data
 plane, which does not add modern authenticated encryption. Destination
 metadata and traffic patterns remain visible to the iWAN transport. Only the
 outer iWAN UDP socket necessarily uses the host's existing routes and may be

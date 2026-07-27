@@ -11,7 +11,8 @@ configuration names, and URLs.
 
 ## Before You Start
 
-- Use the issue tracker for bugs, feature proposals, and compatibility reports.
+- Use the issue tracker for bugs, feature proposals, and interoperability
+  reports.
 - Use the private process in [SECURITY.md](SECURITY.md) for vulnerabilities.
 - Keep discussions and technical documentation in English so contributors can
   review one canonical record.
@@ -19,19 +20,32 @@ configuration names, and URLs.
 
 For a substantial protocol or architecture change, open an issue before
 writing the implementation. This gives maintainers and other contributors a
-chance to agree on evidence, scope, and compatibility expectations.
+chance to agree on evidence, scope, and interoperability expectations.
 
 ## Development Setup
 
 The minimum supported Rust version is 1.88. Current stable Rust is recommended
 for development.
 
-```bash
-cargo test --all-targets --all-features
+The first four commands work in POSIX shells and PowerShell:
+
+```console
+cargo test --all-targets --all-features --locked
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-cargo package
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo package --locked
+```
+
+Generate API documentation in a POSIX shell:
+
+```console
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
+```
+
+In PowerShell:
+
+```powershell
+$env:RUSTDOCFLAGS = "-D warnings"; cargo doc --no-deps --all-features --locked; Remove-Item Env:RUSTDOCFLAGS
 ```
 
 Changes should pass these commands on Linux, macOS, and Windows when they
@@ -44,7 +58,7 @@ and prompt shutdown on both IPv4 and IPv6.
 A focused pull request is easier to review and safer to merge. Please include:
 
 1. the problem being solved
-2. the compatibility target and affected platform
+2. the protocol surface and affected platform
 3. tests for the new or changed behavior
 4. documentation for user-visible or wire-level changes
 5. security and cleanup implications
@@ -53,24 +67,23 @@ Avoid unrelated formatting or refactoring in the same pull request.
 
 ## Protocol Evidence
 
-Wire-level changes require more than a plausible implementation. State the
-evidence level described in
-[docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md) and provide the
-smallest reproducible synthetic example.
+Wire-level changes require more than a plausible implementation. Follow
+[Protocol Provenance](docs/PROTOCOL_PROVENANCE.md) and provide the smallest
+reproducible synthetic example.
 
 Acceptable contributions may include:
 
 - independently observed constants or control flow
-- synthetic packets and local compatibility endpoints
+- synthetic packets and local interoperability endpoints
 - redacted traces from an endpoint the contributor is authorized to test
 - interoperability results that include the exact client/server versions
 
 Do not submit:
 
 - credentials, tokens, private controller responses, or unredacted captures
-- proprietary binaries, decompiled source, vendor assets, or copyrighted
+- proprietary binaries, non-redistributable source or assets, or copyrighted
   documentation
-- claims of compatibility based only on symbol names or speculation
+- unsupported claims based only on symbol names or intuition
 
 Describe uncertainty explicitly. A well-documented unknown is preferable to
 an unverified implementation presented as complete.
@@ -84,23 +97,23 @@ The root README may be translated using the `README.<locale>.md` naming
 convention. A translation should:
 
 - link back to `README.md`
-- preserve security warnings and compatibility boundaries
+- preserve security warnings and interoperability boundaries
 - avoid adding claims absent from the English source
 - be updated when the canonical README changes materially
 
-## Provider-specific Material
+## Deployment-specific Material
 
 Keep general code, tests, examples, and documentation independent of a
 particular deployment. Use neutral identifiers, reserved example addresses, and
-placeholder domains when illustrating provider behavior.
+placeholder domains in examples.
 
 Organization domains, private service or resolver addresses, branded operating
 instructions, and deployment-only mappings belong in external documentation or
 an accurate provenance record, never in runtime defaults.
 
-Provider-specific details must remain configurable rather than becoming
-runtime defaults. Necessary Panabit protocol attribution and compatibility
-terminology are not deployment-specific.
+Deployment-specific details must remain configurable rather than becoming
+runtime defaults. Necessary Panabit protocol attribution and iWAN terminology
+are not deployment-specific.
 
 ## Code Style
 

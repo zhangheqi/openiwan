@@ -9,9 +9,9 @@ pub const MAX_FRAGMENT_OFFSET: u16 = 0x1fff;
 pub const MAX_FRAGMENT_LENGTH: u16 = 0x07ff;
 pub const MAX_REASSEMBLED_PACKET: usize = 8192;
 
-const LEGACY_TIMEOUT: Duration = Duration::from_millis(100);
-const LEGACY_MAX_GROUPS: usize = 256;
-const SR_TIMEOUT: Duration = Duration::from_millis(2000);
+const TRADITIONAL_TIMEOUT: Duration = Duration::from_millis(100);
+const TRADITIONAL_MAX_GROUPS: usize = 256;
+const SR_TIMEOUT: Duration = Duration::from_secs(2);
 const SR_MAX_GROUPS: usize = 16;
 const SR_MAX_BUFFERED_BYTES: usize = 262_144;
 
@@ -121,19 +121,19 @@ enum FragmentIdEndian {
 }
 
 #[derive(Debug)]
-struct LegacyPending {
+struct TraditionalPending {
     created: Instant,
     fragment: Fragment,
 }
 
-/// APK-compatible traditional reassembly: exactly two fragments, ordered only
-/// by EOP, with a 100 ms matching window.
+/// Traditional two-fragment reassembly, ordered by EOP, with a 100 ms
+/// matching window.
 #[derive(Debug, Default)]
-pub struct LegacyFragmentReassembler {
-    groups: HashMap<u32, LegacyPending>,
+pub struct TraditionalFragmentReassembler {
+    groups: HashMap<u32, TraditionalPending>,
 }
 
-impl LegacyFragmentReassembler {
+impl TraditionalFragmentReassembler {
     pub fn clear(&mut self) {
         self.groups.clear();
     }
@@ -145,7 +145,7 @@ impl LegacyFragmentReassembler {
     pub fn purge_expired(&mut self, now: Instant) {
         self.groups.retain(|_, pending| {
             now.checked_duration_since(pending.created)
-                .is_none_or(|age| age <= LEGACY_TIMEOUT)
+                .is_none_or(|age| age <= TRADITIONAL_TIMEOUT)
         });
     }
 
@@ -159,7 +159,7 @@ impl LegacyFragmentReassembler {
             if first.fragment.end_of_packet == fragment.end_of_packet {
                 self.groups.insert(
                     fragment.id,
-                    LegacyPending {
+                    TraditionalPending {
                         created: now,
                         fragment,
                     },
@@ -185,7 +185,7 @@ impl LegacyFragmentReassembler {
             return Ok(Some(packet));
         }
 
-        if self.groups.len() >= LEGACY_MAX_GROUPS
+        if self.groups.len() >= TRADITIONAL_MAX_GROUPS
             && let Some(oldest) = self
                 .groups
                 .iter()
@@ -196,7 +196,7 @@ impl LegacyFragmentReassembler {
         }
         self.groups.insert(
             fragment.id,
-            LegacyPending {
+            TraditionalPending {
                 created: now,
                 fragment,
             },
@@ -212,7 +212,7 @@ struct SrFragmentGroup {
     buffered_bytes: usize,
 }
 
-/// Offset-aware bounded SR reassembler recovered from the Android client.
+/// Offset-aware bounded SR fragment reassembler.
 #[derive(Debug, Default)]
 pub struct SrFragmentReassembler {
     groups: HashMap<u32, SrFragmentGroup>,
@@ -337,7 +337,7 @@ impl SrFragmentReassembler {
     }
 }
 
-/// Build the exact two SR fragments emitted by the APK.
+/// Split an SR payload into the protocol-defined pair of fragments.
 pub fn fragment_sr_packet(packet: &[u8], payload_mtu: usize, id: u32) -> Result<[Fragment; 2]> {
     if payload_mtu == 0
         || payload_mtu > usize::from(MAX_FRAGMENT_LENGTH)
@@ -434,9 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_reassembly_ignores_offsets_and_uses_eop_order() {
+    fn traditional_reassembly_ignores_offsets_and_uses_eop_order() {
         let now = Instant::now();
-        let mut queue = LegacyFragmentReassembler::default();
+        let mut queue = TraditionalFragmentReassembler::default();
         assert!(
             queue
                 .insert(fragment(1, 999, true, b"tail"), now)

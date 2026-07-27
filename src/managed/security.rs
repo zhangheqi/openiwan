@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_secret_follows_the_recovered_selector() {
+    fn controller_secret_follows_app_id_selector() {
         assert_eq!(
             controller_secret("saas-panabit").unwrap(),
             "def456_secret_for_android"
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_credentials_are_redacted() {
+    fn platform_credentials_are_redacted() {
         let credentials = platform_credentials();
         let debug = format!("{credentials:?}");
         assert!(debug.contains("[REDACTED]"));

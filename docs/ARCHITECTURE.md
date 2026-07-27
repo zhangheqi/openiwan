@@ -1,6 +1,6 @@
 # Architecture
 
-OpeniWAN separates recovered wire behavior from host integration.
+OpeniWAN separates wire-protocol behavior from host integration.
 
 ```text
 ClientConfig
@@ -28,11 +28,11 @@ ClientConfig
 
 Protocol timing such as the 3-second authentication attempt, 13-second overall
 window, 2-second traditional heartbeat, and 1-second SR monitor is kept as
-protocol behavior rather than provider configuration.
+protocol behavior rather than deployment configuration.
 
 ## Traditional session
 
-Authentication sends one byte-identical OPEN repeatedly within the recovered
+Authentication sends one byte-identical OPEN repeatedly within the protocol
 retry window. A present AUTH_VERIFY must match; omission is accepted. OPEN_ACK
 selects the tuple, encryption, MTU, IPv4 address, DNS, and gateway.
 
@@ -43,20 +43,20 @@ The connected session runs:
    session tuple, packet class, encryption, fragments, and inner IP length;
 3. a 20-byte little-endian heartbeat worker.
 
-The traditional outbound path does not generate legacy fragments, matching the
-recovered client. It reports an oversized TUN packet instead.
+The traditional outbound path does not generate fragments. It reports an
+oversized TUN packet instead.
 
 ## Segment Routing session
 
 SR configuration adds a logical forward path, SR ID, optional monitor, and
-outer-algorithm/key pair. OPEN carries the first logical link. The confirmed
-but semantically unresolved `SREntry.ip` remains only in the serializer model.
+outer-algorithm/key pair. OPEN carries the first logical link. `SREntry.ip`
+remains serializer metadata and is not used as the ingress endpoint.
 
 Outbound SR serialization reverses the logical path. Returned datagrams must
 use the logical order, `next_id=0`, the active tuple, and the configured outer
 algorithm. IPv6 uses `DATA_IPV6` without inner session encryption.
 
-The planner follows the recovered constraints: encrypted packets must fit one
+The planner enforces protocol constraints: encrypted packets must fit one
 payload MTU; inner AES cannot expand; fragments require both encryption layers
 off and consist of exactly two datagrams.
 
@@ -65,19 +65,19 @@ off and consist of exactly two datagrams.
 The `managed` feature contains:
 
 - primary/fallback lookup, consent gating, exact domain validation, retries,
-  canonical-domain handling, the seven-day lookup cache, and recovered
-  platform HMAC authentication;
+  canonical-domain handling, the seven-day lookup cache, and platform HMAC
+  authentication;
 - the exact lookup-provided controller auth endpoint, controller-app-ID
   signing, credential/OIDC selection, and exact generated-credential
   decryption;
-- controller-configured AppAuth-style OIDC Authorization Code + PKCE;
-- the confirmed `/config` request and typed outer server, credential, DNS,
+- controller-configured OIDC Authorization Code + PKCE;
+- the `/config` request and typed outer server, credential, DNS,
   posture, device-binding, routing, IP/domain-filter, and SR-group members;
 - best-ingress UDP probing, the temporary credential-login OPEN, and creation
   of a client that performs the persistent second OPEN;
-- the complete recovered HTTP keepalive model and shared mobile-API signer.
+- the complete HTTP keepalive model and shared mobile-API signer.
 
-Managed connection turns the recovered `all`, `ipfilter`, or `custom` setting
+Managed connection turns the `all`, `ipfilter`, or `custom` setting
 into a platform route transaction. CIDR subtraction preserves exclusive
 networks and every known ingress outside the TUN, preventing the persistent
 UDP socket from routing into itself. DNS configuration is guarded and rolled
@@ -85,8 +85,7 @@ back with the route transaction; Windows uses Wintun DNS, Linux uses
 `resolvectl`, and macOS uses a scoped SystemConfiguration entry.
 
 Unknown nested policy fields remain `serde_json::Value`. Traditional
-top-level `serverlist` and SR `sites` are mutually exclusive, matching the
-Android backend parser.
+top-level `serverlist` and SR `sites` are mutually exclusive.
 
 ## Packet devices
 
@@ -94,8 +93,8 @@ Android backend parser.
 `tun` crate and host route management. The optional `forward` feature
 implements it with bounded in-memory channels and a userspace TCP/IP stack.
 
-Because the recovered OPEN_ACK consumer does not apply NETMASK, host
-integration uses host prefixes (`/32` for IPv4 and `/128` for IPv6).
+Because NETMASK is not applied to the active session, host integration uses
+host prefixes (`/32` for IPv4 and `/128` for IPv6).
 
 ## Resource and trust boundaries
 
@@ -108,4 +107,4 @@ integration uses host prefixes (`/32` for IPv4 and `/128` for IPv6).
   keys.
 
 These checks protect the implementation. They do not add integrity,
-confidentiality, or replay protection absent from the legacy protocol.
+confidentiality, or replay protection absent from the wire protocol.

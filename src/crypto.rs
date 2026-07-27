@@ -1,6 +1,6 @@
 //! Cryptographic primitives used by the traditional iWAN data plane.
 //!
-//! These algorithms are protocol compatibility requirements, not modern
+//! These algorithms are wire-protocol requirements, not modern
 //! cryptographic recommendations. In particular, XOR and AES-ECB do not provide
 //! authenticated encryption.
 
@@ -60,8 +60,8 @@ pub fn derive_password_key(username: &str) -> [u8; KEY_LEN] {
 
 /// Encrypt the fixed-size password field used in an OPEN packet.
 ///
-/// The Android 2.3.0 client copies at most the first 16 US-ASCII bytes and pads
-/// the remainder with zero bytes before one AES-128-ECB block encryption.
+/// The password is converted to Java-compatible US-ASCII, truncated to 16
+/// bytes, zero-padded, and encrypted as one AES-128-ECB block.
 pub fn encrypt_password(password: &str, username: &str) -> [u8; KEY_LEN] {
     let mut key = derive_password_key(username);
     let mut block = [0_u8; AES_BLOCK_LEN];
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn xor_compatibility_key_repeats_after_eight_bytes() {
+    fn xor_key_repeats_after_eight_bytes() {
         let key = [
             0, 1, 2, 3, 4, 5, 6, 7, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
         ];

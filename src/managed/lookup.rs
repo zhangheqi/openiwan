@@ -230,7 +230,7 @@ impl<T: HttpTransport> LookupClient<T> {
         match live {
             Ok((raw, result)) => {
                 if let Some(cache) = &self.cache {
-                    // Cache failures are deliberately non-fatal in the recovered client.
+                    // Cache failures do not invalidate a successful lookup.
                     let _ = cache.write(domain, &raw, now);
                     if result.active_domain() != domain {
                         let _ = cache.write(result.active_domain(), &raw, now);
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_validation_matches_recovered_contract() {
+    fn domain_validation_matches_contract() {
         validate_domain("iwan.ustc").unwrap();
         validate_domain("a-b_c@d#$").unwrap();
         assert!(validate_domain("").is_err());
@@ -550,11 +550,11 @@ mod tests {
             responses: Mutex::new(VecDeque::from([
                 Ok(response(
                     200,
-                    r#"{"success":true,"data":{"type":"invented"}}"#,
+                    r#"{"success":true,"data":{"type":"unsupported"}}"#,
                 )),
                 Ok(response(
                     200,
-                    r#"{"success":true,"data":{"type":"invented"}}"#,
+                    r#"{"success":true,"data":{"type":"unsupported"}}"#,
                 )),
             ])),
             requests: Mutex::new(Vec::new()),
@@ -577,7 +577,7 @@ mod tests {
         let cache = LookupCache::new(&directory);
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         cache
-            .write("example", &serde_json::json!({"type": "invented"}), now)
+            .write("example", &serde_json::json!({"type": "unsupported"}), now)
             .unwrap();
         let transport = MockTransport {
             responses: Mutex::new(VecDeque::from([
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_recovered_macos_controller_url_map() {
+    fn parses_macos_controller_url_map() {
         let result = parse_response(
             "iwan.ustc",
             serde_json::json!({
@@ -653,13 +653,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unrecovered_service_type_field_alias() {
+    fn response_requires_type_member() {
         assert!(
             parse_response(
                 "iwan.ustc",
-                serde_json::json!({
-                    "serviceType": "controller"
-                }),
+                serde_json::json!({"domain": "iwan.ustc"}),
                 LookupSource::Network,
             )
             .is_err()

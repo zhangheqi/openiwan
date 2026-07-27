@@ -1,4 +1,4 @@
-//! Segment Routing (SEGRT) transport recovered from iWAN Android 2.3.0.
+//! Segment Routing (SEGRT) transport.
 
 use crate::crypto::{AES_BLOCK_LEN, DataCipher};
 use crate::fragment::{Fragment, SrFragmentReassembler, fragment_sr_packet, trim_ip_packet};
@@ -13,8 +13,8 @@ use zeroize::Zeroize;
 pub const MAX_LINKS: usize = 6;
 pub const SR_FIXED_HEADER_LEN: usize = 4;
 pub const SR_MONITOR_BODY_LEN: usize = 40;
-pub const SR_MONITOR_PERIOD: Duration = Duration::from_micros(1_000_000);
-pub const SR_PEER_DOWN_AFTER: Duration = Duration::from_micros(5_000_000);
+pub const SR_MONITOR_PERIOD: Duration = Duration::from_secs(1);
+pub const SR_PEER_DOWN_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_handshake_matches_recovered_flags() {
+    fn monitor_handshake_matches_protocol_flags() {
         let mut client = SrMonitor::new(7);
         let request = client.request(100);
         assert_eq!(

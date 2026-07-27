@@ -66,7 +66,7 @@ pub enum Error {
     #[error("segment-routing path is unavailable")]
     SegmentRoutingPeerDown,
 
-    #[error("fragmentation with encryption is unsupported by iWAN 2.3.0")]
+    #[error("fragmentation with encryption is unsupported by the iWAN data plane")]
     FragmentEncryptionUnsupported,
 
     #[error("TUN operation failed: {0}")]

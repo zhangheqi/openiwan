@@ -1,9 +1,8 @@
-//! Byte-exact traditional iWAN 2.3.0 framing.
+//! Byte-exact traditional iWAN framing.
 //!
-//! The implementation follows `reverse/IWAN_PROTOCOL_SPEC.md`, reconstructed
-//! from the Android 2.3.0 APK.  Segment-routing envelopes are intentionally
-//! parsed by [`crate::sr`] because their first bytes are not a standard iWAN
-//! header even though byte zero is `SEGMENT_ROUTING`.
+//! Segment-routing envelopes are parsed by [`crate::sr`] because their first
+//! bytes are not a standard iWAN header even though byte zero is
+//! `SEGMENT_ROUTING`.
 
 use crate::crypto;
 use crate::{Error, Result};
@@ -229,7 +228,7 @@ impl PacketHeader {
     }
 }
 
-/// TLV registry retained by the Android 2.3.0 parser.
+/// Protocol TLV registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TlvType {
@@ -324,8 +323,8 @@ impl Tlv {
         Ok(())
     }
 
-    /// Reproduce the APK list loop: parse while at least three bytes remain and
-    /// silently ignore a final one- or two-byte suffix.
+    /// Parse while at least three bytes remain and ignore a final one- or
+    /// two-byte suffix, as required by the protocol.
     pub fn parse_all(input: &[u8]) -> Result<Vec<Self>> {
         let mut attributes = Vec::new();
         let mut offset = 0;
@@ -411,7 +410,7 @@ impl Tlv {
         }
     }
 
-    /// Shared Android integer decoder: only 1, 2, and 4 byte values exist.
+    /// Decode a protocol integer, whose defined widths are 1, 2, and 4 bytes.
     pub fn as_integer(&self) -> Result<u32> {
         match self.value.as_slice() {
             [value] => Ok(u32::from(*value)),
@@ -476,8 +475,7 @@ pub fn encode_data(header: PacketHeader, body: &[u8]) -> Vec<u8> {
 pub fn decode_packet(input: &[u8]) -> Result<DecodedPacket> {
     let header = PacketHeader::decode(input)?;
     if header.packet_type.is_control() {
-        // The APK has an authentication-probe path that emits a raw 8-byte
-        // CLOSE. Accepting it is required for bidirectional compatibility.
+        // Authentication probes use a raw 8-byte CLOSE packet.
         if header.packet_type == PacketType::Close && input.len() == HEADER_LEN {
             return Ok(DecodedPacket {
                 header,
@@ -554,7 +552,7 @@ pub fn build_close(header: PacketHeader) -> Vec<u8> {
     )
 }
 
-/// Build the header-only `CLOSE` used by the Android login-screen OPEN probe.
+/// Build the header-only `CLOSE` used for a temporary OPEN probe.
 pub fn build_probe_close(header: PacketHeader) -> [u8; HEADER_LEN] {
     PacketHeader::new(
         PacketType::Close,
@@ -683,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_registry_matches_android_230() {
+    fn packet_registry_matches_protocol() {
         assert_eq!(
             PacketType::ALL.map(|kind| kind as u8),
             [
@@ -733,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn tlv_parser_matches_android_trailing_suffix_quirk() {
+    fn tlv_parser_accepts_trailing_suffix() {
         let mut bytes = Vec::new();
         Tlv::mtu(1400).encode(&mut bytes).unwrap();
         bytes.extend_from_slice(&[0xaa, 0xbb]);
@@ -742,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_and_prefix_decoders_match_android() {
+    fn integer_and_prefix_decoders_accept_defined_widths() {
         for (bytes, expected) in [
             (vec![2], 2),
             (vec![1, 2], 0x0102),

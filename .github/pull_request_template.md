@@ -2,9 +2,9 @@
 
 Describe the problem and the change.
 
-## Compatibility and evidence
+## Interoperability and evidence
 
-- Target client/server version:
+- Target peer or deployment version:
 - Evidence level, if this changes the wire protocol:
 - Platforms tested:
 
@@ -12,8 +12,8 @@ Describe the problem and the change.
 
 - [ ] Tests cover the change.
 - [ ] `cargo fmt --all -- --check` passes.
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- [ ] `cargo clippy --all-targets --all-features --locked -- -D warnings` passes.
 - [ ] Documentation is updated in English.
 - [ ] No credentials, tokens, private captures, proprietary binaries, or
-      decompiled source are included.
+      non-redistributable source are included.
 - [ ] Route, interface, credential, and error cleanup paths were considered.

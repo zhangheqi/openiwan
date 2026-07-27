@@ -303,7 +303,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn matches_recovered_hmac_vector() {
+    fn matches_protocol_hmac_vector() {
         let endpoint = "https://controller.example/keepalive?b=two&a=one%20x&a=ignored&plus=a+b";
         let canonical = canonical_request(
             endpoint,

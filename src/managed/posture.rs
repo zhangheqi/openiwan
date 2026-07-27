@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn sends_recovered_posture_contract_and_requires_both_gates() {
+    fn sends_posture_contract_and_requires_both_gates() {
         let transport = MockTransport {
             request: Mutex::new(None),
             response: HttpResponse {
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_recovered_special_status_codes() {
+    fn maps_special_status_codes() {
         let transport = MockTransport {
             request: Mutex::new(None),
             response: HttpResponse {

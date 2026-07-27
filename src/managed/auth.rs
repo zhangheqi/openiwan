@@ -171,9 +171,8 @@ pub(crate) fn fetch<T: HttpTransport>(
     Err(last_error.unwrap_or_else(|| Error::Controller("auth request failed".into())))
 }
 
-/// The recovered UI falls back to credential mode when `/auth` cannot be
-/// obtained or decoded. A successfully decoded explicit OIDC response is never
-/// downgraded.
+/// Fall back to credential mode when `/auth` cannot be obtained or decoded.
+/// A successfully decoded explicit OIDC response is never downgraded.
 pub(crate) fn fetch_or_credential<T: HttpTransport>(
     lookup: &LookupResult,
     device_id: &str,
@@ -239,7 +238,7 @@ pub(crate) const fn client_platform() -> &'static str {
     target_os = "windows"
 )))]
 pub(crate) const fn client_platform() -> &'static str {
-    // The recovered client has no distinct desktop-Unix profile.
+    // The controller API has no distinct desktop-Unix profile.
     "android"
 }
 
@@ -442,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_recovered_macos_nested_auth_endpoint() {
+    fn uses_nested_macos_auth_endpoint() {
         let mut lookup = lookup();
         lookup.complete_domain = "iwan.ustc".into();
         lookup.original_domain = "iwan.ustc".into();
@@ -497,10 +496,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unrecovered_password_method_alias() {
+    fn rejects_unknown_auth_method() {
         let error = parse_response(serde_json::json!({
             "auth": {
-                "method": "password"
+                "method": "unsupported"
             }
         }))
         .unwrap_err();

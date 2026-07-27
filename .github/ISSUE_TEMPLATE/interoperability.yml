@@ -1,34 +1,32 @@
-name: Compatibility report
-description: Document behavior observed with an authorized iWAN endpoint
-title: "compat: "
-labels: ["compatibility"]
+name: Interoperability report
+description: Report behavior observed with an authorized iWAN deployment
+title: "interop: "
+labels: ["interoperability"]
 body:
   - type: markdown
     attributes:
       value: |
-        Compatibility evidence improves the protocol reference. Share only
+        Interoperability evidence improves the protocol reference. Share only
         information you are authorized to disclose, and redact all private data.
   - type: input
     id: client
     attributes:
-      label: Reference client version
-      placeholder: "Application version and build number"
-    validations:
-      required: true
+      label: Peer or deployment version
+      placeholder: "Server, controller, or peer version; use Unknown if unavailable"
   - type: input
     id: openiwan
     attributes:
       label: openiwan version
-      placeholder: "0.1.0 or commit SHA"
+      placeholder: "0.2.0 or commit SHA"
     validations:
       required: true
   - type: dropdown
     id: evidence
     attributes:
       label: Evidence level
-      description: See docs/REVERSE_ENGINEERING.md.
+      description: See docs/PROTOCOL_PROVENANCE.md.
       options:
-        - Static analysis (S)
+        - Protocol analysis (S)
         - Independent cross-check (C)
         - Synthetic local endpoint (L)
         - Authorized real endpoint (R)

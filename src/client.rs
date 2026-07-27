@@ -1,6 +1,8 @@
 use crate::config::{ClientConfig, SegmentRoutingConfig};
 use crate::crypto::{self, DataCipher};
-use crate::fragment::{Fragment, LegacyFragmentReassembler, SrFragmentReassembler, trim_ip_packet};
+use crate::fragment::{
+    Fragment, SrFragmentReassembler, TraditionalFragmentReassembler, trim_ip_packet,
+};
 use crate::protocol::{
     self, DecodedPacket, EchoBody, EchoDelayStats, EncryptionMethod, PacketHeader, PacketType, Tlv,
     TlvType,
@@ -120,7 +122,7 @@ impl Client {
         self.authenticate_with_budget(AUTH_OVERALL_TIMEOUT)
     }
 
-    /// One-shot authentication probe retained by the APK.
+    /// Run one authentication attempt with the protocol attempt timeout.
     pub fn authenticate_once(&self) -> Result<ConnectedSession> {
         self.authenticate_with_budget(AUTH_ATTEMPT_TIMEOUT)
     }
@@ -373,8 +375,8 @@ impl ConnectedSession {
         self.send_close_once()
     }
 
-    /// Close the Android login-screen authentication probe with its recovered
-    /// eight-byte, header-only `CLOSE` packet.
+    /// Close a temporary authentication probe with an eight-byte, header-only
+    /// `CLOSE` packet.
     pub fn close_probe(self) -> Result<()> {
         self.running.store(false, Ordering::Release);
         if !self.close_sent.swap(true, Ordering::AcqRel) {
@@ -462,8 +464,8 @@ impl ConnectedSession {
         monotonic_origin: Instant,
     ) -> SessionEnd {
         let mut legacy_reassemblers = [
-            LegacyFragmentReassembler::default(),
-            LegacyFragmentReassembler::default(),
+            TraditionalFragmentReassembler::default(),
+            TraditionalFragmentReassembler::default(),
         ];
         let mut sr_reassembler = SrFragmentReassembler::default();
         let mut sr_responder = SrMonitorResponder::default();
@@ -547,7 +549,7 @@ impl ConnectedSession {
         packet: &DecodedPacket,
         device: &dyn PacketDevice,
         heartbeat: &Mutex<HeartbeatTracker>,
-        reassemblers: &mut [LegacyFragmentReassembler; 2],
+        reassemblers: &mut [TraditionalFragmentReassembler; 2],
         monotonic_origin: Instant,
     ) -> Result<PacketAction> {
         match packet.header.packet_type {
@@ -1190,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn open_ack_accepts_android_integer_widths_and_omitted_nonce() {
+    fn open_ack_accepts_defined_integer_widths_and_omitted_nonce() {
         let header = PacketHeader::new(
             PacketType::OpenAck,
             EncryptionMethod::Xor,

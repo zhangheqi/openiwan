@@ -718,12 +718,12 @@ pub fn resolve_route_targets(
     Ok(routes.into_iter().map(|route| route.to_string()).collect())
 }
 
-/// Resolve a recovered VPN routing policy while keeping control traffic
-/// outside the tunnel.
+/// Resolve a VPN routing policy while keeping control traffic outside the
+/// tunnel.
 ///
-/// `full_ipv4` models Android's `0.0.0.0/0` route. `OpenIwan` expresses it as
-/// non-default CIDRs with the active UDP peer subtracted, so installing the
-/// policy cannot feed the tunnel transport back into its own TUN interface.
+/// `full_ipv4` represents a `0.0.0.0/0` route as non-default CIDRs with the
+/// active UDP peer subtracted, so installing the policy cannot feed the
+/// tunnel transport back into its own TUN interface.
 /// Exclusions are subtracted from every included CIDR with longest-prefix
 /// semantics.
 pub fn resolve_route_policy(

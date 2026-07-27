@@ -1,13 +1,8 @@
-# iWAN Android 2.3.0 Protocol Reference
+# iWAN Protocol Reference
 
-The normative engineering reference for OpeniWAN 0.3 is
-`reverse/IWAN_PROTOCOL_SPEC.md` in the source workspace. That document was
-reconstructed from the Android 2.3.0 APK and contains the complete byte
-layouts, recovered state machines, test vectors, evidence map, and known
-ambiguities.
-
-This file is a packaged quick reference. It deliberately does not extend the
-recovered contract.
+This document defines the interoperable wire profile implemented by OpeniWAN.
+Protocol provenance, evidence standards, and unresolved details are documented
+separately in [Protocol Provenance](PROTOCOL_PROVENANCE.md).
 
 ## Standard datagram
 
@@ -25,7 +20,7 @@ MD5(exact_header || ASCII("mw"))
 
 The 16-byte signature covers only the header. It does not cover the body.
 
-Confirmed packet types are:
+Defined packet types are:
 
 | Value | Type |
 |---:|---|
@@ -50,7 +45,7 @@ Encryption values are `NONE=0`, `XOR=1`, and `AES=2`.
 
 ## Authentication TLVs
 
-Each TLV is `type:u8 | total_length:u8 | value`. Confirmed types are:
+Each TLV is `type:u8 | total_length:u8 | value`. Defined types are:
 
 ```text
 01 USERNAME   02 PASSWORD    03 MTU       04 IP
@@ -59,9 +54,9 @@ Each TLV is `type:u8 | total_length:u8 | value`. Confirmed types are:
 10 ERR_MSG
 ```
 
-`NETMASK` and `DUP_PKT` exist in the registry but are not applied by the
-recovered `OPEN_ACK` consumer. The generic parser ignores a final one- or
-two-byte suffix; conforming senders must not emit one.
+`NETMASK` and `DUP_PKT` exist in the registry but are not applied to the active
+session. The generic parser ignores a final one- or two-byte suffix;
+conforming senders must not emit one.
 
 An `OPEN` body is ordered as MTU, USERNAME, PASSWORD, ENCRYPT, optional LINK,
 and optional nonzero AUTH_VERIFY.
@@ -93,7 +88,7 @@ AUTH_VERIFY is checked when returned and may be omitted by a response.
 - only encrypted data classes are session-decrypted.
 
 Traditional fragments use a big-endian ID and a little-endian packed word.
-The legacy receiver combines exactly two fragments by EOP order, ignores
+The traditional receiver combines exactly two fragments by EOP order, ignores
 offsets, retains at most 256 pending entries, and expires entries after 100 ms.
 
 ## Heartbeat, ping, and close
@@ -108,8 +103,8 @@ Requests are sent every two seconds. Ten misses or more than 20 seconds without
 a valid response ends the session.
 
 Ping is exactly 24 bytes with `session_id=0xffff`, `token=0xffffffff`, and no
-body. A new client sends a 24-byte signed close; receivers accept both that
-form and the recovered eight-byte probe close.
+body. A persistent session sends a 24-byte signed close; receivers accept both
+that form and the eight-byte close used by temporary authentication probes.
 
 ## Segment Routing
 
@@ -144,7 +139,7 @@ and peer-down threshold is five seconds.
 
 ## Managed HTTP
 
-The confirmed `/config` request is:
+The `/config` request is:
 
 ```json
 {
@@ -163,19 +158,19 @@ The `type` member is the runtime platform (`android`, `ios`, `macos`, or
 
 It uses `Content-Type: application/json`, `X-Mobile-Api-Version: 4`, the four
 mobile-API `X-Auth-*` headers over the final URL and exact body, and an
-optional OIDC bearer token. Its aggregate response schema is unresolved and
-must remain dynamic below the confirmed outer fields.
+optional OIDC bearer token. Deployment-specific response members remain
+dynamic below the typed outer fields.
 
-The recovered client begins with `POST /lookup` against
-`lookup.gsase.com`, then `lookupbak.hypersase.com`, with two attempts per
-server and a seven-day cache fallback. The request sends
+Managed discovery begins with `POST /lookup` against `lookup.gsase.com`, then
+`lookupbak.hypersase.com`, with two attempts per server and a seven-day cache
+fallback. The request sends
 `serviceType: "fgb"` while the successful response carries the resolved
 service type in `data.type`. It accepts only `serverlist`, `saas`, and
 `controller`. Controller domains POST to the exact auth URL returned by
 lookup; the domain is in the body and is not appended to the URL.
 `credential` selects password login and `oidc` selects Authorization Code +
 PKCE S256. The auth request is signed with the controller `app_id` and its
-recovered SaaS/controller secret-selection rule.
+defined secret-selection rule.
 Both lookup and auth use the same mobile-API HMAC header construction as
 `/config`, with the actual HTTP method and exact body in the canonical request.
 
@@ -188,9 +183,9 @@ The persistent VPN connection always performs another OPEN before creating
 TUN.
 
 Controller iWAN lines are nested under `serverlist.serverlist`; SR groups use
-the mutually exclusive top-level `sites` member. Each controller line can carry
-`userName` and `passWord`. Flutter extracts these into a top-level
-`server_credentials` array when reloading the Android backend.
+the mutually exclusive top-level `sites` member. Each controller line can
+carry `userName` and `passWord`; OpeniWAN associates these credentials with
+the line's server ID.
 
 Controller `passWord` is standard Base64 containing
 `nonce[12] || ciphertext || tag[16]`. The AES-256-GCM key is
@@ -200,8 +195,8 @@ uses the controller `app_id` selector above. Associated data is
 construction with the ingress username.
 
 For posture responses, integer and decimal-string versions are normalized. A
-missing version or version `0` is the recovered empty/disabled sentinel. It
-clears stale posture state and does not trigger `/posture/evaluate`.
+missing version or version `0` represents an empty or disabled configuration
+and does not trigger `/posture/evaluate`.
 
 Keepalive uses API version 3, a bearer token, five-second connect/read
 timeouts, and one retry after a failed attempt except HTTP 401. Every attempt
@@ -217,12 +212,12 @@ Unix timestamp
 lowercase 16-byte nonce hex
 ```
 
-The four `X-Auth-*` headers use HMAC-SHA256 with the UTF-8 app secret. See the
-source reference for the complete metrics graph and normative HMAC vector.
+The four `X-Auth-*` headers use HMAC-SHA256 with the UTF-8 app secret. The
+crate exposes the complete metrics graph and tests the canonical HMAC vector.
 
-## Known ambiguities
+## Protocol boundaries
 
-The recovered artifacts do not establish:
+The implemented profile does not define:
 
 - authoritative `DUP_PKT` server policy;
 - other-platform use of `NETMASK`;
@@ -233,4 +228,5 @@ The recovered artifacts do not establish:
 - whether production servers require signed `CLOSE`;
 - server-side duplicate suppression.
 
-These points must not be filled in from intuition or another implementation.
+Extensions in these areas require interoperable evidence and an explicit
+protocol-reference update.

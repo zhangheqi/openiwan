@@ -1,5 +1,4 @@
-//! `openiwan` is an independent implementation of the client-side iWAN wire
-//! protocol used by Panabit iWAN 2.3.0.
+//! `openiwan` is a client and protocol library for iWAN-compatible networks.
 //!
 //! The crate separates the byte-level protocol from system tunnel management.
 //! Applications that already own a TUN device can use [`Client`] and

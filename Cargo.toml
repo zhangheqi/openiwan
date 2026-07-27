@@ -50,9 +50,9 @@ hmac = { version = "0.12", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["client", "server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"], optional = true }
-jsonwebtoken = { version = "9", optional = true }
 md-5 = "0.10"
 rand = { version = "0.8", optional = true }
+ring = { version = "0.17", optional = true }
 rpassword = "7.5"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
@@ -110,8 +110,8 @@ forward = [
 managed = [
     "dep:base64",
     "dep:hmac",
-    "dep:jsonwebtoken",
     "dep:rand",
+    "dep:ring",
     "dep:serde_json",
     "dep:time",
     "dep:ureq",

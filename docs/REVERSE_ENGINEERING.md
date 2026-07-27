@@ -14,6 +14,7 @@ classes and AOT functions for:
 - traditional and SR fragments;
 - SR headers, encryption, reassembly, and monitoring;
 - keepalive serializers and HMAC signing;
+- lookup and controller-auth request signing;
 - the `/config` request construction.
 
 The repository tests the reference document's byte vectors directly. These
@@ -46,7 +47,7 @@ artifacts. The known unresolved items are:
 3. production-preferred OPEN_REJECT form;
 4. names for SR monitor bits and marker semantics;
 5. relay-side SR path mutation;
-6. complete `/lookup`, `/auth`, and aggregate `/config` schemas;
+6. deployment-specific nested `/config` policy schemas;
 7. server requirements for signed versus raw CLOSE;
 8. duplicate suppression or scheduling.
 

@@ -26,14 +26,22 @@ protocol contract. It implements:
 - traditional IPv4/IPv6 data classes and the two-fragment legacy receiver;
 - Segment Routing headers, directional paths, inner/outer encryption,
   two-fragment transmission, offset-aware reassembly, and SR monitoring;
-- OIDC Authorization Code with PKCE S256;
-- the confirmed `/config` request, returned as dynamic JSON;
+- primary/fallback domain lookup, exact validation, retry, canonical-domain
+  replacement, consent gating, seven-day cache fallback, and recovered
+  platform HMAC authentication;
+- `serverlist`, `saas`, and `controller` discovery paths plus the signed
+  lookup-provided controller auth endpoint;
+- credential login with best-ingress probing and a temporary UDP `OPEN`;
+- OIDC Authorization Code with PKCE S256 using controller-supplied endpoints;
+- controller password-mode serverlist, OIDC `/config`, per-server credentials,
+  traditional/SR selection, posture and device-binding gates, and the
+  persistent second `OPEN`;
 - the authenticated HTTP keepalive request, metric graph, response, retry, and
   HMAC canonicalization.
 
-The aggregate `/config`, `/lookup`, and `/auth` schemas are not recoverable
-without guessing, so they remain outside the typed API. Known ambiguities are
-documented in
+Deployment-specific nested policy blocks remain dynamic JSON. Confirmed outer
+fields and the Android server/SR serializers are typed; unknown fields are not
+invented. Known ambiguities are documented in
 [the protocol reference](docs/IWAN_PROTOCOL_2_3_0.md).
 
 ## Installation
@@ -155,26 +163,48 @@ openiwan forward \
 reverse proxy to one fixed origin; HTTPS validates the upstream certificate
 and supports repeatable `--ca-cert` roots. The listener must be loopback.
 
-## Managed configuration
+## Domain login and managed connection
 
-A provider file contains only the fields used by the confirmed OIDC,
-`/config`, and keepalive contracts. See
-[Managed Providers](docs/MANAGED_PROVIDERS.md) and
-[the non-operational template](examples/providers/example.toml).
-
-Fetch and print the dynamic `/config` response:
+The normal client starts from a customer domain; no hand-written provider file
+is used. Discovery requires explicit privacy/network consent:
 
 ```bash
 openiwan managed \
-  --provider provider.toml \
+  --domain iwan.example \
   --device-id device-identifier \
-  config
+  --consent \
+  discover
 ```
 
-The CLI intentionally does not save or automatically interpret that aggregate
-response. Applications can inspect `ControllerConfiguration::raw`, deserialize
-a confirmed `SrEntry` at the deployment-specific location, and explicitly
-construct `ClientConfig`.
+Complete login without creating a TUN:
+
+```bash
+openiwan managed \
+  --domain iwan.example \
+  --device-id device-identifier \
+  --consent \
+  login --username alice
+```
+
+For an OIDC domain, `--username` is ignored and the CLI prints the PKCE
+authorization URL. For a credential domain, the CLI probes all ingress
+servers, performs the login-screen `OPEN`, sends its recovered header-only
+`CLOSE`, and closes that temporary socket.
+
+Establish the persistent tunnel:
+
+```bash
+sudo openiwan managed \
+  --domain iwan.example \
+  --device-id device-identifier \
+  --consent \
+  connect --username alice
+```
+
+OIDC posture checks can be supplied as the recovered `check_results` JSON array
+with `--posture-results`. Managed connect also applies the recovered routing,
+IP-filter, DNS, split-DNS, and MTU policy. See
+[Managed client flow](docs/MANAGED_CLIENT_FLOW.md).
 
 ## Library layout
 
@@ -183,7 +213,8 @@ construct `ClientConfig`.
 - `fragment`: traditional and SR fragment codecs/reassembly;
 - `sr`: Segment Routing framing, encryption, data planning, and monitoring;
 - `client`: authentication and connected-session workers;
-- `managed`: OIDC, `/config`, SR serializer models, and HTTP keepalive;
+- `managed`: lookup, auth selection, OIDC, `/config`, posture, ingress
+  selection, SR serializer models, and HTTP keepalive;
 - `tun`: native interface and route integration.
 
 `Client`, `ConnectedSession`, and `PacketDevice` allow applications to supply

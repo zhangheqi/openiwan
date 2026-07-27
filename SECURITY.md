@@ -46,8 +46,8 @@ Reports are especially useful for:
 - route or interface cleanup failures
 - session validation bypasses
 - command invocation or privilege-boundary problems
-- OIDC callback, token, JWKS, or controller-signature validation failures
-- managed provider file permission bypasses
+- OIDC callback, token, or controller-configuration validation failures
+- lookup cache poisoning, permission, or canonical-domain validation failures
 
 The use of MD5, repeating XOR, and AES-ECB is a known property of the legacy
 iWAN compatibility protocol. A report should demonstrate an implementation
@@ -65,11 +65,29 @@ the endpoint supports one.
 
 ## Managed Credentials
 
-OIDC access and refresh tokens, keepalive app secrets, SR keys, and ingress
-passwords stay in memory, are redacted from owning types' debug output, and use
-zeroizing holders where applicable. OpeniWAN does not persist controller
-responses. Do not attach callback URLs, tokens, credentials, or controller
-responses to public reports.
+OIDC access and refresh tokens, caller-supplied keepalive secrets, SR keys, and
+ingress passwords stay in memory, are redacted from owning types' debug output,
+and use zeroizing holders where applicable. OpeniWAN does not persist controller
+responses or OIDC sessions. The optional seven-day lookup cache contains only
+domain discovery data and is replaced atomically; choose a private cache
+directory because controller addresses and customer-domain metadata may still
+be sensitive. Do not attach callback URLs, tokens, credentials, caches, or
+controller responses to public reports.
+
+The Android 2.3.0 compatibility target embeds platform-wide lookup
+credentials and a controller-app-ID secret-selection rule used to sign lookup
+controller-auth, and controller-config requests. OpeniWAN must carry the same
+recovered values and derivation for wire compatibility. They are distributed
+client constants, not confidential per-user credentials, and servers must not
+treat possession of them as proof of a trusted device or official client.
+OIDC `/config` uses both the recovered `X-Auth-*` headers and its Bearer token.
+
+The recovered AppAuth service-configuration path uses controller-supplied
+authorization and token endpoints directly. OpeniWAN checks callback state,
+redirect URI, PKCE, and ID-token nonce, but does not add a mandatory discovery
+or JWKS request absent from that recovered path. Authenticity therefore
+depends on the HTTPS controller configuration and token endpoint, as it does
+in the compatibility target.
 
 ## Windows TUN deployment
 

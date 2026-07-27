@@ -75,8 +75,11 @@ pub enum Error {
     #[error("external command failed: {program}: {message}")]
     CommandFailed { program: String, message: String },
 
-    #[error("managed-provider error: {0}")]
-    ManagedProvider(String),
+    #[error("managed client flow failed: {0}")]
+    ManagedFlow(String),
+
+    #[error("privacy/network consent is required before domain lookup")]
+    ConsentRequired,
 
     #[error("HTTP operation failed: {0}")]
     Http(String),
@@ -89,6 +92,25 @@ pub enum Error {
 
     #[error("controller rejected the request as unauthorized")]
     ControllerUnauthorized,
+
+    #[error("controller rejected the request (HTTP {status}, code {code}): {message}")]
+    ControllerRejected {
+        status: u16,
+        code: String,
+        message: String,
+    },
+
+    #[error("posture configuration version does not match the controller")]
+    PostureVersionMismatch,
+
+    #[error("posture configuration is not loaded by the backend")]
+    PostureConfigUnavailable,
+
+    #[error("device posture gate denied network access")]
+    PostureDenied,
+
+    #[error("device binding gate blocked network access ({status}, code {code})")]
+    DeviceBindingBlocked { code: i32, status: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

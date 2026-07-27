@@ -8,6 +8,7 @@ pub struct HttpRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for HttpRequest {
@@ -18,6 +19,7 @@ impl std::fmt::Debug for HttpRequest {
             .field("url", &self.url)
             .field("headers", &"[REDACTED]")
             .field("body_length", &self.body.len())
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -75,6 +77,9 @@ impl HttpTransport for UreqTransport {
         };
         for (name, value) in &request.headers {
             builder = builder.set(name, value);
+        }
+        if let Some(timeout) = request.timeout {
+            builder = builder.timeout(timeout);
         }
         let response = match request.method {
             "GET" => builder.call(),

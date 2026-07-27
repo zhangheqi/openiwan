@@ -373,6 +373,18 @@ impl ConnectedSession {
         self.send_close_once()
     }
 
+    /// Close the Android login-screen authentication probe with its recovered
+    /// eight-byte, header-only `CLOSE` packet.
+    pub fn close_probe(self) -> Result<()> {
+        self.running.store(false, Ordering::Release);
+        if !self.close_sent.swap(true, Ordering::AcqRel) {
+            self.socket.send(&protocol::build_probe_close(
+                self.info.header(PacketType::Close),
+            ))?;
+        }
+        Ok(())
+    }
+
     pub fn run(
         self,
         device: Arc<dyn PacketDevice>,

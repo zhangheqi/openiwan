@@ -1,7 +1,11 @@
 use crate::client::{PacketDevice, SessionInfo};
 use crate::{Error, Result};
 use std::fmt;
+#[cfg(target_os = "macos")]
+use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Output};
 #[cfg(windows)]
@@ -47,6 +51,7 @@ struct InterfaceSettings {
     address: IpAddr,
     netmask: IpAddr,
     mtu: u16,
+    dns_servers: Vec<IpAddr>,
 }
 
 impl TunDevice {
@@ -80,6 +85,7 @@ fn interface_settings(
         address,
         netmask,
         mtu: session.mtu,
+        dns_servers: session.dns_servers.clone(),
     })
 }
 
@@ -215,6 +221,7 @@ fn open_device(settings: &InterfaceSettings) -> Result<TunDevice> {
         .up();
     configuration.platform_config(|platform| {
         platform.wintun_file(wintun_path.as_os_str());
+        platform.dns_servers(&settings.dns_servers);
         platform.wait_for_interfaces(
             settings.address.is_ipv4(),
             settings.address.is_ipv6(),
@@ -337,6 +344,18 @@ struct Route {
 
 impl Route {
     fn parse(value: &str) -> Result<Self> {
+        let route = Self::parse_allow_default(value)?;
+        if route.prefix == 0 {
+            return Err(Error::InvalidConfig(
+                "default routes are not supported because the iWAN control endpoint \
+                 must remain reachable outside the tunnel"
+                    .into(),
+            ));
+        }
+        Ok(route)
+    }
+
+    fn parse_allow_default(value: &str) -> Result<Self> {
         let (address, prefix) = value.split_once('/').ok_or_else(|| {
             Error::InvalidConfig(format!("route {value:?} must use CIDR notation"))
         })?;
@@ -351,13 +370,6 @@ impl Route {
             return Err(Error::InvalidConfig(format!(
                 "route prefix {prefix} exceeds {maximum}"
             )));
-        }
-        if prefix == 0 {
-            return Err(Error::InvalidConfig(
-                "default routes are not supported because the iWAN control endpoint \
-                 must remain reachable outside the tunnel"
-                    .into(),
-            ));
         }
         Ok(Self {
             network: network_address(address, prefix),
@@ -375,6 +387,40 @@ impl Route {
             }
             _ => false,
         }
+    }
+
+    fn contains_route(&self, candidate: &Self) -> bool {
+        self.network.is_ipv4() == candidate.network.is_ipv4()
+            && self.prefix <= candidate.prefix
+            && self.contains(candidate.network)
+    }
+
+    fn split(&self) -> Option<[Self; 2]> {
+        let maximum = if self.network.is_ipv4() { 32 } else { 128 };
+        if self.prefix == maximum {
+            return None;
+        }
+        let child_prefix = self.prefix + 1;
+        let right = match self.network {
+            IpAddr::V4(network) => {
+                let bit = 1_u32 << (32 - child_prefix);
+                IpAddr::V4(Ipv4Addr::from(u32::from(network) | bit))
+            }
+            IpAddr::V6(network) => {
+                let bit = 1_u128 << (128 - child_prefix);
+                IpAddr::V6(Ipv6Addr::from(u128::from(network) | bit))
+            }
+        };
+        Some([
+            Self {
+                network: self.network,
+                prefix: child_prefix,
+            },
+            Self {
+                network: right,
+                prefix: child_prefix,
+            },
+        ])
     }
 }
 
@@ -456,6 +502,156 @@ impl Drop for RouteGuard {
     }
 }
 
+/// Restores platform DNS state when dropped.
+pub struct DnsGuard {
+    #[cfg(target_os = "linux")]
+    device: Option<String>,
+    #[cfg(target_os = "macos")]
+    key: Option<String>,
+}
+
+impl fmt::Debug for DnsGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("DnsGuard").finish_non_exhaustive()
+    }
+}
+
+impl DnsGuard {
+    /// Apply DNS servers to the TUN interface.
+    ///
+    /// Empty `split_domains` makes the VPN resolver the default. Non-empty
+    /// domains install route-only split-DNS rules. Windows DNS is applied
+    /// while Wintun is created, so this guard is a no-op there.
+    pub fn configure(
+        device: &TunDevice,
+        servers: &[IpAddr],
+        split_domains: &[String],
+    ) -> Result<Self> {
+        validate_dns_domains(split_domains)?;
+
+        #[cfg(target_os = "linux")]
+        {
+            if servers.is_empty() {
+                return Ok(Self { device: None });
+            }
+            let mut dns_arguments = vec!["dns", device.name()];
+            let server_strings = servers.iter().map(ToString::to_string).collect::<Vec<_>>();
+            dns_arguments.extend(server_strings.iter().map(String::as_str));
+            run_command("resolvectl", &dns_arguments)?;
+
+            let domains = if split_domains.is_empty() {
+                vec!["~.".into()]
+            } else {
+                split_domains
+                    .iter()
+                    .map(|domain| format!("~{domain}"))
+                    .collect()
+            };
+            let mut domain_arguments = vec!["domain", device.name()];
+            domain_arguments.extend(domains.iter().map(String::as_str));
+            if let Err(error) = run_command("resolvectl", &domain_arguments) {
+                let _ = Command::new("resolvectl")
+                    .args(["revert", device.name()])
+                    .output();
+                return Err(error);
+            }
+            if split_domains.is_empty()
+                && let Err(error) =
+                    run_command("resolvectl", &["default-route", device.name(), "yes"])
+            {
+                let _ = Command::new("resolvectl")
+                    .args(["revert", device.name()])
+                    .output();
+                return Err(error);
+            }
+            Ok(Self {
+                device: Some(device.name().to_owned()),
+            })
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if servers.is_empty() {
+                return Ok(Self { key: None });
+            }
+            let key = format!("State:/Network/Service/openiwan-{}/DNS", device.name());
+            let server_values = servers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let domain_values = if split_domains.is_empty() {
+                "\"\"".into()
+            } else {
+                split_domains.join(" ")
+            };
+            let script = format!(
+                "d.init\nd.add ServerAddresses * {server_values}\n\
+                 d.add SupplementalMatchDomains * {domain_values}\nset {key}\n"
+            );
+            run_scutil(&script)?;
+            Ok(Self { key: Some(key) })
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (device, servers, split_domains);
+            Ok(Self {})
+        }
+    }
+}
+
+impl Drop for DnsGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(device) = &self.device {
+            let _ = Command::new("resolvectl").args(["revert", device]).output();
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(key) = &self.key {
+            let _ = run_scutil(&format!("remove {key}\n"));
+        }
+    }
+}
+
+fn validate_dns_domains(domains: &[String]) -> Result<()> {
+    for domain in domains {
+        if domain.is_empty()
+            || !domain
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(Error::InvalidConfig(format!(
+                "invalid split-DNS domain {domain:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_scutil(script: &str) -> Result<()> {
+    let mut child = Command::new("scutil")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Tun("failed to open scutil stdin".into()))?
+        .write_all(script.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(Error::CommandFailed {
+            program: "scutil".into(),
+            message: String::from_utf8_lossy(&output.stderr).trim().into(),
+        });
+    }
+    Ok(())
+}
+
 /// Resolve CIDR, IP-address, and domain route targets into validated CIDRs.
 ///
 /// Domains are resolved once. Default routes and routes containing
@@ -520,6 +716,137 @@ pub fn resolve_route_targets(
         }
     }
     Ok(routes.into_iter().map(|route| route.to_string()).collect())
+}
+
+/// Resolve a recovered VPN routing policy while keeping control traffic
+/// outside the tunnel.
+///
+/// `full_ipv4` models Android's `0.0.0.0/0` route. `OpenIwan` expresses it as
+/// non-default CIDRs with the active UDP peer subtracted, so installing the
+/// policy cannot feed the tunnel transport back into its own TUN interface.
+/// Exclusions are subtracted from every included CIDR with longest-prefix
+/// semantics.
+pub fn resolve_route_policy(
+    cidrs: &[String],
+    addresses: &[String],
+    domains: &[String],
+    exclusions: &[String],
+    excluded_peer: IpAddr,
+    full_ipv4: bool,
+) -> Result<Vec<String>> {
+    let mut routes = if full_ipv4 {
+        vec![
+            Route::parse_allow_default("0.0.0.0/1")?,
+            Route::parse_allow_default("128.0.0.0/1")?,
+        ]
+    } else {
+        Vec::new()
+    };
+    collect_route_targets(&mut routes, cidrs, addresses, domains)?;
+
+    let mut exclusions = exclusions
+        .iter()
+        .map(|route| Route::parse_allow_default(route.trim()))
+        .collect::<Result<Vec<_>>>()?;
+    exclusions.push(Route {
+        network: excluded_peer,
+        prefix: if excluded_peer.is_ipv4() { 32 } else { 128 },
+    });
+
+    for exclusion in exclusions {
+        routes = routes
+            .into_iter()
+            .flat_map(|route| subtract_route(route, &exclusion))
+            .collect();
+    }
+    let mut unique_routes = Vec::with_capacity(routes.len());
+    for route in routes {
+        if !unique_routes.contains(&route) {
+            unique_routes.push(route);
+        }
+    }
+    Ok(unique_routes
+        .into_iter()
+        .map(|route| route.to_string())
+        .collect())
+}
+
+fn collect_route_targets(
+    routes: &mut Vec<Route>,
+    cidrs: &[String],
+    addresses: &[String],
+    domains: &[String],
+) -> Result<()> {
+    for route in cidrs {
+        let route = Route::parse_allow_default(route.trim())?;
+        if !routes.contains(&route) {
+            routes.push(route);
+        }
+    }
+    for address in addresses {
+        let address = address
+            .trim()
+            .parse::<IpAddr>()
+            .map_err(|_| Error::InvalidConfig(format!("invalid route IP {address:?}")))?;
+        let route = Route {
+            network: address,
+            prefix: if address.is_ipv4() { 32 } else { 128 },
+        };
+        if !routes.contains(&route) {
+            routes.push(route);
+        }
+    }
+    for domain in domains {
+        let domain = domain.trim();
+        if domain.is_empty() {
+            return Err(Error::InvalidConfig(
+                "route domain must not be empty".into(),
+            ));
+        }
+        let resolved = (domain, 0)
+            .to_socket_addrs()
+            .map_err(|error| {
+                Error::InvalidConfig(format!(
+                    "failed to resolve route domain {domain:?}: {error}"
+                ))
+            })?
+            .map(|address| address.ip())
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return Err(Error::InvalidConfig(format!(
+                "route domain {domain:?} resolved to no addresses"
+            )));
+        }
+        for address in resolved {
+            let route = Route {
+                network: address,
+                prefix: if address.is_ipv4() { 32 } else { 128 },
+            };
+            if !routes.contains(&route) {
+                routes.push(route);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn subtract_route(route: Route, exclusion: &Route) -> Vec<Route> {
+    if route.network.is_ipv4() != exclusion.network.is_ipv4() {
+        return vec![route];
+    }
+    if exclusion.contains_route(&route) {
+        return Vec::new();
+    }
+    if !route.contains_route(exclusion) {
+        return vec![route];
+    }
+    let Some(children) = route.split() else {
+        return Vec::new();
+    };
+    children
+        .into_iter()
+        .flat_map(|child| subtract_route(child, exclusion))
+        .collect()
 }
 
 fn push_route(routes: &mut Vec<Route>, route: Route, excluded_peer: Option<IpAddr>) -> Result<()> {
@@ -977,6 +1304,61 @@ mod tests {
         assert!(Route::parse("10.0.0.0;id/8").is_err());
         assert!(Route::parse("0.0.0.0/0").is_err());
         assert!(Route::parse("::/0").is_err());
+    }
+
+    #[test]
+    fn full_policy_subtracts_the_active_peer_without_a_default_route() {
+        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let routes = resolve_route_policy(&[], &[], &[], &[], peer, true).unwrap();
+        let routes = routes
+            .iter()
+            .map(|route| Route::parse(route).unwrap())
+            .collect::<Vec<_>>();
+        assert!(!routes.iter().any(|route| route.contains(peer)));
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.contains("192.0.2.2".parse().unwrap()))
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.contains("203.0.113.1".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn policy_exclusions_are_subtracted_from_inclusive_routes() {
+        let routes = resolve_route_policy(
+            &["10.0.0.0/8".into()],
+            &[],
+            &[],
+            &["10.1.0.0/16".into()],
+            "192.0.2.1".parse().unwrap(),
+            false,
+        )
+        .unwrap();
+        let routes = routes
+            .iter()
+            .map(|route| Route::parse(route).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            !routes
+                .iter()
+                .any(|route| route.contains("10.1.2.3".parse().unwrap()))
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.contains("10.2.3.4".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn split_dns_domains_reject_command_separators_and_whitespace() {
+        validate_dns_domains(&["corp.example".into(), "_service.example".into()]).unwrap();
+        assert!(validate_dns_domains(&["bad domain".into()]).is_err());
+        assert!(validate_dns_domains(&["bad\nset State:/evil".into()]).is_err());
     }
 
     #[test]

@@ -64,13 +64,29 @@ off and consist of exactly two datagrams.
 
 The `managed` feature contains:
 
-- standards-validated OIDC Authorization Code + PKCE;
-- the confirmed `/config` request;
-- the exact standalone Android `SREntry` serializer model;
-- the complete recovered HTTP keepalive model and signer.
+- primary/fallback lookup, consent gating, exact domain validation, retries,
+  canonical-domain handling, the seven-day lookup cache, and recovered
+  platform HMAC authentication;
+- the exact lookup-provided controller auth endpoint, controller-app-ID
+  signing, credential/OIDC selection, and exact generated-credential
+  decryption;
+- controller-configured AppAuth-style OIDC Authorization Code + PKCE;
+- the confirmed `/config` request and typed outer server, credential, DNS,
+  posture, device-binding, routing, IP/domain-filter, and SR-group members;
+- best-ingress UDP probing, the temporary credential-login OPEN, and creation
+  of a client that performs the persistent second OPEN;
+- the complete recovered HTTP keepalive model and shared mobile-API signer.
 
-`/config` is held as `serde_json::Value`; the client does not infer an
-aggregate response schema or controller call sequence.
+Managed connection turns the recovered `all`, `ipfilter`, or `custom` setting
+into a platform route transaction. CIDR subtraction preserves exclusive
+networks and every known ingress outside the TUN, preventing the persistent
+UDP socket from routing into itself. DNS configuration is guarded and rolled
+back with the route transaction; Windows uses Wintun DNS, Linux uses
+`resolvectl`, and macOS uses a scoped SystemConfiguration entry.
+
+Unknown nested policy fields remain `serde_json::Value`. Traditional
+top-level `serverlist` and SR `sites` are mutually exclusive, matching the
+Android backend parser.
 
 ## Packet devices
 

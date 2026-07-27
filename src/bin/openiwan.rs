@@ -5,13 +5,19 @@ mod forward;
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
 #[cfg(feature = "managed")]
-use openiwan::managed::{ManagedClient, ProviderConfig};
+use openiwan::managed::{
+    AuthMethod, DiscoveredDomain, DomainClient, PreparedConnection, RoutingMode, SelectedIngress,
+};
 use openiwan::protocol::{self, Tlv};
-use openiwan::tun::{RouteGuard, TunDevice, resolve_route_targets};
+#[cfg(feature = "managed")]
+use openiwan::tun::resolve_route_policy;
+use openiwan::tun::{DnsGuard, RouteGuard, TunDevice, resolve_route_targets};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
 use std::fs;
 #[cfg(feature = "managed")]
 use std::io::Write;
+#[cfg(feature = "managed")]
+use std::net::ToSocketAddrs;
 #[cfg(feature = "forward")]
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -45,7 +51,7 @@ enum Command {
     Forward(ForwardArgs),
     /// Decode one hexadecimal iWAN datagram without network access.
     Decode(DecodeArgs),
-    /// Log in through a configured controller, manage lines, and connect.
+    /// Discover a customer domain, authenticate, select an ingress, and connect.
     #[cfg(feature = "managed")]
     Managed(ManagedArgs),
 }
@@ -182,12 +188,21 @@ struct DecodeArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedArgs {
-    /// Provider TOML file describing OIDC and controller parameters.
+    /// Customer domain resolved through the production lookup service.
     #[arg(long)]
-    provider: PathBuf,
+    domain: String,
     /// Controller device identifier.
     #[arg(long)]
     device_id: String,
+    /// Confirm that the user granted privacy/network access.
+    #[arg(long)]
+    consent: bool,
+    /// Directory for the recovered seven-day lookup cache.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Timeout for each UDP ingress probe.
+    #[arg(long, default_value_t = 2_000)]
+    ping_timeout_ms: u64,
     #[command(subcommand)]
     action: ManagedCommand,
 }
@@ -195,12 +210,47 @@ struct ManagedArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Subcommand)]
 enum ManagedCommand {
-    /// Authenticate with OIDC and print the dynamically decoded `/config` JSON.
-    Config {
-        /// Local posture version; omit it for a full posture refresh.
-        #[arg(long)]
-        posture_version: Option<String>,
-    },
+    /// Resolve the domain and print the discovered authentication path.
+    Discover,
+    /// Complete login, posture gates, ingress probing and the temporary OPEN.
+    Login(ManagedLoginArgs),
+    /// Complete login and establish the persistent VPN tunnel.
+    Connect(ManagedConnectArgs),
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Args)]
+struct ManagedLoginArgs {
+    /// Username for credential domains. Ignored for OIDC domains.
+    #[arg(long)]
+    username: Option<String>,
+    /// Read the credential-domain password from this environment variable.
+    #[arg(long, default_value = "OPENIWAN_PASSWORD")]
+    password_env: String,
+    /// Read the first password line from this mode-0600 file.
+    #[arg(long)]
+    password_file: Option<PathBuf>,
+    /// OIDC redirect URI registered by the original Android client.
+    #[arg(long, default_value = "com.panabit.mobile://oauth2redirect")]
+    redirect_uri: String,
+    /// JSON array containing locally evaluated posture check results.
+    #[arg(long)]
+    posture_results: Option<PathBuf>,
+    /// Cached local posture version sent to `/config`.
+    #[arg(long)]
+    posture_version: Option<i64>,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ManagedConnectArgs {
+    #[command(flatten)]
+    login: ManagedLoginArgs,
+    /// TUN interface name.
+    #[arg(long)]
+    tun: Option<String>,
+    #[command(flatten)]
+    routes: RouteArgs,
 }
 
 fn main() {
@@ -253,14 +303,24 @@ fn run_client(client: Client, tun: Option<&str>, route_arguments: &RouteArgs) ->
     let session = client.authenticate()?;
     print_session(session.info());
 
+    let mut route_ips = route_arguments.route_ips.clone();
+    route_ips.extend(
+        session
+            .info()
+            .dns_servers
+            .iter()
+            .filter(|server| **server != session.info().peer.ip())
+            .map(ToString::to_string),
+    );
     let routes = resolve_route_targets(
         &route_arguments.routes,
-        &route_arguments.route_ips,
+        &route_ips,
         &route_arguments.route_domains,
         Some(session.info().peer.ip()),
     )?;
     let device = Arc::new(TunDevice::open(tun, session.info())?);
     let _routes = RouteGuard::configure(&device, &routes)?;
+    let _dns = DnsGuard::configure(&device, &session.info().dns_servers, &[])?;
     for route in &routes {
         println!("route {route} -> {}", device.name());
     }
@@ -318,30 +378,346 @@ fn run_forward(
 
 #[cfg(feature = "managed")]
 fn managed(arguments: ManagedArgs) -> Result<()> {
-    let provider = ProviderConfig::load(&arguments.provider)?;
-    let client = ManagedClient::new(provider);
+    let client = DomainClient::new(arguments.cache_dir);
+    let discovered = client.discover(&arguments.domain, &arguments.device_id, arguments.consent)?;
     match arguments.action {
-        ManagedCommand::Config { posture_version } => {
-            let pending = client.begin_authorization()?;
+        ManagedCommand::Discover => print_discovery(&discovered),
+        ManagedCommand::Login(login) => {
+            let prepared = prepare_managed(
+                &client,
+                &discovered,
+                &arguments.device_id,
+                &login,
+                Duration::from_millis(arguments.ping_timeout_ms),
+            )?;
+            print_prepared(&prepared);
+        }
+        ManagedCommand::Connect(connect) => {
+            let prepared = prepare_managed(
+                &client,
+                &discovered,
+                &arguments.device_id,
+                &connect.login,
+                Duration::from_millis(arguments.ping_timeout_ms),
+            )?;
+            print_prepared(&prepared);
+            run_managed_client(prepared, connect.tun.as_deref(), &connect.routes)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn run_managed_client(
+    prepared: PreparedConnection,
+    tun: Option<&str>,
+    route_arguments: &RouteArgs,
+) -> Result<()> {
+    let client = prepared.client()?;
+    let session = client.authenticate()?;
+    print_session(session.info());
+
+    let routing = prepared.configuration.routing()?;
+    let mode = routing
+        .as_ref()
+        .map_or(RoutingMode::All, |routing| routing.mode);
+    let ip_filter = if mode == RoutingMode::All {
+        None
+    } else {
+        prepared.configuration.ip_filter()?
+    };
+    let has_ip_filter = ip_filter
+        .as_ref()
+        .is_some_and(|filter| !filter.inclusive.is_empty() || !filter.exclusive.is_empty());
+    let full_ipv4 = mode == RoutingMode::All || (mode == RoutingMode::IpFilter && !has_ip_filter);
+
+    let mut cidrs = route_arguments.routes.clone();
+    if let Some(filter) = &ip_filter
+        && has_ip_filter
+    {
+        cidrs.extend(valid_filter_cidrs(&filter.inclusive));
+    }
+    if mode == RoutingMode::Custom
+        && let Some(routing) = &routing
+    {
+        cidrs.extend(routing.custom_routes.iter().cloned());
+    }
+
+    let dns_servers = effective_managed_dns(&prepared, session.info())?;
+    if mode != RoutingMode::All {
+        cidrs.extend(
+            dns_servers
+                .iter()
+                .map(|server| format!("{server}/{}", if server.is_ipv4() { 32 } else { 128 })),
+        );
+    }
+    let mut exclusions = ip_filter
+        .as_ref()
+        .filter(|_| has_ip_filter)
+        .map_or_else(Vec::new, |filter| valid_filter_cidrs(&filter.exclusive));
+    exclusions.extend(managed_server_exclusions(&prepared.configuration)?);
+    let routes = resolve_route_policy(
+        &cidrs,
+        &route_arguments.route_ips,
+        &route_arguments.route_domains,
+        &exclusions,
+        session.info().peer.ip(),
+        full_ipv4,
+    )?;
+
+    let mut interface_session = session.info().clone();
+    if let Some(routing) = &routing
+        && routing.mtu_mode == "custom"
+        && let Ok(mtu) = u16::try_from(routing.custom_mtu)
+        && (576..=9_000).contains(&mtu)
+    {
+        interface_session.mtu = mtu;
+    }
+    interface_session.dns_servers.clone_from(&dns_servers);
+    let device = Arc::new(TunDevice::open(tun, &interface_session)?);
+    let _routes = RouteGuard::configure(&device, &routes)?;
+    let split_domains = routing
+        .as_ref()
+        .filter(|routing| routing.split_dns_enabled)
+        .map_or(&[][..], |routing| {
+            routing.split_dns_custom_domains.as_slice()
+        });
+    let _dns = DnsGuard::configure(&device, &dns_servers, split_domains)?;
+    for route in &routes {
+        println!("route {route} -> {}", device.name());
+    }
+    if !dns_servers.is_empty() {
+        println!(
+            "DNS policy: {}",
+            dns_servers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("TUN {} is active; press Ctrl-C to stop", device.name());
+
+    let shutdown = install_shutdown_handler()?;
+    let end = client.run_reconnecting_from(session, device, shutdown)?;
+    println!("session ended: {end:?}");
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn valid_filter_cidrs(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let valid = value
+                .split_once('/')
+                .and_then(|(address, prefix)| {
+                    let address = address.parse::<std::net::IpAddr>().ok()?;
+                    let prefix = prefix.parse::<u8>().ok()?;
+                    (prefix <= if address.is_ipv4() { 32 } else { 128 }).then_some(())
+                })
+                .is_some();
+            if valid {
+                Some(value.clone())
+            } else {
+                tracing::warn!(rule = %value, "ignoring invalid recovered IP-filter rule");
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "managed")]
+fn managed_server_exclusions(
+    configuration: &openiwan::managed::ControllerConfiguration,
+) -> Result<Vec<String>> {
+    let mut exclusions = vec![
+        "169.254.0.0/16".into(),
+        "224.0.0.0/4".into(),
+        "127.0.0.0/8".into(),
+    ];
+    let mut endpoints = configuration
+        .iwan_servers()?
+        .into_iter()
+        .map(|server| server.endpoint())
+        .collect::<Vec<_>>();
+    for group in configuration.sr_groups()? {
+        endpoints.extend(group.entries.into_iter().filter_map(|entry| {
+            let port = u16::try_from(entry.ingress.server_port).ok()?;
+            (port != 0 && !entry.ingress.server_name.is_empty()).then(|| {
+                if entry.ingress.server_name.contains(':')
+                    && !entry.ingress.server_name.starts_with('[')
+                {
+                    format!("[{}]:{port}", entry.ingress.server_name)
+                } else {
+                    format!("{}:{port}", entry.ingress.server_name)
+                }
+            })
+        }));
+    }
+    for endpoint in endpoints {
+        if let Ok(addresses) = endpoint.to_socket_addrs() {
+            exclusions.extend(addresses.map(|address| {
+                let address = address.ip();
+                format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
+            }));
+        }
+    }
+    exclusions.sort();
+    exclusions.dedup();
+    Ok(exclusions)
+}
+
+#[cfg(feature = "managed")]
+fn effective_managed_dns(
+    prepared: &PreparedConnection,
+    session: &openiwan::SessionInfo,
+) -> Result<Vec<std::net::IpAddr>> {
+    let routing = prepared.configuration.routing()?;
+    let dns_mode = routing
+        .as_ref()
+        .map_or("server", |routing| routing.dns_mode.as_str());
+    if dns_mode == "disabled" {
+        return Ok(Vec::new());
+    }
+    let mut servers = Vec::new();
+    if dns_mode == "custom" {
+        if let Some(routing) = routing {
+            for value in [&routing.custom_dns1, &routing.custom_dns2] {
+                if !value.trim().is_empty() {
+                    servers.push(value.trim().parse().map_err(|_| {
+                        Error::InvalidConfig(format!("invalid custom DNS server {value:?}"))
+                    })?);
+                }
+            }
+        }
+    } else {
+        if let Some(configuration) = prepared.configuration.dns() {
+            for value in configuration.servers {
+                if let Ok(address) = value.parse() {
+                    servers.push(address);
+                }
+            }
+        }
+        servers.extend(session.dns_servers.iter().copied());
+    }
+    servers.sort_unstable();
+    servers.dedup();
+    Ok(servers)
+}
+
+#[cfg(feature = "managed")]
+fn prepare_managed(
+    client: &DomainClient,
+    discovered: &DiscoveredDomain,
+    device_id: &str,
+    arguments: &ManagedLoginArgs,
+    ping_timeout: Duration,
+) -> Result<PreparedConnection> {
+    match discovered.auth.method {
+        AuthMethod::Credential => {
+            let username = arguments.username.as_deref().ok_or_else(|| {
+                Error::InvalidConfig("--username is required for this credential domain".into())
+            })?;
+            let password = read_managed_secret(arguments)?;
+            client.password_login(discovered, device_id, username, password, ping_timeout)
+        }
+        AuthMethod::Oidc => {
+            let pending = client.begin_oidc(discovered, &arguments.redirect_uri)?;
             println!(
                 "Open this URL in a browser and complete authentication:\n\n{}\n",
                 pending.authorization_url()
             );
             let redirect = prompt_line("Paste the complete callback URL: ")?;
-            let identity = client.complete_authorization(&pending, &redirect)?;
-            let configuration = client.fetch_configuration(
+            let identity = client.complete_oidc(&pending, &redirect)?;
+            let posture_results = read_posture_results(arguments.posture_results.as_deref())?;
+            client.oidc_login(
+                discovered,
+                device_id,
                 &identity,
-                &arguments.device_id,
-                posture_version.as_deref(),
-            )?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(configuration.raw())
-                    .map_err(|error| Error::Controller(error.to_string()))?
-            );
+                &posture_results,
+                arguments.posture_version,
+                ping_timeout,
+            )
         }
     }
-    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn print_discovery(discovered: &DiscoveredDomain) {
+    println!("domain: {}", discovered.active_domain());
+    println!("lookup type: {}", discovered.lookup.service_type.as_str());
+    println!(
+        "lookup source: {}",
+        match discovered.lookup.source {
+            openiwan::managed::LookupSource::Network => "network",
+            openiwan::managed::LookupSource::Cache => "cache",
+        }
+    );
+    println!(
+        "authentication: {}",
+        match discovered.auth.method {
+            AuthMethod::Credential => "credential",
+            AuthMethod::Oidc => "oidc",
+        }
+    );
+}
+
+#[cfg(feature = "managed")]
+fn print_prepared(prepared: &PreparedConnection) {
+    println!("login ready for domain {}", prepared.domain);
+    match &prepared.ingress {
+        SelectedIngress::Iwan { server, latency } => println!(
+            "best server: {} ({}, {:.3} ms)",
+            server.name,
+            server.endpoint(),
+            latency.as_secs_f64() * 1_000.0
+        ),
+        SelectedIngress::SegmentRouting {
+            group_id,
+            entry,
+            latency,
+        } => println!(
+            "best SR group: {group_id}, ingress {}:{} ({:.3} ms)",
+            entry.ingress.server_name,
+            entry.ingress.server_port,
+            latency.as_secs_f64() * 1_000.0
+        ),
+    }
+}
+
+#[cfg(feature = "managed")]
+fn read_managed_secret(arguments: &ManagedLoginArgs) -> Result<String> {
+    if let Some(path) = &arguments.password_file {
+        validate_secret_file(path)?;
+        let mut contents = fs::read_to_string(path)?;
+        let password = contents
+            .lines()
+            .next()
+            .map(str::to_owned)
+            .filter(|password| !password.is_empty())
+            .ok_or_else(|| Error::InvalidConfig("password file is empty".into()));
+        contents.zeroize();
+        return password;
+    }
+    if let Ok(password) = std::env::var(&arguments.password_env)
+        && !password.is_empty()
+    {
+        return Ok(password);
+    }
+    prompt_password("iWAN password: ")
+}
+
+#[cfg(feature = "managed")]
+fn read_posture_results(path: Option<&Path>) -> Result<Vec<serde_json::Value>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)
+        .map_err(|error| Error::InvalidConfig(format!("{}: {error}", path.display())))?;
+    value.as_array().cloned().ok_or_else(|| {
+        Error::InvalidConfig(format!("{} must contain a JSON array", path.display()))
+    })
 }
 
 #[cfg(feature = "managed")]
@@ -614,29 +990,52 @@ mod tests {
 
     #[cfg(feature = "managed")]
     #[test]
-    fn parses_managed_config_command() {
+    fn parses_managed_login_command() {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "managed",
-            "--provider",
-            "provider.toml",
+            "--domain",
+            "iwan.ustc",
             "--device-id",
             "device-1",
-            "config",
+            "--consent",
+            "login",
+            "--username",
+            "alice",
             "--posture-version",
-            "v2",
+            "2",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Command::Managed(ManagedArgs {
+                domain,
                 device_id,
-                action: ManagedCommand::Config {
-                    posture_version: Some(version)
-                },
+                consent: true,
+                action: ManagedCommand::Login(ManagedLoginArgs {
+                    posture_version: Some(version),
+                    username: Some(username),
+                    ..
+                }),
                 ..
-            }) if device_id == "device-1" && version == "v2"
+            }) if domain == "iwan.ustc"
+                && device_id == "device-1"
+                && username == "alice"
+                && version == 2
         ));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn invalid_server_ip_filter_rules_are_ignored() {
+        assert_eq!(
+            valid_filter_cidrs(&[
+                "10.0.0.0/8".into(),
+                "10.0.0.0/99".into(),
+                "not-a-route".into()
+            ]),
+            ["10.0.0.0/8"]
+        );
     }
 
     #[cfg(feature = "forward")]

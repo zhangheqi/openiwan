@@ -554,6 +554,17 @@ pub fn build_close(header: PacketHeader) -> Vec<u8> {
     )
 }
 
+/// Build the header-only `CLOSE` used by the Android login-screen OPEN probe.
+pub fn build_probe_close(header: PacketHeader) -> [u8; HEADER_LEN] {
+    PacketHeader::new(
+        PacketType::Close,
+        header.encryption,
+        header.session_id,
+        header.token,
+    )
+    .encode()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EchoDelayStats {
     pub current_micros: u32,
@@ -701,6 +712,10 @@ mod tests {
         assert_eq!(
             build_close(header),
             decode_hex("1701123489abcdefc1ee1606aa425b8bd62cafd88e89f052")
+        );
+        assert_eq!(
+            build_probe_close(header).as_slice(),
+            decode_hex("1701123489abcdef")
         );
         assert!(decode_packet(&header.encode()).is_ok());
     }

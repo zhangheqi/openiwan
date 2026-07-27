@@ -23,12 +23,19 @@
 - 明文、仅循环前 8 字节密钥的 XOR、AES-128-ECB；
 - 传统 IPv4/IPv6 数据类与旧式双分片重组；
 - SR 头、方向相关路径、内外层加密、双分片发送、按 offset 重组和 SR monitor；
-- OIDC Authorization Code + PKCE S256；
-- 已确认的 `/config` 请求（响应保留为动态 JSON）；
+- 客户域校验、主备 lookup、重试、规范域替换、联网授权门禁、7 天缓存回退与
+  逆向确认的平台 HMAC 鉴权；
+- `serverlist`、`saas`、`controller` 三类发现路径，以及 lookup 下发的带签名
+  controller auth endpoint；
+- 密码模式的入口 ping、最佳线路选择和登录页临时 UDP `OPEN`；
+- 使用控制器下发端点的 OIDC Authorization Code + PKCE S256；
+- controller 密码模式 serverlist、OIDC `/config`、按 `server_id` 的凭据、
+  传统/SR 选择、posture 与设备绑定门禁和正式连接的第二次 `OPEN`；
 - HTTP keepalive 的字段图、一次重试、签名规范化与 HMAC。
 
-逆向无法唯一恢复 `/config` 总响应以及 `/lookup`、`/auth` 的完整 schema。因此，
-这些内容不进入强类型 API。已知歧义见[协议参考](docs/IWAN_PROTOCOL_2_3_0.md)。
+部署相关的嵌套策略仍保留动态 JSON；已确认的外层字段、传统服务器和 SR serializer
+进入强类型 API，不补写逆向无法证明的字段。已知歧义见
+[协议参考](docs/IWAN_PROTOCOL_2_3_0.md)。
 
 ## 安装
 
@@ -140,23 +147,46 @@ openiwan forward \
 `tcp://` 原样转发字节；`http://`、`https://` 对一个固定 origin 提供 HTTP/1.1
 反向代理。HTTPS 会验证上游证书，并支持重复使用 `--ca-cert` 添加 CA。
 
-## 托管配置
+## 客户域登录与托管连接
 
-provider 文件只包含已确认的 OIDC、`/config`、keepalive 所需字段，参见
-[托管说明](docs/MANAGED_PROVIDERS.md)与[非生产模板](examples/providers/example.toml)。
-
-认证并打印动态 `/config` JSON：
+正常客户端从客户域开始，不再使用人工 provider 文件。域发现前必须显式确认
+隐私/联网授权：
 
 ```bash
 openiwan managed \
-  --provider provider.toml \
+  --domain iwan.example \
   --device-id device-identifier \
-  config
+  --consent \
+  discover
 ```
 
-CLI 不会落盘或猜测解析这个总响应。库调用者可读取
-`ControllerConfiguration::raw`，在部署已知的位置反序列化已确认的 `SrEntry`，
-再显式构造 `ClientConfig`。
+只完成登录与入口选择：
+
+```bash
+openiwan managed \
+  --domain iwan.example \
+  --device-id device-identifier \
+  --consent \
+  login --username alice
+```
+
+OIDC 域会忽略 `--username` 并输出 PKCE 授权地址；密码域会 ping 全部入口、选择最佳
+线路、执行登录页临时 `OPEN`，发送逆向确认的 8 字节无签名 `CLOSE`，随后关闭该
+socket。
+
+建立正式隧道：
+
+```bash
+sudo openiwan managed \
+  --domain iwan.example \
+  --device-id device-identifier \
+  --consent \
+  connect --username alice
+```
+
+OIDC posture 本地检查结果通过 `--posture-results` 传入，内容是逆向确认的
+`check_results` JSON 数组。托管连接还会应用逆向确认的路由、IP filter、DNS、
+split DNS 与 MTU 策略。详见[托管客户端流程](docs/MANAGED_CLIENT_FLOW.md)。
 
 ## 代码模块
 
@@ -165,7 +195,8 @@ CLI 不会落盘或猜测解析这个总响应。库调用者可读取
 - `fragment`：传统/SR 分片；
 - `sr`：SR 封装、加密、数据规划和 monitor；
 - `client`：认证与会话 worker；
-- `managed`：OIDC、`/config`、SR serializer 模型和 HTTP keepalive；
+- `managed`：lookup、认证模式、OIDC、`/config`、posture、入口选择、SR serializer
+  模型和 HTTP keepalive；
 - `tun`：原生接口与路由集成。
 
 ## 验证

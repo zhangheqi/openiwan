@@ -997,7 +997,7 @@ impl TcpConnector {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "no usable iWAN DNS server was advertised or configured; \
-                 add dns_servers to the managed provider or pass --dns-server",
+                 supply controller DNS servers or pass --dns-server",
             ));
         }
 

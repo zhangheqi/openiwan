@@ -1,16 +1,9 @@
 use super::http::{HttpRequest, HttpResponse, HttpTransport};
+use super::security;
 use crate::{Error, Result};
-use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
-use url::Url;
+use std::time::Duration;
 use zeroize::Zeroizing;
-
-type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct KeepaliveCredentials {
@@ -257,42 +250,29 @@ fn execute_once<T: HttpTransport>(
     credentials: &KeepaliveCredentials,
     body: &[u8],
 ) -> Result<HttpResponse> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::Controller("system clock is before the Unix epoch".into()))?
-        .as_secs()
-        .to_string();
-    let nonce = random_nonce();
-    let signature = sign_request(
+    let mut authentication = security::mobile_api_headers_with_credentials(
+        "POST",
         endpoint,
         body,
-        &timestamp,
-        &nonce,
-        credentials.app_secret.as_bytes(),
+        &credentials.app_id,
+        credentials.app_secret.as_str(),
     )?;
+    let mut headers = vec![
+        ("Content-Type".into(), "application/json".into()),
+        ("X-Mobile-Api-Version".into(), "3".into()),
+        (
+            "Authorization".into(),
+            format!("Bearer {}", credentials.access_token.as_str()),
+        ),
+    ];
+    headers.append(&mut authentication);
     transport.execute(HttpRequest {
         method: "POST",
         url: endpoint.to_owned(),
-        headers: vec![
-            ("Content-Type".into(), "application/json".into()),
-            ("X-Mobile-Api-Version".into(), "3".into()),
-            (
-                "Authorization".into(),
-                format!("Bearer {}", credentials.access_token.as_str()),
-            ),
-            ("X-Auth-AppId".into(), credentials.app_id.clone()),
-            ("X-Auth-Timestamp".into(), timestamp),
-            ("X-Auth-Nonce".into(), nonce),
-            ("X-Auth-Sign".into(), signature),
-        ],
+        headers,
         body: body.to_vec(),
+        timeout: Some(Duration::from_secs(5)),
     })
-}
-
-fn random_nonce() -> String {
-    let mut bytes = [0_u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    hex_lower(&bytes)
 }
 
 pub fn sign_request(
@@ -302,11 +282,7 @@ pub fn sign_request(
     nonce: &str,
     app_secret: &[u8],
 ) -> Result<String> {
-    let canonical = canonical_request(endpoint, exact_body, timestamp, nonce)?;
-    let mut mac = HmacSha256::new_from_slice(app_secret)
-        .map_err(|_| Error::Crypto("invalid keepalive HMAC key"))?;
-    mac.update(canonical.as_bytes());
-    Ok(hex_lower(&mac.finalize().into_bytes()))
+    security::sign_http_request("POST", endpoint, exact_body, timestamp, nonce, app_secret)
 }
 
 pub fn canonical_request(
@@ -315,77 +291,7 @@ pub fn canonical_request(
     timestamp: &str,
     nonce: &str,
 ) -> Result<String> {
-    let url = Url::parse(endpoint)
-        .map_err(|error| Error::Controller(format!("invalid keepalive URL: {error}")))?;
-    let path = decode_component(url.path(), false);
-    let path = if path.is_empty() { "/" } else { &path };
-    let mut query = BTreeMap::new();
-    if let Some(raw_query) = url.query() {
-        for pair in raw_query.split('&') {
-            let (raw_name, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
-            let name = decode_component(raw_name, true);
-            let value = decode_component(raw_value, true);
-            query.entry(name).or_insert(value);
-        }
-    }
-    let canonical_query = query
-        .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect::<Vec<_>>()
-        .join("&");
-    Ok(format!(
-        "POST\n{path}\n{canonical_query}\n{}\n{timestamp}\n{nonce}",
-        hex_lower(&Sha256::digest(exact_body))
-    ))
-}
-
-fn decode_component(value: &str, plus_as_space: bool) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match bytes[offset] {
-            b'+' if plus_as_space => {
-                decoded.push(b' ');
-                offset += 1;
-            }
-            b'%' => {
-                if offset + 2 >= bytes.len() {
-                    return value.to_owned();
-                }
-                let Some(high) = hex_value(bytes[offset + 1]) else {
-                    return value.to_owned();
-                };
-                let Some(low) = hex_value(bytes[offset + 2]) else {
-                    return value.to_owned();
-                };
-                decoded.push((high << 4) | low);
-                offset += 3;
-            }
-            byte => {
-                decoded.push(byte);
-                offset += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).unwrap_or_else(|_| value.to_owned())
-}
-
-const fn hex_value(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
+    security::canonical_http_request("POST", endpoint, exact_body, timestamp, nonce)
 }
 
 #[cfg(test)]

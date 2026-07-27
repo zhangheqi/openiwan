@@ -9,8 +9,8 @@ contribution policy.
 
 - [Architecture](ARCHITECTURE.md) — crate layout, session lifecycle, trust
   boundaries, and extension points
-- [Managed Providers](MANAGED_PROVIDERS.md) — confirmed OIDC, `/config`,
-  SR-entry, and keepalive contracts
+- [Managed Client Flow](MANAGED_CLIENT_FLOW.md) — lookup, auth selection, OIDC,
+  `/config`, posture, ingress selection, and keepalive contracts
 - [iWAN Android 2.3.0 Protocol](IWAN_PROTOCOL_2_3_0.md) — traditional, SR,
   controller, and keepalive quick reference
 - [Reverse-Engineering Evidence and Limitations](REVERSE_ENGINEERING.md) —

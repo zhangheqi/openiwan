@@ -94,14 +94,9 @@ Keep general code, tests, examples, and documentation independent of a
 particular deployment. Use neutral identifiers, reserved example addresses, and
 placeholder domains when illustrating provider behavior.
 
-Organization domains, real service or resolver addresses, branded operating
-instructions, and mappings from protocol variants to a deployment belong only
-in:
-
-- an external provider configuration under `examples/providers`
-- a deployment guide under `docs/providers`
-- a provenance record such as `docs/REVERSE_ENGINEERING.md`
-- an accurate historical release entry
+Organization domains, private service or resolver addresses, branded operating
+instructions, and deployment-only mappings belong in external documentation or
+an accurate provenance record, never in runtime defaults.
 
 Provider-specific details must remain configurable rather than becoming
 runtime defaults. Necessary Panabit protocol attribution and compatibility

@@ -149,18 +149,57 @@ The confirmed `/config` request is:
 ```json
 {
   "domain": "domain",
-  "type": "service-type",
+  "type": "client-platform",
   "oem_name": "panabit",
   "app_version": "2.3.0",
   "device_id": "device-id",
   "userName": "optional",
-  "posture_version": "optional"
+  "posture_version": 7
 }
 ```
 
-It uses `Content-Type: application/json`, `X-Mobile-Api-Version: 4`, and an
+The `type` member is the runtime platform (`android`, `ios`, `macos`, or
+`windows`), not the lookup result's `controller` service type.
+
+It uses `Content-Type: application/json`, `X-Mobile-Api-Version: 4`, the four
+mobile-API `X-Auth-*` headers over the final URL and exact body, and an
 optional OIDC bearer token. Its aggregate response schema is unresolved and
-must remain dynamic.
+must remain dynamic below the confirmed outer fields.
+
+The recovered client begins with `POST /lookup` against
+`lookup.gsase.com`, then `lookupbak.hypersase.com`, with two attempts per
+server and a seven-day cache fallback. It accepts only `serverlist`, `saas`,
+and `controller`. Controller domains POST to the exact auth URL returned by
+lookup; the domain is in the body and is not appended to the URL.
+`credential` selects password login and `oidc` selects Authorization Code +
+PKCE S256. The auth request is signed with the controller `app_id` and its
+recovered SaaS/controller secret-selection rule.
+Both lookup and auth use the same mobile-API HMAC header construction as
+`/config`, with the actual HTTP method and exact body in the canonical request.
+
+Password login probes ingress latency, selects the best responder, performs a
+one-shot OPEN, saves the selected server and credentials, and closes the UDP
+socket. Controller credential mode downloads its controller-provided
+serverlist endpoint; OIDC login obtains `/config`, uses `server_credentials`
+by `server_id`, and evaluates posture and device-binding gates when configured.
+The persistent VPN connection always performs another OPEN before creating
+TUN.
+
+Controller iWAN lines are nested under `serverlist.serverlist`; SR groups use
+the mutually exclusive top-level `sites` member. Each controller line can carry
+`userName` and `passWord`. Flutter extracts these into a top-level
+`server_credentials` array when reloading the Android backend.
+
+Controller `passWord` is standard Base64 containing
+`nonce[12] || ciphertext || tag[16]`. The AES-256-GCM key is
+`SHA256(secret || "|" || active_domain || "|" || userName)`, where `secret`
+uses the controller `app_id` selector above. Associated data is
+`active_domain || "|" || userName`. SR ingress credentials use the same
+construction with the ingress username.
+
+For posture responses, integer and decimal-string versions are normalized. A
+missing version or version `0` is the recovered empty/disabled sentinel. It
+clears stale posture state and does not trigger `/posture/evaluate`.
 
 Keepalive uses API version 3, a bearer token, five-second connect/read
 timeouts, and one retry after a failed attempt except HTTP 401. Every attempt
@@ -188,7 +227,7 @@ The recovered artifacts do not establish:
 - the production-preferred `OPEN_REJECT` construction;
 - vendor names for SR monitor bits or marker `0x79`;
 - relay-side SR path mutation;
-- complete `/lookup`, `/auth`, or aggregate `/config` schemas;
+- deployment-specific nested `/config` policy schemas;
 - whether production servers require signed `CLOSE`;
 - server-side duplicate suppression.
 

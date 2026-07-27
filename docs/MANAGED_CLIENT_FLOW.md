@@ -224,10 +224,13 @@ a CIDR difference instead of an unsafe default route that could feed the UDP
 transport back into its own TUN.
 
 `dns_mode=server` uses controller and OPEN_ACK DNS, `custom` uses
-`custom_dns1`/`custom_dns2`, and `disabled` installs no VPN DNS. DNS servers
-receive tunnel host routes in split modes. Linux uses `resolvectl`, macOS uses
-a scoped SystemConfiguration DNS entry, and Windows configures the Wintun
-adapter; guards restore platform state when the connection ends.
+`custom_dns1`/`custom_dns2`, and `disabled` installs no VPN DNS. An unspecified
+OPEN_ACK address such as `0.0.0.0` is ignored; controller deployments with no
+usable server then use the official-client fallback resolvers `1.1.1.1` and
+`114.114.114.114`. DNS servers receive tunnel host routes in split modes.
+Linux uses `resolvectl`, macOS uses a scoped SystemConfiguration DNS entry, and
+Windows configures the Wintun adapter; guards restore platform state when the
+connection ends.
 `split_dns_enabled` and `split_dns_custom_domains` become route-only resolver
 domains. A valid `mtu_mode=custom` value in `576..=9000` overrides the TUN MTU.
 

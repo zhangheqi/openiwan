@@ -205,10 +205,15 @@ pub struct PreparedConnection {
     pub domain: String,
     pub ingress: SelectedIngress,
     pub configuration: ControllerConfiguration,
+    service_type: ServiceType,
     credentials: ConnectionCredentials,
 }
 
 impl PreparedConnection {
+    pub const fn service_type(&self) -> ServiceType {
+        self.service_type
+    }
+
     pub fn client(&self) -> Result<Client> {
         self.configuration.enforce_device_binding()?;
         let config = match &self.ingress {
@@ -399,6 +404,7 @@ impl<T: HttpTransport> DomainClient<T> {
             domain: domain.active_domain().to_owned(),
             ingress,
             configuration,
+            service_type: domain.lookup.service_type,
             credentials,
         })
     }
@@ -467,6 +473,7 @@ impl<T: HttpTransport> DomainClient<T> {
             domain: domain.active_domain().to_owned(),
             ingress,
             configuration,
+            service_type: domain.lookup.service_type,
             credentials,
         })
     }
@@ -874,6 +881,7 @@ fn client_for(ingress: &SelectedIngress, credentials: &ConnectionCredentials) ->
         domain: String::new(),
         ingress: ingress.clone(),
         configuration: ControllerConfiguration::from_raw(Value::Null),
+        service_type: ServiceType::ServerList,
         credentials: ConnectionCredentials {
             username: credentials.username.clone(),
             password: credentials.password.clone(),

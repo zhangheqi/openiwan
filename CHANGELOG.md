@@ -65,6 +65,8 @@ All notable changes to OpeniWAN are documented here. The project follows
 
 - Parse the lookup response service type from `data.type` while sending
   `serviceType: "fgb"` in the signed request body.
+- Ignore an unspecified `0.0.0.0` OPEN_ACK DNS address and use the
+  official-client fallback resolvers for managed controller connections.
 - Use canonical `Duration` units so the Rust 1.97 Clippy quality gate passes
   with warnings denied.
 

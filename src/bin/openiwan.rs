@@ -13,7 +13,7 @@ use openiwan::client;
 #[cfg(feature = "managed")]
 use openiwan::managed::{
     AuthMethod, DiscoveredDomain, DomainClient, LinePreference, LineProbe, OidcLoginOptions,
-    PreparedConnection, RoutingMode, SelectedIngress,
+    PreparedConnection, RoutingMode, SelectedIngress, ServiceType,
 };
 use openiwan::protocol::{self, Tlv};
 #[cfg(feature = "managed")]
@@ -1129,8 +1129,8 @@ fn effective_managed_dns(
     if dns_mode == "disabled" {
         return Ok(Vec::new());
     }
-    let mut servers = Vec::new();
-    if dns_mode == "custom" {
+    let mut servers = if dns_mode == "custom" {
+        let mut servers = Vec::new();
         if let Some(routing) = routing {
             for value in [&routing.custom_dns1, &routing.custom_dns2] {
                 if !value.trim().is_empty() {
@@ -1140,19 +1140,41 @@ fn effective_managed_dns(
                 }
             }
         }
+        servers
     } else {
-        if let Some(configuration) = prepared.configuration.dns() {
-            for value in configuration.servers {
-                if let Ok(address) = value.parse() {
-                    servers.push(address);
-                }
-            }
-        }
-        servers.extend(session.dns_servers.iter().copied());
-    }
+        let configured = prepared
+            .configuration
+            .dns()
+            .map_or_else(Vec::new, |configuration| configuration.servers);
+        effective_managed_server_dns(&configured, &session.dns_servers, prepared.service_type())
+    };
     servers.sort_unstable();
     servers.dedup();
     Ok(servers)
+}
+
+#[cfg(feature = "managed")]
+fn effective_managed_server_dns(
+    configured: &[String],
+    open_ack: &[std::net::IpAddr],
+    service_type: ServiceType,
+) -> Vec<std::net::IpAddr> {
+    let mut servers = configured
+        .iter()
+        .filter_map(|value| value.parse::<std::net::IpAddr>().ok())
+        .chain(open_ack.iter().copied())
+        .filter(|address| !address.is_unspecified())
+        .collect::<Vec<_>>();
+    if servers.is_empty() && service_type == ServiceType::Controller {
+        tracing::warn!(
+            "managed controller supplied no usable DNS server; using public fallback resolvers"
+        );
+        servers.extend([
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(114, 114, 114, 114)),
+        ]);
+    }
+    servers
 }
 
 #[cfg(feature = "managed")]
@@ -1867,6 +1889,31 @@ mod tests {
                 "not-a-route".into()
             ]),
             ["10.0.0.0/8"]
+        );
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn managed_controller_dns_rejects_unspecified_and_uses_official_fallbacks() {
+        let servers = effective_managed_server_dns(
+            &[],
+            &["0.0.0.0".parse().unwrap()],
+            ServiceType::Controller,
+        );
+        assert_eq!(
+            servers,
+            [
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "114.114.114.114".parse().unwrap()
+            ]
+        );
+        assert!(
+            effective_managed_server_dns(
+                &[],
+                &["0.0.0.0".parse().unwrap()],
+                ServiceType::ServerList
+            )
+            .is_empty()
         );
     }
 

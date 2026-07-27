@@ -1002,7 +1002,9 @@ fn parse_open_ack(
                 }
             }
             TlvType::Dns => {
-                if let Ok(value) = attribute.first_ipv4() {
+                if let Ok(value) = attribute.first_ipv4()
+                    && !value.is_unspecified()
+                {
                     dns_servers = vec![IpAddr::V4(value)];
                 }
             }
@@ -1235,7 +1237,7 @@ mod tests {
         let packet = protocol::decode_packet(&encode_control(header, &body)).unwrap();
         let info = parse_open_ack(&packet, "127.0.0.1:6001".parse().unwrap(), 7, 1400).unwrap();
         assert_eq!(info.address, Some("192.0.2.1".parse().unwrap()));
-        assert_eq!(info.dns_servers, ["0.0.0.0".parse::<IpAddr>().unwrap()]);
+        assert!(info.dns_servers.is_empty());
         assert_eq!(info.encryption, EncryptionMethod::None);
     }
 

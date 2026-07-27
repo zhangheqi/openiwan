@@ -1,3 +1,6 @@
+#[cfg(feature = "managed")]
+#[path = "openiwan/credentials.rs"]
+mod credentials;
 #[cfg(feature = "forward")]
 #[path = "openiwan/forward.rs"]
 mod forward;
@@ -255,6 +258,16 @@ struct ManagedLoginArgs {
     /// Cached local posture version sent to `/config`.
     #[arg(long)]
     posture_version: Option<i64>,
+    /// Save successfully verified authentication in the operating-system
+    /// credential store. Requires a persistent profile.
+    #[arg(long)]
+    remember: bool,
+    /// Ignore saved authentication and perform a fresh login.
+    #[arg(long)]
+    reauthenticate: bool,
+    /// Never prompt for a password or launch an interactive OIDC flow.
+    #[arg(long)]
+    non_interactive: bool,
     /// One-shot line preference: auto, iwan:<server-id>, or sr:<group-id>.
     /// Defaults to the selected profile's saved preference.
     #[arg(long)]
@@ -314,6 +327,8 @@ enum ProfileCommand {
     Use { name: String },
     /// Remove a profile.
     Remove { name: String },
+    /// Delete saved authentication for a profile.
+    Logout { name: Option<String> },
 }
 
 #[cfg(feature = "managed")]
@@ -473,11 +488,12 @@ struct ManagedContext {
     device_id: String,
     username: Option<String>,
     line: LinePreference,
+    credential_id: Option<String>,
 }
 
 #[cfg(feature = "managed")]
 fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
-    let context = resolve_managed_context(&arguments, store)?;
+    let mut context = resolve_managed_context(&arguments, store)?;
     let cache_directory = arguments
         .cache_dir
         .clone()
@@ -487,25 +503,27 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
     match arguments.action {
         ManagedCommand::Discover => print_discovery(&discovered),
         ManagedCommand::Login(login) => {
+            let line = context.line.clone();
             let prepared = prepare_managed(
                 &client,
                 &discovered,
-                &context.device_id,
+                store,
+                &mut context,
                 &login,
-                context.username.as_deref(),
-                &context.line,
+                &line,
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
             print_prepared(&prepared);
         }
         ManagedCommand::Connect(connect) => {
+            let line = context.line.clone();
             let prepared = prepare_managed(
                 &client,
                 &discovered,
-                &context.device_id,
+                store,
+                &mut context,
                 &connect.login,
-                context.username.as_deref(),
-                &context.line,
+                &line,
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
             print_prepared(&prepared);
@@ -517,9 +535,9 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
             let prepared = prepare_managed(
                 &client,
                 &discovered,
-                &context.device_id,
+                store,
+                &mut context,
                 &lines.login,
-                context.username.as_deref(),
                 &LinePreference::Auto,
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
@@ -603,6 +621,10 @@ fn resolve_managed_context(
         line: profile
             .as_ref()
             .map_or_else(LinePreference::default, |profile| profile.line.clone()),
+        credential_id: profile
+            .as_ref()
+            .map(|profile| profile.credential_id.clone())
+            .filter(|identifier| !identifier.is_empty()),
     })
 }
 
@@ -625,51 +647,7 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
             })?;
             print_profile(&name, profile, persisted.default_profile.as_deref(), json)?;
         }
-        ProfileCommand::Set(arguments) => {
-            let name = arguments.name.clone();
-            state::validate_profile_name(&name)?;
-            store.update(|persisted| {
-                let was_empty = persisted.profiles.is_empty();
-                let mut profile = if let Some(profile) = persisted.profiles.get(&name) {
-                    profile.clone()
-                } else {
-                    let domain = arguments.domain.clone().ok_or_else(|| {
-                        Error::InvalidConfig("--domain is required for a new profile".into())
-                    })?;
-                    let device_id = arguments.device_id.clone().ok_or_else(|| {
-                        Error::InvalidConfig("--device-id is required for a new profile".into())
-                    })?;
-                    state::ManagedProfile::new(domain, device_id)?
-                };
-                if let Some(domain) = &arguments.domain {
-                    profile.domain.clone_from(domain);
-                }
-                if let Some(device_id) = &arguments.device_id {
-                    profile.device_id.clone_from(device_id);
-                }
-                if let Some(username) = &arguments.username {
-                    profile.username = Some(username.clone());
-                } else if arguments.clear_username {
-                    profile.username = None;
-                }
-                if let Some(line) = &arguments.line {
-                    profile.line = line.clone();
-                }
-                profile.validate()?;
-                persisted.profiles.insert(name.clone(), profile);
-                if was_empty && persisted.default_profile.is_none() {
-                    persisted.default_profile = Some(name.clone());
-                }
-                Ok(())
-            })?;
-            let persisted = store.load()?;
-            print_profile(
-                &name,
-                &persisted.profiles[&name],
-                persisted.default_profile.as_deref(),
-                false,
-            )?;
-        }
+        ProfileCommand::Set(arguments) => set_profile(arguments, store)?,
         ProfileCommand::Use { name } => {
             state::validate_profile_name(&name)?;
             store.update(|persisted| {
@@ -683,21 +661,144 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
             })?;
             println!("default profile: {name}");
         }
-        ProfileCommand::Remove { name } => {
-            state::validate_profile_name(&name)?;
-            store.update(|persisted| {
-                if persisted.profiles.remove(&name).is_none() {
-                    return Err(Error::InvalidConfig(format!(
-                        "managed profile {name:?} does not exist"
-                    )));
-                }
-                if persisted.default_profile.as_deref() == Some(name.as_str()) {
-                    persisted.default_profile = None;
-                }
-                Ok(())
+        ProfileCommand::Remove { name } => remove_profile(store, &name)?,
+        ProfileCommand::Logout { name } => logout_profile(store, name)?,
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<()> {
+    let name = arguments.name.clone();
+    state::validate_profile_name(&name)?;
+    let existing = store.load()?.profiles.get(&name).cloned();
+    let authentication_changed = existing.as_ref().is_some_and(|profile| {
+        arguments
+            .domain
+            .as_ref()
+            .is_some_and(|domain| domain != &profile.domain)
+            || arguments
+                .device_id
+                .as_ref()
+                .is_some_and(|device_id| device_id != &profile.device_id)
+            || arguments
+                .username
+                .as_ref()
+                .is_some_and(|username| Some(username) != profile.username.as_ref())
+            || (arguments.clear_username && profile.username.is_some())
+    });
+    if authentication_changed
+        && let Some(identifier) = existing
+            .as_ref()
+            .map(|profile| profile.credential_id.as_str())
+            .filter(|identifier| !identifier.is_empty())
+    {
+        credentials::CredentialStore::delete(identifier)?;
+    }
+    store.update(|persisted| {
+        let was_empty = persisted.profiles.is_empty();
+        let mut profile = if let Some(profile) = persisted.profiles.get(&name) {
+            profile.clone()
+        } else {
+            let domain = arguments.domain.clone().ok_or_else(|| {
+                Error::InvalidConfig("--domain is required for a new profile".into())
             })?;
-            println!("removed profile {name}");
+            let device_id = arguments.device_id.clone().ok_or_else(|| {
+                Error::InvalidConfig("--device-id is required for a new profile".into())
+            })?;
+            state::ManagedProfile::new(domain, device_id)?
+        };
+        if let Some(domain) = &arguments.domain {
+            profile.domain.clone_from(domain);
         }
+        if let Some(device_id) = &arguments.device_id {
+            profile.device_id.clone_from(device_id);
+        }
+        if let Some(username) = &arguments.username {
+            profile.username = Some(username.clone());
+        } else if arguments.clear_username {
+            profile.username = None;
+        }
+        if let Some(line) = &arguments.line {
+            profile.line = line.clone();
+        }
+        if authentication_changed {
+            profile.credential_id.clear();
+        }
+        profile.validate()?;
+        persisted.profiles.insert(name.clone(), profile);
+        if was_empty && persisted.default_profile.is_none() {
+            persisted.default_profile = Some(name.clone());
+        }
+        Ok(())
+    })?;
+    let persisted = store.load()?;
+    print_profile(
+        &name,
+        &persisted.profiles[&name],
+        persisted.default_profile.as_deref(),
+        false,
+    )
+}
+
+#[cfg(feature = "managed")]
+fn remove_profile(store: &state::StateStore, name: &str) -> Result<()> {
+    state::validate_profile_name(name)?;
+    let persisted = store.load()?;
+    let profile = persisted
+        .profiles
+        .get(name)
+        .ok_or_else(|| Error::InvalidConfig(format!("managed profile {name:?} does not exist")))?;
+    if !profile.credential_id.is_empty() {
+        credentials::CredentialStore::delete(&profile.credential_id)?;
+    }
+    store.update(|persisted| {
+        if persisted.profiles.remove(name).is_none() {
+            return Err(Error::InvalidConfig(format!(
+                "managed profile {name:?} does not exist"
+            )));
+        }
+        if persisted.default_profile.as_deref() == Some(name) {
+            persisted.default_profile = None;
+        }
+        Ok(())
+    })?;
+    println!("removed profile {name}");
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn logout_profile(store: &state::StateStore, name: Option<String>) -> Result<()> {
+    let persisted = store.load()?;
+    let name = name
+        .or_else(|| persisted.default_profile.clone())
+        .ok_or_else(|| {
+            Error::InvalidConfig("profile name is required when no default exists".into())
+        })?;
+    state::validate_profile_name(&name)?;
+    let profile = persisted
+        .profiles
+        .get(&name)
+        .ok_or_else(|| Error::InvalidConfig(format!("managed profile {name:?} does not exist")))?;
+    let credential_id = profile.credential_id.clone();
+    let removed = if credential_id.is_empty() {
+        false
+    } else {
+        credentials::CredentialStore::delete(&credential_id)?
+    };
+    if !credential_id.is_empty() {
+        store.update(|persisted| {
+            let profile = persisted.profiles.get_mut(&name).ok_or_else(|| {
+                Error::InvalidConfig(format!("managed profile {name:?} does not exist"))
+            })?;
+            profile.credential_id.clear();
+            Ok(())
+        })?;
+    }
+    if removed {
+        println!("removed saved authentication for profile {name}");
+    } else {
+        println!("profile {name} has no saved authentication");
     }
     Ok(())
 }
@@ -1058,54 +1159,257 @@ fn effective_managed_dns(
 fn prepare_managed(
     client: &DomainClient,
     discovered: &DiscoveredDomain,
-    device_id: &str,
+    store: &state::StateStore,
+    context: &mut ManagedContext,
     arguments: &ManagedLoginArgs,
-    profile_username: Option<&str>,
     profile_line: &LinePreference,
     ping_timeout: Duration,
 ) -> Result<PreparedConnection> {
+    ensure_credential_id(store, context, arguments.remember)?;
     let line = arguments.line.as_ref().unwrap_or(profile_line);
     match discovered.auth.method {
         AuthMethod::Credential => {
-            let username = arguments
-                .username
-                .as_deref()
-                .or(profile_username)
-                .ok_or_else(|| {
-                    Error::InvalidConfig("--username is required for this credential domain".into())
-                })?;
-            let password = read_managed_secret(arguments)?;
-            client.password_login_with_line(
-                discovered,
-                device_id,
-                username,
-                password,
-                ping_timeout,
-                line,
-            )
+            prepare_managed_password(client, discovered, context, arguments, line, ping_timeout)
         }
         AuthMethod::Oidc => {
-            let pending = client.begin_oidc(discovered, &arguments.redirect_uri)?;
-            println!(
-                "Open this URL in a browser and complete authentication:\n\n{}\n",
-                pending.authorization_url()
-            );
-            let redirect = prompt_line("Paste the complete callback URL: ")?;
-            let identity = client.complete_oidc(&pending, &redirect)?;
-            let posture_results = read_posture_results(arguments.posture_results.as_deref())?;
-            client.oidc_login_with_options(
-                discovered,
-                device_id,
-                &identity,
-                OidcLoginOptions {
-                    posture_check_results: &posture_results,
-                    posture_version: arguments.posture_version,
-                    ping_timeout,
-                    line,
-                },
-            )
+            prepare_managed_oidc(client, discovered, context, arguments, line, ping_timeout)
         }
     }
+}
+
+#[cfg(feature = "managed")]
+fn prepare_managed_password(
+    client: &DomainClient,
+    discovered: &DiscoveredDomain,
+    context: &ManagedContext,
+    arguments: &ManagedLoginArgs,
+    line: &LinePreference,
+    ping_timeout: Duration,
+) -> Result<PreparedConnection> {
+    let explicit_password = read_explicit_managed_secret(arguments)?;
+    let stored = if explicit_password.is_none() && !arguments.reauthenticate {
+        load_stored_credential(context.credential_id.as_deref())?
+    } else {
+        None
+    };
+    if matches!(
+        stored.as_ref(),
+        Some(credentials::StoredCredential::Oidc { .. })
+    ) {
+        return Err(Error::CredentialStore(
+            "saved authentication does not match this credential domain; use \
+             --reauthenticate --remember"
+                .into(),
+        ));
+    }
+    let username = arguments
+        .username
+        .clone()
+        .or_else(|| context.username.clone())
+        .or_else(|| match stored.as_ref() {
+            Some(credentials::StoredCredential::Password { username, .. }) => {
+                Some(username.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            Error::InvalidConfig("--username is required for this credential domain".into())
+        })?;
+    let password = if let Some(password) = explicit_password {
+        zeroize::Zeroizing::new(password)
+    } else if let Some(credentials::StoredCredential::Password {
+        username: stored_username,
+        password,
+    }) = stored.as_ref()
+        && stored_username == &username
+    {
+        zeroize::Zeroizing::new(password.clone())
+    } else if arguments.non_interactive {
+        return Err(Error::CredentialStore(
+            "no saved password matches this profile; authenticate once with \
+             --reauthenticate --remember"
+                .into(),
+        ));
+    } else {
+        zeroize::Zeroizing::new(prompt_password("iWAN password: ")?)
+    };
+    let prepared = client.password_login_with_line(
+        discovered,
+        &context.device_id,
+        &username,
+        password.as_str(),
+        ping_timeout,
+        line,
+    )?;
+    if arguments.remember {
+        credentials::CredentialStore::save(
+            context.credential_id.as_deref().expect("ensured above"),
+            credentials::StoredCredential::Password {
+                username,
+                password: password.to_string(),
+            },
+        )?;
+    }
+    Ok(prepared)
+}
+
+#[cfg(feature = "managed")]
+fn prepare_managed_oidc(
+    client: &DomainClient,
+    discovered: &DiscoveredDomain,
+    context: &ManagedContext,
+    arguments: &ManagedLoginArgs,
+    line: &LinePreference,
+    ping_timeout: Duration,
+) -> Result<PreparedConnection> {
+    let stored = if arguments.reauthenticate {
+        None
+    } else {
+        load_stored_credential(context.credential_id.as_deref())?
+    };
+    if matches!(
+        stored.as_ref(),
+        Some(credentials::StoredCredential::Password { .. })
+    ) {
+        return Err(Error::CredentialStore(
+            "saved authentication does not match this OIDC domain; use \
+             --reauthenticate --remember"
+                .into(),
+        ));
+    }
+    let used_saved_identity = matches!(
+        stored.as_ref(),
+        Some(credentials::StoredCredential::Oidc { .. })
+    );
+    let identity = match stored.as_ref() {
+        Some(credentials::StoredCredential::Oidc {
+            refresh_token,
+            user_id,
+            username,
+        }) => refresh_saved_oidc(
+            client,
+            discovered,
+            context,
+            arguments,
+            refresh_token,
+            user_id,
+            username,
+        )?,
+        _ if arguments.non_interactive => {
+            return Err(Error::CredentialStore(
+                "no saved OIDC session is available; authenticate once with --remember".into(),
+            ));
+        }
+        _ => interactive_oidc(client, discovered, &arguments.redirect_uri)?,
+    };
+    let posture_results = read_posture_results(arguments.posture_results.as_deref())?;
+    let prepared = client.oidc_login_with_options(
+        discovered,
+        &context.device_id,
+        &identity,
+        OidcLoginOptions {
+            posture_check_results: &posture_results,
+            posture_version: arguments.posture_version,
+            ping_timeout,
+            line,
+        },
+    )?;
+    if arguments.remember && !used_saved_identity {
+        save_oidc_identity(
+            context.credential_id.as_deref().expect("ensured above"),
+            &identity,
+        )?;
+    }
+    Ok(prepared)
+}
+
+#[cfg(feature = "managed")]
+fn refresh_saved_oidc(
+    client: &DomainClient,
+    discovered: &DiscoveredDomain,
+    context: &ManagedContext,
+    arguments: &ManagedLoginArgs,
+    refresh_token: &str,
+    user_id: &str,
+    username: &str,
+) -> Result<openiwan::managed::OidcIdentity> {
+    let identity = client.refresh_oidc(
+        discovered,
+        &arguments.redirect_uri,
+        refresh_token,
+        user_id,
+        username,
+    )?;
+    save_oidc_identity(
+        context.credential_id.as_deref().expect("loaded above"),
+        &identity,
+    )?;
+    Ok(identity)
+}
+
+#[cfg(feature = "managed")]
+fn interactive_oidc(
+    client: &DomainClient,
+    discovered: &DiscoveredDomain,
+    redirect_uri: &str,
+) -> Result<openiwan::managed::OidcIdentity> {
+    let pending = client.begin_oidc(discovered, redirect_uri)?;
+    println!(
+        "Open this URL in a browser and complete authentication:\n\n{}\n",
+        pending.authorization_url()
+    );
+    let redirect = prompt_line("Paste the complete callback URL: ")?;
+    client.complete_oidc(&pending, &redirect)
+}
+
+#[cfg(feature = "managed")]
+fn save_oidc_identity(
+    credential_id: &str,
+    identity: &openiwan::managed::OidcIdentity,
+) -> Result<()> {
+    if identity.refresh_token.is_empty() {
+        return Err(Error::CredentialStore(
+            "the identity provider did not issue a refresh token; this login cannot be remembered"
+                .into(),
+        ));
+    }
+    credentials::CredentialStore::save(
+        credential_id,
+        credentials::StoredCredential::Oidc {
+            refresh_token: identity.refresh_token.to_string(),
+            user_id: identity.user_id.clone(),
+            username: identity.username.clone(),
+        },
+    )
+}
+
+#[cfg(feature = "managed")]
+fn ensure_credential_id(
+    store: &state::StateStore,
+    context: &mut ManagedContext,
+    required: bool,
+) -> Result<()> {
+    if !required || context.credential_id.is_some() {
+        return Ok(());
+    }
+    let profile_name = context.profile_name.as_deref().ok_or_else(|| {
+        Error::InvalidConfig("--remember requires --profile or a configured default profile".into())
+    })?;
+    let identifier = store.update(|persisted| {
+        let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
+            Error::InvalidConfig(format!("managed profile {profile_name:?} does not exist"))
+        })?;
+        Ok(profile.ensure_credential_id()?.to_owned())
+    })?;
+    context.credential_id = Some(identifier);
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn load_stored_credential(
+    credential_id: Option<&str>,
+) -> Result<Option<credentials::StoredCredential>> {
+    credential_id.map_or(Ok(None), credentials::CredentialStore::load)
 }
 
 #[cfg(feature = "managed")]
@@ -1153,7 +1457,7 @@ fn print_prepared(prepared: &PreparedConnection) {
 }
 
 #[cfg(feature = "managed")]
-fn read_managed_secret(arguments: &ManagedLoginArgs) -> Result<String> {
+fn read_explicit_managed_secret(arguments: &ManagedLoginArgs) -> Result<Option<String>> {
     if let Some(path) = &arguments.password_file {
         validate_secret_file(path)?;
         let mut contents = fs::read_to_string(path)?;
@@ -1164,14 +1468,14 @@ fn read_managed_secret(arguments: &ManagedLoginArgs) -> Result<String> {
             .filter(|password| !password.is_empty())
             .ok_or_else(|| Error::InvalidConfig("password file is empty".into()));
         contents.zeroize();
-        return password;
+        return password.map(Some);
     }
     if let Ok(password) = std::env::var(&arguments.password_env)
         && !password.is_empty()
     {
-        return Ok(password);
+        return Ok(Some(password));
     }
-    prompt_password("iWAN password: ")
+    Ok(None)
 }
 
 #[cfg(feature = "managed")]
@@ -1469,6 +1773,8 @@ mod tests {
             "alice",
             "--posture-version",
             "2",
+            "--remember",
+            "--non-interactive",
         ])
         .unwrap();
         assert!(matches!(
@@ -1479,6 +1785,8 @@ mod tests {
                 action: ManagedCommand::Login(ManagedLoginArgs {
                     posture_version: Some(version),
                     username: Some(username),
+                    remember: true,
+                    non_interactive: true,
                     ..
                 }),
                 ..
@@ -1537,6 +1845,14 @@ mod tests {
                     ..
                 }),
                 ..
+            }) if name == "work"
+        ));
+
+        let parsed = Cli::try_parse_from(["openiwan", "profile", "logout", "work"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Profile(ProfileArgs {
+                command: ProfileCommand::Logout { name: Some(name) }
             }) if name == "work"
         ));
     }

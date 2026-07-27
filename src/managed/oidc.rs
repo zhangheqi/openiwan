@@ -115,6 +115,15 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct RefreshResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    expires_in: Option<i64>,
+}
+
 pub fn begin(oidc: &OidcConfig) -> Result<PendingAuthorization> {
     let code_verifier = random_urlsafe(64);
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -238,6 +247,75 @@ pub(crate) fn complete<T: HttpTransport>(
         refresh_token,
         user_id,
         username,
+        expires_at,
+    })
+}
+
+pub(crate) fn refresh<T: HttpTransport>(
+    oidc: &OidcConfig,
+    transport: &T,
+    refresh_token: &str,
+    user_id: &str,
+    username: &str,
+) -> Result<OidcIdentity> {
+    oidc.validate()?;
+    if refresh_token.is_empty() || user_id.is_empty() || username.is_empty() {
+        return Err(Error::Oidc(
+            "saved OIDC authentication is incomplete; perform a fresh login".into(),
+        ));
+    }
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", &oidc.client_id)
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("refresh_token", refresh_token)
+        .finish()
+        .into_bytes();
+    let response = transport.execute(HttpRequest {
+        method: "POST",
+        url: oidc.token_endpoint.clone(),
+        headers: vec![(
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        )],
+        body,
+        timeout: None,
+    })?;
+    if response.status != 200 {
+        return Err(Error::Oidc(format!(
+            "refresh token endpoint returned HTTP {}; perform a fresh login",
+            response.status
+        )));
+    }
+    let response_body = Zeroizing::new(response.body);
+    let token: RefreshResponse = serde_json::from_slice(&response_body)
+        .map_err(|error| Error::Oidc(format!("invalid refresh token response: {error}")))?;
+    if token.access_token.is_empty() {
+        return Err(Error::Oidc(
+            "refresh token response is missing access_token".into(),
+        ));
+    }
+    let access_token = Zeroizing::new(token.access_token);
+    let refresh_token = Zeroizing::new(if token.refresh_token.is_empty() {
+        refresh_token.to_owned()
+    } else {
+        token.refresh_token
+    });
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let expires_at = token
+        .expires_in
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| now.checked_add(seconds))
+        .or_else(|| {
+            parse_jwt_payload(&access_token)
+                .ok()
+                .and_then(|claims| claims.get("exp").and_then(Value::as_i64))
+        })
+        .unwrap_or_else(|| now.saturating_add(300));
+    Ok(OidcIdentity {
+        access_token,
+        refresh_token,
+        user_id: user_id.to_owned(),
+        username: username.to_owned(),
         expires_at,
     })
 }
@@ -467,6 +545,28 @@ mod tests {
             )]
         );
         assert!(String::from_utf8_lossy(&requests[0].body).contains("code_verifier="));
+    }
+
+    #[test]
+    fn refreshes_oidc_and_preserves_or_rotates_the_refresh_token() {
+        let oidc = oidc();
+        let transport = MockTransport::default();
+        transport.push_json(serde_json::json!({
+            "access_token": "new-access",
+            "refresh_token": "rotated-refresh",
+            "expires_in": 3600
+        }));
+        let identity = refresh(&oidc, &transport, "old-refresh", "user-1", "alice").unwrap();
+        assert_eq!(identity.access_token.as_str(), "new-access");
+        assert_eq!(identity.refresh_token.as_str(), "rotated-refresh");
+        assert_eq!(identity.user_id, "user-1");
+        assert_eq!(identity.username, "alice");
+
+        let requests = transport.requests.lock().unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("grant_type=refresh_token"));
+        assert!(body.contains("refresh_token=old-refresh"));
+        assert!(body.contains("client_id=client-id"));
     }
 
     #[test]

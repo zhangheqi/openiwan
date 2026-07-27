@@ -25,8 +25,8 @@
 - 密码认证与 OIDC Authorization Code + PKCE S256；
 - 控制器配置、按服务器生成的凭据、posture 与设备绑定门禁、入口探测和
   传统/SR 选择；
-- 版本化的非敏感 CLI profile、持久线路偏好、有并发上限的线路探测，以及面向自动化的
-  稳定 JSON 输出；
+- 版本化的非敏感 CLI profile、系统凭据库、OIDC 刷新、持久线路偏好、有并发上限的
+  线路探测，以及面向自动化的稳定 JSON 输出；
 - Linux、macOS 和 Windows 的原生 TUN、路由与 DNS 事务；
 - 通过用户态 IP 栈实现的不改路由 TCP 和 HTTP(S) 转发；
 - 控制器 keepalive 鉴权和指标模型。
@@ -193,9 +193,23 @@ sudo openiwan managed connect
 ```
 
 profile 存储绝不会写入密码或 OIDC token。密码仍然来自环境变量、权限受保护的文件或
-无回显交互提示。每次新运行 `managed login`、`managed lines` 或
-`managed connect` 都会重新认证；已运行的 `managed connect` 只在内存中保留凭据，
-因此隧道自动重连时不会再次提示。
+无回显交互提示。验证并记住认证信息：
+
+```console
+openiwan managed login --remember
+```
+
+密码或 OIDC refresh token 会写入 macOS Keychain、Windows Credential Manager 或
+Unix Secret Service；access token 只保留在内存。后续命令会复用密码或用 refresh
+token 换取新的 access token，因此 service 可以无交互启动并在缺少凭据时立即失败：
+
+```console
+openiwan managed connect --non-interactive
+```
+
+认证过期或账号变化时使用 `--reauthenticate --remember` 覆盖；使用
+`openiwan profile logout work` 删除。正在运行的 `managed connect` 也会复用内存中
+的凭据完成隧道重连。
 
 列出并重新测试所有可选线路：
 
@@ -221,9 +235,10 @@ profile 使用版本化 TOML、跨进程文件锁和原子替换。Unix 上目�
 `$XDG_STATE_HOME/openiwan`（或 `~/.local/state/openiwan`）。可用 `--state-dir`
 或 `OPENIWAN_STATE_DIR` 覆盖。
 
-如果 `sudo` 会修改 `HOME`，应显式传入普通用户的状态目录。例如默认 Linux 环境可使用
-`sudo openiwan --state-dir "$HOME/.local/state/openiwan" managed connect`，不要另建
-一份 root 所有的 profile。
+profile 和已保存认证必须由执行 `--remember` 的同一系统账号访问。跨 `sudo` 传入
+`--state-dir` 只能修正 profile 路径，不能跨越系统凭据库的账号边界。service 应以该
+账号运行，并仅授予所需的网络权限；否则必须用实际 service 账号完成认证登记。
+`--non-interactive` 可保证凭据缺失、锁定、撤销或不匹配时直接失败，而不会卡在提示符。
 
 本地 posture 结果可通过 `--posture-results` 传入 JSON 数组。托管连接会应用控制器
 下发的路由、IP filter、DNS、split DNS 和 MTU 策略。详见

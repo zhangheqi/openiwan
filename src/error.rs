@@ -84,6 +84,9 @@ pub enum Error {
     #[error("managed line {line} is unavailable: {reason}")]
     LineUnavailable { line: String, reason: String },
 
+    #[error("credential store operation failed: {0}")]
+    CredentialStore(String),
+
     #[error("HTTP operation failed: {0}")]
     Http(String),
 

@@ -308,10 +308,19 @@ The CLI persists only non-secret managed-client preferences. A profile contains
 the customer domain, device ID, optional username, and line preference.
 Passwords, access tokens, refresh tokens, controller configurations, generated
 server credentials, and SR encryption keys are never written to the profile
-store. Every new `managed login`, `managed lines`, or `managed connect`
-process authenticates again. A running connection retains its derived
-credentials only in memory and can reconnect the data-plane session without
-prompting again.
+store. `managed login --remember` writes only the verified password or OIDC
+refresh token plus the minimum identity metadata to the operating-system
+credential store. The implementation uses macOS Keychain, Windows Credential
+Manager, or the Unix Secret Service. Access tokens, controller responses,
+generated server credentials, and SR encryption keys remain in memory.
+
+On a later process, password authentication reuses the saved password. OIDC
+authentication sends the standard `grant_type=refresh_token` request to the
+current controller-provided token endpoint. A rotated refresh token replaces
+the previous value immediately. The refreshed access token is not persisted.
+`--reauthenticate` skips saved authentication, while `--non-interactive`
+converts every otherwise-interactive prompt into an error. `profile logout`
+deletes saved authentication.
 
 The state document has an explicit schema version. Updates hold an
 inter-process lock, write and sync a same-directory temporary file, atomically
@@ -320,9 +329,12 @@ directories and files use modes `0700` and `0600`; symlinked state paths are
 rejected. `--state-dir` or `OPENIWAN_STATE_DIR` can override the platform
 location.
 
-Privilege elevation must not silently select a second profile store. When
-`sudo` changes `HOME`, the caller should pass the original user's state
-directory with `--state-dir` or explicitly preserve `OPENIWAN_STATE_DIR`.
+Privilege elevation must not silently select a second profile or credential
+store. `--state-dir` can preserve the profile path when `sudo` changes `HOME`,
+but an operating-system credential store remains scoped to the security
+principal. Enrollment and the long-running service must therefore use the
+same account. A service should pass `--non-interactive` so unavailable,
+revoked, or mismatched authentication fails instead of waiting on stdin.
 
 Create a profile:
 
@@ -330,10 +342,11 @@ Create a profile:
 openiwan profile set work --domain iwan.example --device-id device-identifier --username alice
 ```
 
-`profile list`, `profile show`, `profile use`, and `profile remove` provide
-explicit lifecycle operations. The first profile becomes the default
-automatically; later changes are explicit through `profile use`. `profile list
---json` and `profile show --json` produce stable machine-readable output.
+`profile list`, `profile show`, `profile use`, `profile logout`, and `profile
+remove` provide explicit lifecycle operations. The first profile becomes the
+default automatically; later changes are explicit through `profile use`.
+`profile list --json` and `profile show --json` produce stable
+machine-readable output.
 
 Managed line preferences use these canonical forms:
 

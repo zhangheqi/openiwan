@@ -31,6 +31,9 @@ All notable changes to OpeniWAN are documented here. The project follows
   line preferences, with locked atomic writes and strict Unix permissions.
 - Managed line listing with bounded parallel probes, stable human/JSON output,
   one-shot selection, persisted selection, and automatic stale-line recovery.
+- Remembered password and OIDC authentication in the operating-system
+  credential store, refresh-token rotation, explicit logout/reauthentication,
+  and non-interactive service startup.
 
 ### Changed
 

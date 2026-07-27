@@ -51,6 +51,7 @@ hmac = { version = "0.12", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["client", "server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"], optional = true }
+keyring = { version = "4.1", features = ["v1"], optional = true }
 md-5 = "0.10"
 rand = { version = "0.8", optional = true }
 ring = { version = "0.17", optional = true }
@@ -112,6 +113,7 @@ managed = [
     "dep:base64",
     "dep:fs2",
     "dep:hmac",
+    "dep:keyring",
     "dep:rand",
     "dep:ring",
     "dep:serde_json",

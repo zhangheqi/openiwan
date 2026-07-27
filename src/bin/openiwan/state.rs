@@ -3,6 +3,7 @@ use openiwan::managed::{LinePreference, validate_domain};
 use openiwan::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,8 @@ pub struct ManagedProfile {
     pub username: Option<String>,
     #[serde(default)]
     pub line: LinePreference,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credential_id: String,
 }
 
 impl ManagedProfile {
@@ -74,6 +77,7 @@ impl ManagedProfile {
             device_id,
             username: None,
             line: LinePreference::Auto,
+            credential_id: String::new(),
         };
         profile.validate()?;
         Ok(profile)
@@ -95,7 +99,25 @@ impl ManagedProfile {
                 "profile username must contain 1..=256 characters".into(),
             ));
         }
+        if !self.credential_id.is_empty()
+            && (self.credential_id.len() != 32
+                || !self
+                    .credential_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+        {
+            return Err(Error::InvalidConfig(
+                "profile credential ID must be 32 lowercase hexadecimal characters".into(),
+            ));
+        }
         Ok(())
+    }
+
+    pub fn ensure_credential_id(&mut self) -> Result<&str> {
+        if self.credential_id.is_empty() {
+            self.credential_id = new_credential_id()?;
+        }
+        Ok(&self.credential_id)
     }
 }
 
@@ -244,6 +266,17 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn new_credential_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| Error::Crypto("system randomness is unavailable"))?;
+    let mut identifier = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut identifier, "{byte:02x}")
+            .map_err(|_| Error::Crypto("could not format credential identifier"))?;
+    }
+    Ok(identifier)
 }
 
 fn default_state_directory() -> Result<PathBuf> {
@@ -489,6 +522,20 @@ mod tests {
             .unwrap();
         assert_eq!(store.load().unwrap().profiles.len(), 2);
         fs::remove_dir_all(store.directory()).unwrap();
+    }
+
+    #[test]
+    fn credential_identifier_is_created_lazily_and_remains_stable() {
+        let mut profile = ManagedProfile::new("iwan.example".into(), "device-1".into()).unwrap();
+        assert!(profile.credential_id.is_empty());
+        let identifier = profile.ensure_credential_id().unwrap().to_owned();
+        assert_eq!(identifier.len(), 32);
+        assert!(
+            identifier
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert_eq!(profile.ensure_credential_id().unwrap(), identifier);
     }
 
     #[test]

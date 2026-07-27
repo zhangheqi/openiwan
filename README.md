@@ -28,8 +28,9 @@ A Rust client and protocol library for iWAN-compatible networks.
 - credential and OIDC Authorization Code + PKCE S256 authentication;
 - controller configuration, generated per-server credentials, posture and
   device-binding gates, ingress probing, and traditional/SR selection;
-- versioned non-secret CLI profiles, persistent line preferences, bounded
-  parallel line probing, and stable JSON output for automation;
+- versioned non-secret CLI profiles, operating-system credential storage,
+  OIDC refresh, persistent line preferences, bounded parallel line probing,
+  and stable JSON output for automation;
 - native TUN integration and route/DNS transactions on Linux, macOS, and
   Windows;
 - route-free TCP and HTTP(S) forwarding through a userspace IP stack;
@@ -208,9 +209,25 @@ sudo openiwan managed connect
 
 Passwords and OIDC tokens are never written to the profile store. Passwords
 continue to come from the environment, a protected file, or the no-echo
-prompt. Each new `managed login`, `managed lines`, or `managed connect`
-process authenticates again. A running `managed connect` keeps credentials
-only in memory, so automatic tunnel reconnections do not prompt again.
+prompt. To verify and remember authentication:
+
+```console
+openiwan managed login --remember
+```
+
+The password or OIDC refresh token is stored in macOS Keychain, Windows
+Credential Manager, or the Unix Secret Service. Access tokens remain
+in-memory. Later commands reuse the password or exchange the refresh token,
+so a service can fail fast instead of prompting:
+
+```console
+openiwan managed connect --non-interactive
+```
+
+Use `--reauthenticate --remember` to replace expired or changed
+authentication, and `openiwan profile logout work` to delete it. A running
+`managed connect` also reuses its in-memory credentials for tunnel
+reconnections.
 
 List and re-test all selectable lines:
 
@@ -239,10 +256,13 @@ The default locations are `%LOCALAPPDATA%\OpeniWAN` on Windows,
 `$XDG_STATE_HOME/openiwan` (or `~/.local/state/openiwan`) on other Unix
 systems. `--state-dir` and `OPENIWAN_STATE_DIR` override the location.
 
-If `sudo` changes `HOME`, pass the unprivileged user's state directory
-explicitly, for example `sudo openiwan --state-dir "$HOME/.local/state/openiwan"
-managed connect` on a default Linux setup. Do not create a second root-owned
-profile store.
+The profile and saved authentication must be accessed by the same operating
+system account that performed `--remember`. Passing `--state-dir` across
+`sudo` fixes the profile path but does not cross the operating-system
+credential-store boundary. Run a service as that account and grant only the
+networking privileges it needs; otherwise enroll authentication under the
+actual service account. `--non-interactive` ensures a missing, locked,
+revoked, or mismatched credential fails instead of blocking on a prompt.
 
 Local posture results can be supplied as a JSON array with
 `--posture-results`. Managed connect applies controller routing, IP-filter,

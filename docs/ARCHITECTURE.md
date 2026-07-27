@@ -95,6 +95,14 @@ payloads can contain generated passwords and SR keys, so they are intentionally
 kept in memory and never serialized into the profile store. State updates use
 an inter-process lock and atomic replacement.
 
+Remembered authentication is a separate boundary implemented by
+`src/bin/openiwan/credentials.rs`. Passwords and OIDC refresh tokens are
+versioned, redacted, zeroized after use, and stored through the operating
+system credential service. OIDC access tokens are freshly obtained with a
+refresh-token grant and remain in memory. Profile changes that alter the
+domain, device ID, or username invalidate the associated saved
+authentication.
+
 ## Packet devices
 
 `PacketDevice` is the data-plane boundary. `TunDevice` implements it with the

@@ -320,6 +320,34 @@ impl<T: HttpTransport> DomainClient<T> {
         )
     }
 
+    pub fn refresh_oidc(
+        &self,
+        domain: &DiscoveredDomain,
+        redirect_uri: &str,
+        refresh_token: &str,
+        user_id: &str,
+        username: &str,
+    ) -> Result<OidcIdentity> {
+        if domain.auth.method != AuthMethod::Oidc {
+            return Err(Error::Oidc(
+                "the discovered domain does not use OIDC".into(),
+            ));
+        }
+        let config = domain
+            .auth
+            .oidc
+            .as_ref()
+            .ok_or_else(|| Error::Oidc("OIDC auth response has no configuration".into()))?
+            .provider_config(redirect_uri);
+        oidc::refresh(
+            &config,
+            self.lookup.transport(),
+            refresh_token,
+            user_id,
+            username,
+        )
+    }
+
     pub fn password_login(
         &self,
         domain: &DiscoveredDomain,

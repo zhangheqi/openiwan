@@ -1,6 +1,7 @@
 use crate::{Error, Result};
 use std::io::Read;
 use std::time::Duration;
+use zeroize::Zeroize;
 
 #[derive(Clone)]
 pub struct HttpRequest {
@@ -9,6 +10,15 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub timeout: Option<Duration>,
+}
+
+impl Drop for HttpRequest {
+    fn drop(&mut self) {
+        self.body.zeroize();
+        for (_, value) in &mut self.headers {
+            value.zeroize();
+        }
+    }
 }
 
 impl std::fmt::Debug for HttpRequest {

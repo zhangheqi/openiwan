@@ -78,8 +78,8 @@ Protocol reports should include:
 
 - Panabit iWAN software or component and version, or `Unknown` when it cannot
   be determined;
-- OpeniWAN version and platform only when the behavior was reproduced with
-  OpeniWAN;
+- OpeniWAN version and platform when OpeniWAN was part of the observation or
+  comparison;
 - evidence level (`S`, `C`, `L`, or `R`);
 - a minimal synthetic reproducer;
 - redacted packet bytes or structured traces;

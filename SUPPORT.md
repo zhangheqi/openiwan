@@ -50,6 +50,6 @@ logs until you have verified that they contain no private deployment data.
 Protocol observations must come from systems you are authorized to test.
 Follow [Protocol Provenance](docs/PROTOCOL_PROVENANCE.md) and state the
 evidence level plus the Panabit iWAN software or component and version.
-Include the OpeniWAN version only when the behavior was reproduced with
-OpeniWAN. A deployment-specific workaround is not automatically part of the
-general protocol contract.
+Include the OpeniWAN version when OpeniWAN was part of the observation or
+comparison. A deployment-specific workaround is not automatically part of
+the general protocol contract.

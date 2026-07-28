@@ -75,13 +75,13 @@ pub enum Error {
     #[error("external command failed: {program}: {message}")]
     CommandFailed { program: String, message: String },
 
-    #[error("managed client flow failed: {0}")]
-    ManagedFlow(String),
+    #[error("managed connection failed: {0}")]
+    Managed(String),
 
-    #[error("managed line {0} does not exist in the current controller configuration")]
+    #[error("line {0} does not exist in the current controller configuration")]
     LineNotFound(String),
 
-    #[error("managed line {line} is unavailable: {reason}")]
+    #[error("line {line} is unavailable: {reason}")]
     LineUnavailable { line: String, reason: String },
 
     #[error("credential store operation failed: {0}")]

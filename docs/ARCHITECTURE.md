@@ -128,7 +128,7 @@ generated passwords and SR keys, so they are intentionally kept in memory and
 never serialized into the profile store. State updates use an inter-process
 lock and atomic replacement.
 
-Remembered authentication is a separate boundary implemented by
+Saved authentication is a separate boundary implemented by
 `src/bin/openiwan/credentials.rs`. Passwords and OIDC refresh tokens are
 versioned, redacted, zeroized after use, and stored through the operating
 system credential service. OIDC access tokens are freshly obtained with a

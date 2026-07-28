@@ -42,17 +42,11 @@ use tracing_subscriber::EnvFilter;
 use zeroize::Zeroize;
 
 #[derive(Debug, Parser)]
-#[command(name = "openiwan", version, about)]
+#[command(name = "openiwan", version, about = "Connect to iWAN networks")]
 struct Cli {
-    /// Increase logging verbosity (-v, -vv).
+    /// Increase logging output. Repeat for more detail.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
-
-    /// Override the platform CLI state directory. `OPENIWAN_STATE_DIR` is also
-    /// honored. The state file never stores passwords or authentication tokens.
-    #[cfg(feature = "managed")]
-    #[arg(long, global = true, value_name = "DIR")]
-    state_dir: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -60,54 +54,61 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Test whether an iWAN UDP endpoint answers the stateless ping packet.
+    /// Probe an iWAN server.
     Ping(PingArgs),
-    /// Perform the OPEN/OPENACK authentication handshake without creating TUN.
+    /// Authenticate without opening a tunnel.
     Auth(ConnectionArgs),
-    /// Authenticate, create a TUN interface, and exchange IP packets.
+    /// Open an iWAN tunnel.
     Connect(ConnectArgs),
-    /// Forward TCP or proxy HTTP(S) to one fixed target without host routes.
+    /// Forward TCP or HTTP(S) through iWAN.
     #[cfg(feature = "forward")]
     Forward(ForwardArgs),
-    /// Decode one hexadecimal iWAN datagram without network access.
+    /// Decode an iWAN packet.
     Decode(DecodeArgs),
-    /// Discover a customer domain, authenticate, select an ingress, and connect.
+    /// Use controller-managed iWAN services.
     #[cfg(feature = "managed")]
     Managed(ManagedArgs),
-    /// Create and manage persistent, non-secret managed-client profiles.
+    /// Manage connection profiles.
     #[cfg(feature = "managed")]
     Profile(ProfileArgs),
 }
 
 #[derive(Debug, Args)]
 struct PingArgs {
-    /// iWAN UDP endpoint, including port.
-    #[arg(long)]
+    /// iWAN server in HOST:PORT form.
     server: String,
-    #[arg(long, default_value_t = 3_000)]
-    timeout_ms: u64,
+    /// Wait at most DURATION for a reply.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        default_value = "3s",
+        value_parser = parse_duration
+    )]
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone, Args)]
 struct ConnectionArgs {
-    /// Optional TOML file containing a serialized `ClientConfig`.
-    #[arg(long)]
+    /// Load connection settings from a TOML file.
+    #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
-    /// iWAN UDP endpoint, including port. Overrides the config file.
-    #[arg(long)]
+    /// Connect to the iWAN server at HOST:PORT.
+    #[arg(long, value_name = "HOST:PORT")]
     server: Option<String>,
-    #[arg(long)]
+    /// Authenticate as USER.
+    #[arg(long, value_name = "USER")]
     username: String,
-    /// Read the password from this environment variable before prompting.
-    #[arg(long, default_value = "OPENIWAN_PASSWORD")]
+    /// Read the password from ENV before prompting.
+    #[arg(long, value_name = "ENV", default_value = "OPENIWAN_PASSWORD")]
     password_env: String,
-    /// Read the first line from a password file. The file must not be
-    /// group/world accessible on Unix.
-    #[arg(long)]
+    /// Read the password from the first line of FILE.
+    #[arg(long, value_name = "FILE")]
     password_file: Option<PathBuf>,
-    #[arg(long)]
+    /// Set the packet MTU.
+    #[arg(long, value_name = "BYTES")]
     mtu: Option<u16>,
-    #[arg(long)]
+    /// Set the session cipher.
+    #[arg(long, value_name = "CIPHER")]
     encryption: Option<EncryptionMethod>,
 }
 
@@ -115,9 +116,8 @@ struct ConnectionArgs {
 struct ConnectArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
-    /// TUN interface name. Defaults to openiwan0 on Linux/Windows and an
-    /// automatically allocated utunN on macOS.
-    #[arg(long)]
+    /// Name the TUN interface.
+    #[arg(long, value_name = "NAME")]
     tun: Option<String>,
     #[command(flatten)]
     routes: RouteArgs,
@@ -137,29 +137,41 @@ struct ForwardArgs {
 #[cfg(feature = "forward")]
 #[derive(Debug, Clone, Args)]
 struct ForwardOptions {
-    /// Fixed target URI using tcp://, http://, or https://.
-    #[arg(long, value_parser = forward::parse_target_argument)]
+    /// Forward to a tcp://, http://, or https:// URI.
+    #[arg(long, value_name = "URI", value_parser = forward::parse_target_argument)]
     target: String,
-    /// Target resolution path: auto selects tunnel or system DNS, tunnel
-    /// requires a resolver reachable through iWAN, and system uses host DNS.
-    #[arg(long, value_enum, default_value = "auto")]
-    resolve_via: ResolveViaArg,
-    /// Recursive DNS server reached through the iWAN userspace stack. An
-    /// omitted port defaults to 53. Repeat for multiple servers.
-    #[arg(long = "resolver", value_parser = parse_resolver)]
-    resolvers: Vec<SocketAddr>,
-    /// Timeout for one DNS server query.
-    #[arg(long, default_value_t = 3_000)]
-    resolver_timeout_ms: u64,
-    /// Loopback address for the local listener.
-    #[arg(long, default_value = "127.0.0.1:8080")]
+    /// Resolve the target using auto, tunnel, or system DNS.
+    #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
+    resolve: ResolveViaArg,
+    /// Query a DNS server through iWAN. Repeat to add servers.
+    #[arg(
+        long = "dns-server",
+        value_name = "HOST[:PORT]",
+        value_parser = parse_resolver
+    )]
+    dns_servers: Vec<SocketAddr>,
+    /// Wait at most DURATION for each DNS server.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        default_value = "3s",
+        value_parser = parse_duration
+    )]
+    dns_timeout: Duration,
+    /// Listen on a loopback address.
+    #[arg(long, value_name = "HOST:PORT", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
-    /// Additional HTTPS PEM CA certificate file. Repeat for multiple files.
-    #[arg(long = "ca-cert")]
+    /// Trust an additional PEM CA certificate. Repeat to add files.
+    #[arg(long = "ca-cert", value_name = "FILE")]
     ca_certificates: Vec<PathBuf>,
-    /// Total timeout for target DNS, TCP, and TLS setup.
-    #[arg(long, default_value_t = 10_000)]
-    connect_timeout_ms: u64,
+    /// Complete DNS, TCP, and TLS setup within DURATION.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        default_value = "10s",
+        value_parser = parse_duration
+    )]
+    connect_timeout: Duration,
 }
 
 #[cfg(feature = "forward")]
@@ -191,25 +203,47 @@ fn parse_resolver(value: &str) -> std::result::Result<SocketAddr, String> {
         .map_err(|error| format!("invalid DNS server {value}: {error}"))
 }
 
+fn parse_duration(value: &str) -> std::result::Result<Duration, String> {
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000)
+    } else {
+        return Err("duration must end in ms, s, or m".into());
+    };
+    let number = number
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration {value:?}"))?;
+    let milliseconds = number
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration {value:?} is too large"))?;
+    if milliseconds == 0 {
+        return Err("duration must be greater than zero".into());
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
 #[derive(Debug, Clone, Default, Args)]
 struct DnsOverrideArgs {
-    /// DNS server source. `inherit` uses the profile/controller/App default.
-    #[arg(long, value_enum)]
+    /// Select the DNS server source.
+    #[arg(long, value_name = "MODE", value_enum)]
     dns_mode: Option<DnsServerModeArg>,
-    /// Custom IPv4 DNS server. Repeat for a secondary server.
-    #[arg(long = "dns-server")]
+    /// Use a custom IPv4 DNS server. Repeat to add a server.
+    #[arg(long = "dns-server", value_name = "IP")]
     dns_servers: Vec<Ipv4Addr>,
-    /// Split-DNS behavior.
-    #[arg(long, value_enum)]
+    /// Set split DNS behavior.
+    #[arg(long, value_name = "MODE", value_enum)]
     split_dns_mode: Option<SplitDnsModeArg>,
-    /// iWAN domain-filter rule. Repeat for multiple rules.
-    #[arg(long = "split-dns-domain")]
+    /// Add an iWAN domain rule. Repeat to add rules.
+    #[arg(long = "split-dns-domain", value_name = "RULE")]
     split_dns_domains: Vec<DomainRule>,
-    /// Override encrypted DNS blocking.
-    #[arg(long, value_enum)]
+    /// Set encrypted DNS handling.
+    #[arg(long, value_name = "MODE", value_enum)]
     encrypted_dns: Option<EncryptedDnsModeArg>,
-    /// Additional exact `DoH` hostname to deny. Repeat for multiple hosts.
-    #[arg(long = "doh-host")]
+    /// Block an exact `DoH` hostname. Repeat to add hosts.
+    #[arg(long = "doh-host", value_name = "HOST")]
     doh_hosts: Vec<String>,
 }
 
@@ -323,42 +357,49 @@ impl EncryptedDnsModeArg {
 
 #[derive(Debug, Clone, Default, Args)]
 struct RouteArgs {
-    /// CIDR routed through iWAN. Repeat for multiple routes.
-    #[arg(long = "route", value_delimiter = ',')]
+    /// Route a CIDR through iWAN. Repeat to add routes.
+    #[arg(long = "route", value_name = "CIDR", value_delimiter = ',')]
     routes: Vec<String>,
-    /// IP address routed through iWAN as a host route. Repeat as needed.
-    #[arg(long = "route-ip", value_delimiter = ',')]
+    /// Route an IP address through iWAN. Repeat to add addresses.
+    #[arg(long = "route-ip", value_name = "IP", value_delimiter = ',')]
     route_ips: Vec<String>,
-    /// Domain resolved once and routed through iWAN. Repeat as needed.
-    #[arg(long = "route-domain", value_delimiter = ',')]
+    /// Resolve a domain and route its addresses through iWAN.
+    #[arg(long = "route-domain", value_name = "DOMAIN", value_delimiter = ',')]
     route_domains: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 struct DecodeArgs {
-    /// Datagram bytes as hexadecimal; whitespace, ':' and '-' are ignored.
+    /// Packet bytes in hexadecimal. Whitespace, ':' and '-' are ignored.
     hex: String,
 }
 
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedArgs {
-    /// Persistent profile. When the domain is omitted, the default profile is
-    /// used.
-    #[arg(long)]
+    /// Override the state directory (env: `OPENIWAN_STATE_DIR`).
+    #[arg(long, global = true, value_name = "DIR")]
+    state_dir: Option<PathBuf>,
+    /// Use a connection profile.
+    #[arg(long, value_name = "NAME")]
     profile: Option<String>,
-    /// Customer domain resolved through the production lookup service.
-    #[arg(long)]
+    /// Use a customer domain without a profile.
+    #[arg(long, value_name = "DOMAIN")]
     domain: Option<String>,
-    /// Override the automatically generated, installation-wide device ID.
-    #[arg(long)]
+    /// Override the installation Device ID.
+    #[arg(long, value_name = "ID")]
     device_id: Option<String>,
-    /// Directory for the seven-day lookup cache.
-    #[arg(long)]
+    /// Store domain lookup data in DIR.
+    #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
-    /// Timeout for each UDP ingress probe.
-    #[arg(long, default_value_t = 2_000)]
-    ping_timeout_ms: u64,
+    /// Wait at most DURATION for each line probe.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        default_value = "2s",
+        value_parser = parse_duration
+    )]
+    probe_timeout: Duration,
     #[command(subcommand)]
     action: ManagedCommand,
 }
@@ -366,54 +407,55 @@ struct ManagedArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Subcommand)]
 enum ManagedCommand {
-    /// Resolve the domain and print the discovered authentication path.
+    /// Show domain and authentication details.
     Discover,
-    /// Complete login, posture gates, ingress probing and the temporary OPEN.
+    /// Authenticate and test the selected line.
     Login(ManagedLoginArgs),
-    /// Complete login and establish the persistent VPN tunnel.
+    /// Open a managed iWAN tunnel.
     Connect(ManagedConnectArgs),
-    /// Complete managed login and forward one TCP or HTTP(S) target without
-    /// creating a TUN interface.
+    /// Forward TCP or HTTP(S) through a managed connection.
     #[cfg(feature = "forward")]
     Forward(ManagedForwardArgs),
-    /// Authenticate, probe every selectable line, and optionally save one.
+    /// List available lines and their latency.
     Lines(ManagedLinesArgs),
 }
 
 #[cfg(feature = "managed")]
 #[derive(Debug, Clone, Args)]
 struct ManagedLoginArgs {
-    /// Username for credential domains. Ignored for OIDC domains.
-    #[arg(long)]
+    /// Authenticate as USER. Ignored for OIDC domains.
+    #[arg(long, value_name = "USER")]
     username: Option<String>,
-    /// Read the credential-domain password from this environment variable.
-    #[arg(long, default_value = "OPENIWAN_PASSWORD")]
+    /// Read the password from ENV before prompting.
+    #[arg(long, value_name = "ENV", default_value = "OPENIWAN_PASSWORD")]
     password_env: String,
-    /// Read the first password line from this mode-0600 file.
-    #[arg(long)]
+    /// Read the password from the first line of FILE.
+    #[arg(long, value_name = "FILE")]
     password_file: Option<PathBuf>,
-    /// OIDC redirect URI registered for this client.
-    #[arg(long, default_value = "com.panabit.mobile://oauth2redirect")]
+    /// Use URI for the OIDC callback.
+    #[arg(
+        long,
+        value_name = "URI",
+        default_value = "com.panabit.mobile://oauth2redirect"
+    )]
     redirect_uri: String,
-    /// JSON array containing locally evaluated posture check results.
-    #[arg(long)]
+    /// Read posture check results from a JSON file.
+    #[arg(long, value_name = "FILE")]
     posture_results: Option<PathBuf>,
-    /// Cached local posture version sent to `/config`.
-    #[arg(long)]
+    /// Send a cached posture policy version.
+    #[arg(long, value_name = "VERSION")]
     posture_version: Option<i64>,
-    /// Save successfully verified authentication in the operating-system
-    /// credential store. Requires a persistent profile.
+    /// Save verified authentication. Requires a profile.
     #[arg(long)]
-    remember: bool,
-    /// Ignore saved authentication and perform a fresh login.
+    save: bool,
+    /// Ignore saved authentication and log in again.
     #[arg(long)]
-    reauthenticate: bool,
-    /// Never prompt for a password or launch an interactive OIDC flow.
+    reauth: bool,
+    /// Fail instead of prompting or opening an OIDC login.
     #[arg(long)]
     non_interactive: bool,
-    /// One-shot line preference: auto, iwan:<server-id>, or sr:<group-id>.
-    /// Defaults to the selected profile's saved preference.
-    #[arg(long)]
+    /// Use auto, iwan:ID, or sr:ID for this command only.
+    #[arg(long, value_name = "LINE")]
     line: Option<LinePreference>,
 }
 
@@ -422,8 +464,8 @@ struct ManagedLoginArgs {
 struct ManagedConnectArgs {
     #[command(flatten)]
     login: ManagedLoginArgs,
-    /// TUN interface name.
-    #[arg(long)]
+    /// Name the TUN interface.
+    #[arg(long, value_name = "NAME")]
     tun: Option<String>,
     #[command(flatten)]
     routes: RouteArgs,
@@ -445,11 +487,10 @@ struct ManagedForwardArgs {
 struct ManagedLinesArgs {
     #[command(flatten)]
     login: ManagedLoginArgs,
-    /// Save this preference to the active persistent profile after validating
-    /// that the line exists in the current controller configuration.
+    /// Set the selected profile's line preference. Requires a profile.
     #[arg(long, value_name = "LINE")]
-    save: Option<LinePreference>,
-    /// Emit a stable JSON array for scripts.
+    set: Option<LinePreference>,
+    /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
 }
@@ -457,6 +498,9 @@ struct ManagedLinesArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ProfileArgs {
+    /// Override the state directory (env: `OPENIWAN_STATE_DIR`).
+    #[arg(long, global = true, value_name = "DIR")]
+    state_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: ProfileCommand,
 }
@@ -464,51 +508,67 @@ struct ProfileArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Subcommand)]
 enum ProfileCommand {
-    /// List profiles without printing sensitive authentication material.
+    /// List profiles.
     List {
+        /// Print machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Show one profile, or the current default profile when NAME is omitted.
+    /// Show a profile.
     Show {
+        /// Profile name. Defaults to the default profile.
         name: Option<String>,
+        /// Print machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Create or update a profile. New profiles require a domain; Device ID is
-    /// generated automatically unless overridden.
+    /// Create or update a profile.
     Set(Box<ProfileSetArgs>),
-    /// Select the default profile used by `openiwan managed`.
-    Use { name: String },
+    /// Select the default profile.
+    Use {
+        /// Profile name.
+        name: String,
+    },
     /// Remove a profile.
-    Remove { name: String },
+    Remove {
+        /// Profile name.
+        name: String,
+    },
     /// Delete saved authentication for a profile.
-    Logout { name: Option<String> },
+    Logout {
+        /// Profile name. Defaults to the default profile.
+        name: Option<String>,
+    },
 }
 
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ProfileSetArgs {
+    /// Profile name.
     name: String,
-    #[arg(long)]
+    /// Set the customer domain.
+    #[arg(long, value_name = "DOMAIN")]
     domain: Option<String>,
-    /// Override the installation-wide Device ID for this profile.
-    #[arg(long)]
+    /// Override the installation Device ID.
+    #[arg(long, value_name = "ID")]
     device_id: Option<String>,
-    #[arg(long, conflicts_with = "clear_username")]
+    /// Set the saved username.
+    #[arg(long, value_name = "USER", conflicts_with = "unset_username")]
     username: Option<String>,
+    /// Remove the saved username.
     #[arg(long)]
-    clear_username: bool,
-    #[arg(long)]
+    unset_username: bool,
+    /// Set the preferred line.
+    #[arg(long, value_name = "LINE")]
     line: Option<LinePreference>,
     #[command(flatten)]
     dns: DnsOverrideArgs,
-    /// Remove every saved DNS override from this profile.
+    /// Remove all saved DNS settings.
     #[arg(long)]
-    clear_dns_overrides: bool,
-    /// Remove one saved DNS list override. Repeat for multiple list fields.
-    #[arg(long = "clear-dns", value_enum)]
-    clear_dns: Vec<ProfileDnsListArg>,
+    reset_dns: bool,
+    /// Remove a saved DNS list. Repeat to remove more lists.
+    #[arg(long, value_name = "FIELD", value_enum)]
+    unset_dns: Vec<ProfileDnsListArg>,
 }
 
 #[cfg(feature = "managed")]
@@ -529,12 +589,10 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
-    #[cfg(feature = "managed")]
-    let state_directory = cli.state_dir;
     match cli.command {
         Command::Ping(arguments) => {
             let address = ClientConfig::new(arguments.server).resolve_server()?;
-            let elapsed = client::ping(address, Duration::from_millis(arguments.timeout_ms))?;
+            let elapsed = client::ping(address, arguments.timeout)?;
             println!(
                 "reply from {address}: {:.3} ms",
                 elapsed.as_secs_f64() * 1_000.0
@@ -552,12 +610,12 @@ fn run() -> Result<()> {
         Command::Decode(arguments) => decode(&arguments.hex)?,
         #[cfg(feature = "managed")]
         Command::Managed(arguments) => {
-            let store = state::StateStore::new(state_directory)?;
+            let store = state::StateStore::new(arguments.state_dir.clone())?;
             managed(arguments, &store)?;
         }
         #[cfg(feature = "managed")]
         Command::Profile(arguments) => {
-            let store = state::StateStore::new(state_directory)?;
+            let store = state::StateStore::new(arguments.state_dir.clone())?;
             profile(arguments, &store)?;
         }
     }
@@ -692,10 +750,10 @@ fn build_forward_config_with_route(
     configured_dns_servers: &[IpAddr],
     auto_tunnel: Option<bool>,
 ) -> Result<forward::ForwardConfig> {
-    let include_session_servers = arguments.resolvers.is_empty()
+    let include_session_servers = arguments.dns_servers.is_empty()
         && configured_dns_servers.is_empty()
         && auto_tunnel.is_none();
-    let mut dns_servers = arguments.resolvers.clone();
+    let mut dns_servers = arguments.dns_servers.clone();
     if dns_servers.is_empty() {
         dns_servers.extend(
             configured_dns_servers
@@ -704,23 +762,19 @@ fn build_forward_config_with_route(
                 .map(|address| SocketAddr::new(address, 53)),
         );
     }
-    let mode = match (arguments.resolve_via, auto_tunnel, dns_servers.is_empty()) {
+    let mode = match (arguments.resolve, auto_tunnel, dns_servers.is_empty()) {
         (ResolveViaArg::Auto, Some(true), false) => ResolveVia::Tunnel,
         (ResolveViaArg::Auto, Some(_), _) => ResolveVia::System,
         (mode, _, _) => mode.into(),
     };
-    let dns = ResolverConfig::new(
-        mode,
-        dns_servers,
-        Duration::from_millis(arguments.resolver_timeout_ms),
-    )?
-    .with_session_servers(include_session_servers);
+    let dns = ResolverConfig::new(mode, dns_servers, arguments.dns_timeout)?
+        .with_session_servers(include_session_servers);
     forward::ForwardConfig::new(
         arguments.listen,
         &arguments.target,
         dns,
         arguments.ca_certificates.clone(),
-        Duration::from_millis(arguments.connect_timeout_ms),
+        arguments.connect_timeout,
     )
 }
 
@@ -773,7 +827,7 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 &mut context,
                 &login,
                 &line,
-                Duration::from_millis(arguments.ping_timeout_ms),
+                arguments.probe_timeout,
             )?;
             print_prepared(&prepared);
         }
@@ -786,7 +840,7 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 &mut context,
                 &connect.login,
                 &line,
-                Duration::from_millis(arguments.ping_timeout_ms),
+                arguments.probe_timeout,
             )?;
             print_prepared(&prepared);
             run_managed_client(
@@ -807,7 +861,7 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 &mut context,
                 &forward.login,
                 &line,
-                Duration::from_millis(arguments.ping_timeout_ms),
+                arguments.probe_timeout,
             )?;
             print_prepared(&prepared);
             run_managed_forward(&prepared, &forward.forward, &context.dns)?;
@@ -822,18 +876,16 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 &mut context,
                 &lines.login,
                 &LinePreference::Auto,
-                Duration::from_millis(arguments.ping_timeout_ms),
+                arguments.probe_timeout,
             )?;
-            let probes = prepared.probe_lines(Duration::from_millis(arguments.ping_timeout_ms))?;
+            let probes = prepared.probe_lines(arguments.probe_timeout)?;
             print_line_probes(&probes, lines.json)?;
-            if let Some(preference) = lines.save {
+            if let Some(preference) = lines.set {
                 let profile_name = context.profile_name.as_deref().ok_or_else(|| {
-                    Error::InvalidConfig(
-                        "--save requires --profile or a configured default profile".into(),
-                    )
+                    Error::InvalidConfig("--set requires --profile or a default profile".into())
                 })?;
                 save_profile_line(store, profile_name, &preference, &probes)?;
-                println!("saved line {preference} to profile {profile_name}");
+                println!("profile {profile_name}: line set to {preference}");
             }
         }
     }
@@ -858,9 +910,11 @@ fn resolve_managed_context(
     let profile = profile_name
         .as_ref()
         .map(|name| {
-            persisted.profiles.get(name).cloned().ok_or_else(|| {
-                Error::InvalidConfig(format!("managed profile {name:?} does not exist"))
-            })
+            persisted
+                .profiles
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))
         })
         .transpose()?;
 
@@ -914,9 +968,10 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
                 .ok_or_else(|| {
                     Error::InvalidConfig("profile name is required when no default exists".into())
                 })?;
-            let profile = persisted.profiles.get(&name).ok_or_else(|| {
-                Error::InvalidConfig(format!("managed profile {name:?} does not exist"))
-            })?;
+            let profile = persisted
+                .profiles
+                .get(&name)
+                .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
             print_profile(&name, profile, persisted.default_profile.as_deref(), json)?;
         }
         ProfileCommand::Set(arguments) => set_profile(*arguments, store)?,
@@ -925,7 +980,7 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
             store.update(|persisted| {
                 if !persisted.profiles.contains_key(&name) {
                     return Err(Error::InvalidConfig(format!(
-                        "managed profile {name:?} does not exist"
+                        "profile {name:?} does not exist"
                     )));
                 }
                 persisted.default_profile = Some(name.clone());
@@ -962,7 +1017,7 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
                 .username
                 .as_ref()
                 .is_some_and(|username| Some(username) != profile.username.as_ref())
-            || (arguments.clear_username && profile.username.is_some())
+            || (arguments.unset_username && profile.username.is_some())
     });
     if authentication_changed
         && let Some(identifier) = existing
@@ -995,28 +1050,27 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
         }
         if let Some(username) = &arguments.username {
             profile.username = Some(username.clone());
-        } else if arguments.clear_username {
+        } else if arguments.unset_username {
             profile.username = None;
         }
         if let Some(line) = &arguments.line {
             profile.line = line.clone();
         }
-        if arguments.clear_dns_overrides {
+        if arguments.reset_dns {
             profile.dns = DnsOverrides::default();
-        } else {
-            arguments.dns.patch_profile(&mut profile.dns);
-            if arguments.clear_dns.contains(&ProfileDnsListArg::Servers) {
-                profile.dns.servers = None;
-            }
-            if arguments
-                .clear_dns
-                .contains(&ProfileDnsListArg::SplitDomains)
-            {
-                profile.dns.split_domains = None;
-            }
-            if arguments.clear_dns.contains(&ProfileDnsListArg::DohHosts) {
-                profile.dns.doh_hosts = None;
-            }
+        }
+        arguments.dns.patch_profile(&mut profile.dns);
+        if arguments.unset_dns.contains(&ProfileDnsListArg::Servers) {
+            profile.dns.servers = None;
+        }
+        if arguments
+            .unset_dns
+            .contains(&ProfileDnsListArg::SplitDomains)
+        {
+            profile.dns.split_domains = None;
+        }
+        if arguments.unset_dns.contains(&ProfileDnsListArg::DohHosts) {
+            profile.dns.doh_hosts = None;
         }
         if authentication_changed {
             profile.credential_id.clear();
@@ -1044,14 +1098,14 @@ fn remove_profile(store: &state::StateStore, name: &str) -> Result<()> {
     let profile = persisted
         .profiles
         .get(name)
-        .ok_or_else(|| Error::InvalidConfig(format!("managed profile {name:?} does not exist")))?;
+        .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
     if !profile.credential_id.is_empty() {
         credentials::CredentialStore::delete(&profile.credential_id)?;
     }
     store.update(|persisted| {
         if persisted.profiles.remove(name).is_none() {
             return Err(Error::InvalidConfig(format!(
-                "managed profile {name:?} does not exist"
+                "profile {name:?} does not exist"
             )));
         }
         if persisted.default_profile.as_deref() == Some(name) {
@@ -1075,7 +1129,7 @@ fn logout_profile(store: &state::StateStore, name: Option<String>) -> Result<()>
     let profile = persisted
         .profiles
         .get(&name)
-        .ok_or_else(|| Error::InvalidConfig(format!("managed profile {name:?} does not exist")))?;
+        .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
     let credential_id = profile.credential_id.clone();
     let removed = if credential_id.is_empty() {
         false
@@ -1084,9 +1138,10 @@ fn logout_profile(store: &state::StateStore, name: Option<String>) -> Result<()>
     };
     if !credential_id.is_empty() {
         store.update(|persisted| {
-            let profile = persisted.profiles.get_mut(&name).ok_or_else(|| {
-                Error::InvalidConfig(format!("managed profile {name:?} does not exist"))
-            })?;
+            let profile = persisted
+                .profiles
+                .get_mut(&name)
+                .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
             profile.credential_id.clear();
             Ok(())
         })?;
@@ -1298,7 +1353,7 @@ fn save_profile_line(
     }
     store.update(|persisted| {
         let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
-            Error::InvalidConfig(format!("managed profile {profile_name:?} does not exist"))
+            Error::InvalidConfig(format!("profile {profile_name:?} does not exist"))
         })?;
         profile.line = preference.clone();
         Ok(())
@@ -1516,7 +1571,7 @@ fn prepare_managed(
     profile_line: &LinePreference,
     ping_timeout: Duration,
 ) -> Result<PreparedConnection> {
-    ensure_credential_id(store, context, arguments.remember)?;
+    ensure_credential_id(store, context, arguments.save)?;
     let line = arguments.line.as_ref().unwrap_or(profile_line);
     match discovered.auth.method {
         AuthMethod::Credential => {
@@ -1538,7 +1593,7 @@ fn prepare_managed_password(
     ping_timeout: Duration,
 ) -> Result<PreparedConnection> {
     let explicit_password = read_explicit_managed_secret(arguments)?;
-    let stored = if explicit_password.is_none() && !arguments.reauthenticate {
+    let stored = if explicit_password.is_none() && !arguments.reauth {
         load_stored_credential(context.credential_id.as_deref())?
     } else {
         None
@@ -1549,7 +1604,7 @@ fn prepare_managed_password(
     ) {
         return Err(Error::CredentialStore(
             "saved authentication does not match this credential domain; use \
-             --reauthenticate --remember"
+             --reauth --save"
                 .into(),
         ));
     }
@@ -1578,7 +1633,7 @@ fn prepare_managed_password(
     } else if arguments.non_interactive {
         return Err(Error::CredentialStore(
             "no saved password matches this profile; authenticate once with \
-             --reauthenticate --remember"
+             --reauth --save"
                 .into(),
         ));
     } else {
@@ -1592,7 +1647,7 @@ fn prepare_managed_password(
         ping_timeout,
         line,
     )?;
-    if arguments.remember {
+    if arguments.save {
         credentials::CredentialStore::save(
             context.credential_id.as_deref().expect("ensured above"),
             credentials::StoredCredential::Password {
@@ -1613,7 +1668,7 @@ fn prepare_managed_oidc(
     line: &LinePreference,
     ping_timeout: Duration,
 ) -> Result<PreparedConnection> {
-    let stored = if arguments.reauthenticate {
+    let stored = if arguments.reauth {
         None
     } else {
         load_stored_credential(context.credential_id.as_deref())?
@@ -1624,7 +1679,7 @@ fn prepare_managed_oidc(
     ) {
         return Err(Error::CredentialStore(
             "saved authentication does not match this OIDC domain; use \
-             --reauthenticate --remember"
+             --reauth --save"
                 .into(),
         ));
     }
@@ -1648,7 +1703,7 @@ fn prepare_managed_oidc(
         )?,
         _ if arguments.non_interactive => {
             return Err(Error::CredentialStore(
-                "no saved OIDC session is available; authenticate once with --remember".into(),
+                "no saved OIDC session is available; authenticate once with --save".into(),
             ));
         }
         _ => interactive_oidc(client, discovered, &arguments.redirect_uri)?,
@@ -1665,7 +1720,7 @@ fn prepare_managed_oidc(
             line,
         },
     )?;
-    if arguments.remember && !used_saved_identity {
+    if arguments.save && !used_saved_identity {
         save_oidc_identity(
             context.credential_id.as_deref().expect("ensured above"),
             &identity,
@@ -1720,7 +1775,7 @@ fn save_oidc_identity(
 ) -> Result<()> {
     if identity.refresh_token.is_empty() {
         return Err(Error::CredentialStore(
-            "the identity provider did not issue a refresh token; this login cannot be remembered"
+            "the identity provider did not issue a refresh token; this login cannot be saved"
                 .into(),
         ));
     }
@@ -1744,11 +1799,11 @@ fn ensure_credential_id(
         return Ok(());
     }
     let profile_name = context.profile_name.as_deref().ok_or_else(|| {
-        Error::InvalidConfig("--remember requires --profile or a configured default profile".into())
+        Error::InvalidConfig("--save requires --profile or a default profile".into())
     })?;
     let identifier = store.update(|persisted| {
         let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
-            Error::InvalidConfig(format!("managed profile {profile_name:?} does not exist"))
+            Error::InvalidConfig(format!("profile {profile_name:?} does not exist"))
         })?;
         Ok(profile.ensure_credential_id()?.to_owned())
     })?;
@@ -2091,6 +2146,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_human_readable_timeouts() {
+        let parsed =
+            Cli::try_parse_from(["openiwan", "ping", "192.0.2.10:6001", "--timeout", "750ms"])
+                .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Ping(PingArgs {
+                timeout,
+                ..
+            }) if timeout == Duration::from_millis(750)
+        ));
+        assert_eq!(parse_duration("2s").unwrap(), Duration::from_secs(2));
+        assert_eq!(parse_duration("3m").unwrap(), Duration::from_secs(180));
+        assert!(parse_duration("0s").is_err());
+        assert!(parse_duration("1000").is_err());
+    }
+
+    #[test]
     fn tun_name_is_optional_and_can_be_overridden() {
         let base = [
             "openiwan",
@@ -2168,12 +2241,15 @@ mod tests {
             "iwan.ustc",
             "--device-id",
             "device-1",
+            "--probe-timeout",
+            "750ms",
             "login",
             "--username",
             "alice",
             "--posture-version",
             "2",
-            "--remember",
+            "--save",
+            "--reauth",
             "--non-interactive",
         ])
         .unwrap();
@@ -2182,16 +2258,19 @@ mod tests {
             Command::Managed(ManagedArgs {
                 domain,
                 device_id,
+                probe_timeout,
                 action: ManagedCommand::Login(ManagedLoginArgs {
                     posture_version: Some(version),
                     username: Some(username),
-                    remember: true,
+                    save: true,
+                    reauth: true,
                     non_interactive: true,
                     ..
                 }),
                 ..
             }) if domain.as_deref() == Some("iwan.ustc")
                 && device_id.as_deref() == Some("device-1")
+                && probe_timeout == Duration::from_millis(750)
                 && username == "alice"
                 && version == 2
         ));
@@ -2239,11 +2318,12 @@ mod tests {
     fn managed_context_generates_and_reuses_device_id() {
         let store = test_state_store("context-device-id");
         let arguments = ManagedArgs {
+            state_dir: None,
             profile: None,
             domain: Some("iwan.example".into()),
             device_id: None,
             cache_dir: None,
-            ping_timeout_ms: 2_000,
+            probe_timeout: Duration::from_secs(2),
             action: ManagedCommand::Discover,
         };
 
@@ -2265,11 +2345,11 @@ mod tests {
                 domain: Some("iwan.example".into()),
                 device_id: None,
                 username: Some("alice".into()),
-                clear_username: false,
+                unset_username: false,
                 line: None,
                 dns: DnsOverrideArgs::default(),
-                clear_dns_overrides: false,
-                clear_dns: Vec::new(),
+                reset_dns: false,
+                unset_dns: Vec::new(),
             },
             &store,
         )
@@ -2296,13 +2376,21 @@ mod tests {
             "device-1",
             "--line",
             "iwan:7",
+            "--unset-username",
+            "--reset-dns",
+            "--unset-dns",
+            "servers",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Command::Profile(ProfileArgs {
-                command: ProfileCommand::Set(arguments)
+                command: ProfileCommand::Set(arguments),
+                ..
             }) if arguments.name == "work"
+                && arguments.unset_username
+                && arguments.reset_dns
+                && arguments.unset_dns == [ProfileDnsListArg::Servers]
                 && matches!(
                     arguments.line,
                     Some(LinePreference::Iwan { ref server_id }) if server_id == "7"
@@ -2315,7 +2403,7 @@ mod tests {
             "--profile",
             "work",
             "lines",
-            "--save",
+            "--set",
             "sr:3",
             "--json",
         ])
@@ -2325,7 +2413,7 @@ mod tests {
             Command::Managed(ManagedArgs {
                 profile: Some(name),
                 action: ManagedCommand::Lines(ManagedLinesArgs {
-                    save: Some(LinePreference::SegmentRouting { group_id: 3 }),
+                    set: Some(LinePreference::SegmentRouting { group_id: 3 }),
                     json: true,
                     ..
                 }),
@@ -2337,7 +2425,8 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Command::Profile(ProfileArgs {
-                command: ProfileCommand::Logout { name: Some(name) }
+                command: ProfileCommand::Logout { name: Some(name) },
+                ..
             }) if name == "work"
         ));
     }
@@ -2452,10 +2541,14 @@ mod tests {
             "alice",
             "--target",
             "tcp://db.example.test:5432",
-            "--resolve-via",
+            "--resolve",
             "tunnel",
-            "--resolver",
+            "--dns-server",
             "192.0.2.53",
+            "--dns-timeout",
+            "750ms",
+            "--connect-timeout",
+            "12s",
             "--listen",
             "127.0.0.1:9080",
         ])
@@ -2466,14 +2559,18 @@ mod tests {
                 forward: ForwardOptions {
                     listen,
                     target,
-                    resolve_via: ResolveViaArg::Tunnel,
-                    resolvers,
+                    resolve: ResolveViaArg::Tunnel,
+                    dns_servers,
+                    dns_timeout,
+                    connect_timeout,
                     ..
                 },
                 ..
             }) if listen == "127.0.0.1:9080".parse().unwrap()
                 && target == "tcp://db.example.test:5432"
-                && resolvers == vec!["192.0.2.53:53".parse::<SocketAddr>().unwrap()]
+                && dns_servers == vec!["192.0.2.53:53".parse::<SocketAddr>().unwrap()]
+                && dns_timeout == Duration::from_millis(750)
+                && connect_timeout == Duration::from_secs(12)
         ));
         assert!(
             Cli::try_parse_from([

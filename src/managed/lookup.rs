@@ -40,7 +40,7 @@ impl ServiceType {
             "serverlist" => Ok(Self::ServerList),
             "saas" => Ok(Self::Saas),
             "controller" => Ok(Self::Controller),
-            _ => Err(Error::ManagedFlow(format!(
+            _ => Err(Error::Managed(format!(
                 "unsupported lookup service type {value:?}"
             ))),
         }
@@ -144,7 +144,7 @@ impl LookupCache {
             Err(error) => return Err(error.into()),
         };
         let entry: CacheEntry = serde_json::from_slice(&bytes).map_err(|error| {
-            Error::ManagedFlow(format!("invalid lookup cache {}: {error}", path.display()))
+            Error::Managed(format!("invalid lookup cache {}: {error}", path.display()))
         })?;
         let now_ms = epoch_millis(now)?;
         if now_ms.saturating_sub(entry.cached_at_ms) > LOOKUP_CACHE_TTL.as_millis() as u64 {
@@ -161,7 +161,7 @@ impl LookupCache {
             cached_at_ms: epoch_millis(now)?,
             response: response.clone(),
         })
-        .map_err(|error| Error::ManagedFlow(format!("serialize lookup cache: {error}")))?;
+        .map_err(|error| Error::Managed(format!("serialize lookup cache: {error}")))?;
         fs::write(&temporary, bytes)?;
         fs::rename(temporary, path)?;
         Ok(())
@@ -209,7 +209,7 @@ impl<T: HttpTransport> LookupClient<T> {
     fn lookup_at(&self, domain: &str, device_id: &str, now: SystemTime) -> Result<LookupResult> {
         validate_domain(domain)?;
         if device_id.trim().is_empty() {
-            return Err(Error::ManagedFlow("device id must not be empty".into()));
+            return Err(Error::Managed("device id must not be empty".into()));
         }
 
         let live = self.lookup_live(domain, device_id);
@@ -244,7 +244,7 @@ impl<T: HttpTransport> LookupClient<T> {
             "oem_name": "panabit",
             "app_version": "2.3.0"
         }))
-        .map_err(|error| Error::ManagedFlow(format!("serialize lookup request: {error}")))?;
+        .map_err(|error| Error::Managed(format!("serialize lookup request: {error}")))?;
         let mut last_error = None;
         for endpoint in &self.endpoints {
             validate_lookup_endpoint(endpoint)?;
@@ -264,7 +264,7 @@ impl<T: HttpTransport> LookupClient<T> {
                     Ok(response) if response.status == 200 => {
                         let parsed = serde_json::from_slice(&response.body)
                             .map_err(|error| {
-                                Error::ManagedFlow(format!("invalid lookup response: {error}"))
+                                Error::Managed(format!("invalid lookup response: {error}"))
                             })
                             .and_then(response_data)
                             .and_then(|raw| {
@@ -277,7 +277,7 @@ impl<T: HttpTransport> LookupClient<T> {
                         }
                     }
                     Ok(response) => {
-                        last_error = Some(Error::ManagedFlow(format!(
+                        last_error = Some(Error::Managed(format!(
                             "lookup returned HTTP {}",
                             response.status
                         )));
@@ -286,23 +286,23 @@ impl<T: HttpTransport> LookupClient<T> {
                 }
             }
         }
-        Err(last_error.unwrap_or_else(|| Error::ManagedFlow("all lookup servers failed".into())))
+        Err(last_error.unwrap_or_else(|| Error::Managed("all lookup servers failed".into())))
     }
 }
 
 pub fn validate_domain(domain: &str) -> Result<()> {
     if domain.is_empty() {
-        return Err(Error::ManagedFlow("client domain cannot be empty".into()));
+        return Err(Error::Managed("client domain cannot be empty".into()));
     }
     if domain.chars().count() > 128 {
-        return Err(Error::ManagedFlow(
+        return Err(Error::Managed(
             "client domain must not exceed 128 characters".into(),
         ));
     }
     if !domain.bytes().all(|byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'@' | b'#' | b'$' | b'_')
     }) {
-        return Err(Error::ManagedFlow(
+        return Err(Error::Managed(
             "client domain contains unsupported characters".into(),
         ));
     }
@@ -311,21 +311,19 @@ pub fn validate_domain(domain: &str) -> Result<()> {
 
 fn response_data(value: Value) -> Result<Value> {
     let Some(object) = value.as_object() else {
-        return Err(Error::ManagedFlow(
+        return Err(Error::Managed(
             "lookup response must be a JSON object".into(),
         ));
     };
     if let Some(success) = object.get("success").and_then(Value::as_bool) {
         if !success {
             let error = object.get("error").unwrap_or(&Value::Null);
-            return Err(Error::ManagedFlow(format!(
-                "lookup rejected request: {error}"
-            )));
+            return Err(Error::Managed(format!("lookup rejected request: {error}")));
         }
         return object
             .get("data")
             .cloned()
-            .ok_or_else(|| Error::ManagedFlow("successful lookup response has no data".into()));
+            .ok_or_else(|| Error::Managed("successful lookup response has no data".into()));
     }
     Ok(value)
 }
@@ -333,7 +331,7 @@ fn response_data(value: Value) -> Result<Value> {
 fn parse_response(domain: &str, raw: Value, source: LookupSource) -> Result<LookupResult> {
     let object = raw
         .as_object()
-        .ok_or_else(|| Error::ManagedFlow("lookup data must be a JSON object".into()))?;
+        .ok_or_else(|| Error::Managed("lookup data must be a JSON object".into()))?;
     let service_type = required_string(object, &["type"])?;
     let service_type = ServiceType::parse(service_type)?;
     let is_fuzzy_match = object
@@ -353,7 +351,7 @@ fn parse_response(domain: &str, raw: Value, source: LookupSource) -> Result<Look
     if matches!(service_type, ServiceType::ServerList | ServiceType::Saas)
         && server_list_url.is_none()
     {
-        return Err(Error::ManagedFlow(
+        return Err(Error::Managed(
             "lookup response is missing serverlist URL".into(),
         ));
     }
@@ -371,9 +369,8 @@ fn parse_response(domain: &str, raw: Value, source: LookupSource) -> Result<Look
 }
 
 fn required_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Result<&'a str> {
-    optional_string(object, names).ok_or_else(|| {
-        Error::ManagedFlow(format!("lookup response is missing {}", names.join("/")))
-    })
+    optional_string(object, names)
+        .ok_or_else(|| Error::Managed(format!("lookup response is missing {}", names.join("/"))))
 }
 
 fn optional_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
@@ -389,7 +386,7 @@ fn object_string<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
 
 fn validate_lookup_endpoint(value: &str) -> Result<()> {
     let url = Url::parse(value)
-        .map_err(|error| Error::ManagedFlow(format!("invalid lookup URL: {error}")))?;
+        .map_err(|error| Error::Managed(format!("invalid lookup URL: {error}")))?;
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -398,7 +395,7 @@ fn validate_lookup_endpoint(value: &str) -> Result<()> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(Error::ManagedFlow(
+        return Err(Error::Managed(
             "lookup URL must be an HTTPS /lookup endpoint".into(),
         ));
     }
@@ -408,9 +405,9 @@ fn validate_lookup_endpoint(value: &str) -> Result<()> {
 fn epoch_millis(time: SystemTime) -> Result<u64> {
     let duration = time
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::ManagedFlow("system time predates Unix epoch".into()))?;
+        .map_err(|_| Error::Managed("system time predates Unix epoch".into()))?;
     u64::try_from(duration.as_millis())
-        .map_err(|_| Error::ManagedFlow("system time is out of range".into()))
+        .map_err(|_| Error::Managed("system time is out of range".into()))
 }
 
 #[cfg(test)]
@@ -662,7 +659,7 @@ mod tests {
             LookupSource::Network,
         )
         .unwrap_err();
-        assert!(matches!(error, Error::ManagedFlow(_)));
+        assert!(matches!(error, Error::Managed(_)));
     }
 
     #[test]

@@ -966,7 +966,7 @@ impl TcpConnector {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "no usable iWAN DNS server was advertised or configured; \
-                 supply controller DNS servers or pass --resolver",
+                 supply controller DNS servers or pass --dns-server",
             ));
         }
 

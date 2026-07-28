@@ -128,11 +128,11 @@ TLS confidentiality or server authentication.
 Organization DNS queries can run through the iWAN userspace stack. The client
 checks transaction IDs, response metadata and questions, bounds CNAME depth,
 caches positive results with bounded TTLs, and retries truncated UDP replies
-over TCP. `auto` uses an iWAN resolver when one is configured and otherwise
-uses the host resolver. `--dns-mode iwan` prohibits host-DNS fallback, while
-`--dns-mode system` explicitly exposes the target hostname to the host
-resolver. `--dns-timeout-ms` bounds each resolver attempt, while
-`--connect-timeout-ms` bounds the complete DNS, TCP, and, for HTTPS, TLS setup.
+over TCP. `--resolve auto` uses an iWAN DNS server when one is configured and
+otherwise uses the host resolver. `--resolve tunnel` prohibits host-DNS
+fallback, while `--resolve system` explicitly exposes the target hostname to
+the host resolver. `--dns-timeout` bounds each resolver attempt, while
+`--connect-timeout` bounds the complete DNS, TCP, and, for HTTPS, TLS setup.
 
 A literal IPv4 or bracketed IPv6 address in the target URI bypasses DNS. With
 HTTPS it remains the certificate identity and must be covered by the upstream

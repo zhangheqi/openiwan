@@ -66,12 +66,13 @@ cargo add openiwan --no-default-features
 The commands below are intentionally single-line and work in POSIX shells and
 PowerShell. On Unix, commands that create a TUN interface normally need
 `sudo`. On Windows, run the same command in an elevated PowerShell session
-without `sudo`.
+without `sudo`. Duration values require a unit, for example `500ms`, `3s`, or
+`1m`.
 
 Probe an endpoint:
 
 ```console
-openiwan ping --server 192.0.2.10:6001
+openiwan ping 192.0.2.10:6001
 ```
 
 Authenticate without creating an interface:
@@ -218,10 +219,10 @@ sudo openiwan managed connect
 
 Passwords and OIDC tokens are never written to the profile store. Passwords
 continue to come from the environment, a protected file, or the no-echo
-prompt. To verify and remember authentication:
+prompt. To verify and save authentication:
 
 ```console
-openiwan managed login --remember
+openiwan managed login --save
 ```
 
 The password or OIDC refresh token is stored in macOS Keychain, Windows
@@ -233,7 +234,7 @@ so a service can fail fast instead of prompting:
 openiwan managed connect --non-interactive
 ```
 
-Use `--reauthenticate --remember` to replace expired or changed
+Use `--reauth --save` to replace expired or changed
 authentication, and `openiwan profile logout work` to delete it. A running
 `managed connect` also reuses its in-memory credentials for tunnel
 reconnections.
@@ -250,7 +251,7 @@ ID such as `sr:3`. Save a preference after validating it against the current
 controller configuration:
 
 ```console
-openiwan managed lines --save iwan:7
+openiwan managed lines --set iwan:7
 ```
 
 `auto` chooses the reachable line with the lowest measured latency. A saved SR
@@ -266,7 +267,7 @@ The default locations are `%LOCALAPPDATA%\OpeniWAN` on Windows,
 systems. `--state-dir` and `OPENIWAN_STATE_DIR` override the location.
 
 The profile and saved authentication must be accessed by the same operating
-system account that performed `--remember`. Passing `--state-dir` across
+system account that performed `--save`. Passing `--state-dir` across
 `sudo` fixes the profile path but does not cross the operating-system
 credential-store boundary. Run a service as that account and grant only the
 networking privileges it needs; otherwise enroll authentication under the
@@ -276,7 +277,7 @@ revoked, or mismatched credential fails instead of blocking on a prompt.
 Local posture results can be supplied as a JSON array with
 `--posture-results`. Managed connect applies controller routing, IP-filter,
 DNS, split-DNS, and MTU policy. See
-[Managed Client Flow](docs/MANAGED_CLIENT_FLOW.md).
+[Managed Connections](docs/MANAGED_CONNECTIONS.md).
 
 ## DNS policy
 
@@ -290,13 +291,13 @@ openiwan connect --server 192.0.2.10:6001 --username alice \
   --encrypted-dns block --doh-host dns.example
 ```
 
-Managed profiles persist the same non-secret overrides. `inherit` removes a
-scalar override, while `--clear-dns-overrides` removes the complete saved DNS
-layer:
+Connection profiles persist the same non-secret overrides. `inherit` removes a
+scalar override, `--unset-dns` removes one saved list, and `--reset-dns`
+removes the complete saved DNS layer:
 
 ```console
 openiwan profile set work --dns-mode custom --dns-server 192.0.2.53
-openiwan profile set work --clear-dns-overrides
+openiwan profile set work --reset-dns
 ```
 
 Precedence is one-shot CLI, profile, controller policy, then OPEN_ACK and
@@ -313,8 +314,8 @@ only selects how its fixed target is resolved:
 
 ```console
 openiwan forward --server 192.0.2.10:6001 --username alice \
-  --target tcp://db.example:5432 --resolve-via tunnel \
-  --resolver 192.0.2.53
+  --target tcp://db.example:5432 --resolve tunnel \
+  --dns-server 192.0.2.53
 ```
 
 ## Library layout

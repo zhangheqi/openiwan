@@ -9,7 +9,7 @@ contribution policy.
 
 - [Architecture](ARCHITECTURE.md) — crate layout, session lifecycle, trust
   boundaries, and extension points
-- [Managed Client Flow](MANAGED_CLIENT_FLOW.md) — lookup, auth selection, OIDC,
+- [Managed Connections](MANAGED_CONNECTIONS.md) — lookup, auth selection, OIDC,
   `/config`, posture, ingress selection, and keepalive contracts
 - [Protocol Reference](PROTOCOL.md) — traditional, SR, controller, and
   keepalive wire contracts

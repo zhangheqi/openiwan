@@ -1,4 +1,4 @@
-# Managed Client Flow
+# Managed Connections
 
 The `managed` feature implements domain discovery, authentication, controller
 policy, ingress selection, and persistent tunnel setup.
@@ -325,14 +325,14 @@ Credential passwords are read from `OPENIWAN_PASSWORD`, a protected
 `--password-file`, or a no-echo prompt. OIDC prints the authorization URL and
 accepts the complete callback URL.
 
-## CLI profiles and line selection
+## Profiles and line selection
 
-The CLI persists only non-secret managed-client preferences. State contains
+The CLI persists only non-secret connection preferences. State contains
 the generated installation Device ID, and each profile contains the customer
 domain, its effective Device ID, optional username, and line preference.
 Passwords, access tokens, refresh tokens, controller configurations, generated
 server credentials, and SR encryption keys are never written to the profile
-store. `managed login --remember` writes only the verified password or OIDC
+store. `managed login --save` writes only the verified password or OIDC
 refresh token plus the minimum identity metadata to the operating-system
 credential store. The implementation uses macOS Keychain, Windows Credential
 Manager, or the Unix Secret Service. Access tokens, controller responses,
@@ -342,7 +342,7 @@ On a later process, password authentication reuses the saved password. OIDC
 authentication sends the standard `grant_type=refresh_token` request to the
 current controller-provided token endpoint. A rotated refresh token replaces
 the previous value immediately. The refreshed access token is not persisted.
-`--reauthenticate` skips saved authentication, while `--non-interactive`
+`--reauth` skips saved authentication, while `--non-interactive`
 converts every otherwise-interactive prompt into an error. `profile logout`
 deletes saved authentication.
 
@@ -387,10 +387,10 @@ saved preference cannot prevent the user from listing and replacing it.
 ```console
 openiwan managed lines
 openiwan managed lines --json
-openiwan managed lines --save iwan:7
+openiwan managed lines --set iwan:7
 ```
 
-`--save` requires an explicit or default profile and validates that the line
+`--set` requires an explicit or default profile and validates that the line
 exists in the current controller configuration. An unavailable but existing
 line may still be saved, with a warning, because temporary reachability must
 not silently rewrite user intent. `--line` is a one-shot override and never

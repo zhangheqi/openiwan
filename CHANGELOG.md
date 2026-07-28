@@ -38,8 +38,8 @@ All notable changes to OpeniWAN are documented here. The project follows
   line preferences, with locked atomic writes and strict Unix permissions.
 - Managed line listing with bounded parallel probes, stable human/JSON output,
   one-shot selection, persisted selection, and automatic stale-line recovery.
-- Remembered password and OIDC authentication in the operating-system
-  credential store, refresh-token rotation, explicit logout/reauthentication,
+- Saved password and OIDC authentication in the operating-system credential
+  store, refresh-token rotation, explicit logout and reauthentication,
   non-interactive service startup, and chunked storage for credentials larger
   than Windows Credential Manager's per-entry limit.
 - Managed route-free TCP and HTTP(S) forwarding using controller discovery,
@@ -49,10 +49,13 @@ All notable changes to OpeniWAN are documented here. The project follows
 
 ### Changed
 
+- Simplified CLI help and option names for saved authentication, line
+  selection, forwarding, profile edits, and timeouts. Duration arguments now
+  require an explicit `ms`, `s`, or `m` unit.
 - Replaced `DnsGuard`, controller `DnsConfiguration`/raw routing DNS fields,
   and forward-only `DnsMode`/`DnsConfig` with the breaking public
-  `openiwan::dns` API. Forward flags are now `--resolve-via`, `--resolver`, and
-  `--resolver-timeout-ms`.
+  `openiwan::dns` API. Forward flags are now `--resolve`, `--dns-server`, and
+  `--dns-timeout`.
 - Split DNS is enforced in the TUN packet path instead of platform
   route-only resolver domains. Encrypted-DNS compatibility now drops visible
   TCP/UDP 853 and denies configured DoH hostnames without TLS interception.

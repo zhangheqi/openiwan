@@ -58,12 +58,12 @@ cargo add openiwan --no-default-features
 
 以下命令均使用单行形式，可直接用于 POSIX shell 和 PowerShell。Unix 上创建 TUN
 通常需要 `sudo`；Windows 用户应在管理员 PowerShell 中运行相同命令，不使用
-`sudo`。
+`sudo`。时长值必须带单位，例如 `500ms`、`3s` 或 `1m`。
 
 探测端点：
 
 ```console
-openiwan ping --server 192.0.2.10:6001
+openiwan ping 192.0.2.10:6001
 ```
 
 仅认证、不创建接口：
@@ -201,10 +201,10 @@ sudo openiwan managed connect
 ```
 
 profile 存储绝不会写入密码或 OIDC token。密码仍然来自环境变量、权限受保护的文件或
-无回显交互提示。验证并记住认证信息：
+无回显交互提示。验证并保存认证信息：
 
 ```console
-openiwan managed login --remember
+openiwan managed login --save
 ```
 
 密码或 OIDC refresh token 会写入 macOS Keychain、Windows Credential Manager 或
@@ -215,7 +215,7 @@ token 换取新的 access token，因此 service 可以无交互启动并在缺�
 openiwan managed connect --non-interactive
 ```
 
-认证过期或账号变化时使用 `--reauthenticate --remember` 覆盖；使用
+认证过期或账号变化时使用 `--reauth --save` 覆盖；使用
 `openiwan profile logout work` 删除。正在运行的 `managed connect` 也会复用内存中
 的凭据完成隧道重连。
 
@@ -230,7 +230,7 @@ openiwan managed lines --json
 当前控制器配置验证后，可以保存偏好：
 
 ```console
-openiwan managed lines --save iwan:7
+openiwan managed lines --set iwan:7
 ```
 
 `auto` 会选择实测延迟最低的可达线路。选择 SR 组后，组内仍遵守控制器的主路径/故障
@@ -243,14 +243,14 @@ profile 使用版本化 TOML、跨进程文件锁和原子替换。Unix 上目�
 `$XDG_STATE_HOME/openiwan`（或 `~/.local/state/openiwan`）。可用 `--state-dir`
 或 `OPENIWAN_STATE_DIR` 覆盖。
 
-profile 和已保存认证必须由执行 `--remember` 的同一系统账号访问。跨 `sudo` 传入
+profile 和已保存认证必须由执行 `--save` 的同一系统账号访问。跨 `sudo` 传入
 `--state-dir` 只能修正 profile 路径，不能跨越系统凭据库的账号边界。service 应以该
 账号运行，并仅授予所需的网络权限；否则必须用实际 service 账号完成认证登记。
 `--non-interactive` 可保证凭据缺失、锁定、撤销或不匹配时直接失败，而不会卡在提示符。
 
 本地 posture 结果可通过 `--posture-results` 传入 JSON 数组。托管连接会应用控制器
 下发的路由、IP filter、DNS、split DNS 和 MTU 策略。详见
-[托管客户端流程](docs/MANAGED_CLIENT_FLOW.md)。
+[托管连接](docs/MANAGED_CONNECTIONS.md)。
 
 ## DNS 策略
 
@@ -264,12 +264,12 @@ openiwan connect --server 192.0.2.10:6001 --username alice \
   --encrypted-dns block --doh-host dns.example
 ```
 
-managed profile 可以保存同一组非敏感覆盖项。标量值使用 `inherit` 取消覆盖，
-`--clear-dns-overrides` 清除整个 DNS 覆盖层：
+profile 可以保存同一组非敏感覆盖项。标量值使用 `inherit` 取消覆盖，
+`--unset-dns` 清除单个列表，`--reset-dns` 清除整个 DNS 覆盖层：
 
 ```console
 openiwan profile set work --dns-mode custom --dns-server 192.0.2.53
-openiwan profile set work --clear-dns-overrides
+openiwan profile set work --reset-dns
 ```
 
 优先级固定为：本次 CLI、profile、控制器策略、OPEN_ACK/官方服务默认值。split DNS
@@ -284,8 +284,8 @@ openiwan profile set work --clear-dns-overrides
 
 ```console
 openiwan forward --server 192.0.2.10:6001 --username alice \
-  --target tcp://db.example:5432 --resolve-via tunnel \
-  --resolver 192.0.2.53
+  --target tcp://db.example:5432 --resolve tunnel \
+  --dns-server 192.0.2.53
 ```
 
 ## 代码模块

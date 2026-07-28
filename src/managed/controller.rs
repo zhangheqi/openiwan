@@ -775,7 +775,7 @@ pub(crate) fn fetch<T: HttpTransport>(
     parameters: ConfigParameters<'_>,
 ) -> Result<ControllerConfiguration> {
     if parameters.device_id.is_empty() {
-        return Err(Error::ManagedFlow("device id must not be empty".into()));
+        return Err(Error::Managed("device id must not be empty".into()));
     }
     let body = serde_json::to_vec(&ConfigRequest {
         domain: parameters.domain,

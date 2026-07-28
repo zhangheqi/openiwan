@@ -381,14 +381,14 @@ impl<T: HttpTransport> DomainClient<T> {
         line: &LinePreference,
     ) -> Result<PreparedConnection> {
         if domain.auth.method == AuthMethod::Oidc {
-            return Err(Error::ManagedFlow(
+            return Err(Error::Managed(
                 "this domain uses single sign-on authentication".into(),
             ));
         }
         let username = username.into();
         let password = password.into();
         if username.is_empty() || password.is_empty() {
-            return Err(Error::ManagedFlow(
+            return Err(Error::Managed(
                 "username and password must not be empty".into(),
             ));
         }
@@ -439,7 +439,7 @@ impl<T: HttpTransport> DomainClient<T> {
         options: OidcLoginOptions<'_>,
     ) -> Result<PreparedConnection> {
         if domain.auth.method != AuthMethod::Oidc {
-            return Err(Error::ManagedFlow(
+            return Err(Error::Managed(
                 "this domain uses credential authentication".into(),
             ));
         }
@@ -743,9 +743,9 @@ fn probe_lines(
                 .collect::<Vec<_>>()
                 .into_iter()
                 .map(|worker| {
-                    worker.join().map_err(|_| {
-                        Error::ManagedFlow("managed line probe worker panicked".into())
-                    })
+                    worker
+                        .join()
+                        .map_err(|_| Error::Managed("managed line probe worker panicked".into()))
                 })
                 .collect::<Result<Vec<_>>>()
         })?;

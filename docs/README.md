@@ -5,7 +5,7 @@ the project landing page; built-in CLI help and Rust API documentation are the
 authoritative interface references.
 
 Unless a document says otherwise, files on `main` describe the unreleased
-`0.3.0` series. Use the matching Git tag for a published version.
+interface. Use the matching Git tag for a published version.
 
 ## Start here
 

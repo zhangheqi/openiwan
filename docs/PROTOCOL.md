@@ -1,8 +1,8 @@
 # iWAN Wire Protocol Profile
 
-This document defines the interoperable wire profile implemented by the
-unreleased OpeniWAN `0.3.0` series. It is a description of observed compatible
-behavior, not a vendor specification.
+This document defines the interoperable wire profile implemented on
+OpeniWAN's `main` branch. It describes observed compatible behavior, not a
+vendor specification. Use the matching Git tag for a released implementation.
 
 Protocol provenance, evidence standards, and unresolved details are documented
 separately in [Protocol Provenance](PROTOCOL_PROVENANCE.md). Numeric fields are

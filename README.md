@@ -23,10 +23,9 @@ session runtime, DNS policy engine, and managed-controller models.
 
 ## Project status
 
-The `main` branch targets the unreleased `0.3.0` series and contains breaking
-changes from `0.2.0`. The documentation in this branch describes that
-unreleased interface; use the matching Git tag when working with a published
-version.
+The `main` branch may contain breaking changes from the latest published
+release. Documentation on this branch describes the unreleased interface; use
+the matching Git tag when working with a published version.
 
 | Area | Status |
 |---|---|

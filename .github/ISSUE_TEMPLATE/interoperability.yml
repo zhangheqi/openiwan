@@ -21,7 +21,7 @@ body:
     attributes:
       label: OpeniWAN version or commit
       description: Optional; fill this only if you reproduced the behavior with OpeniWAN.
-      placeholder: "openiwan 0.3.0 or commit SHA"
+      placeholder: "openiwan X.Y.Z or commit SHA"
   - type: dropdown
     id: evidence
     attributes:

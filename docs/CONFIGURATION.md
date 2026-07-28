@@ -1,7 +1,8 @@
 # Configuration
 
 This guide describes direct-client TOML, route and DNS policy, managed
-profiles, and local state for the unreleased `0.3.0` interface.
+profiles, and local state on the current `main` branch. Use the matching Git
+tag for a released interface.
 
 ## Direct client TOML
 

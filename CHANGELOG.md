@@ -10,9 +10,9 @@ under `Unreleased`.
 
 ## [Unreleased]
 
-This section is verified against `v0.2.0..HEAD`. The `0.3.0` series is a
-breaking update to the CLI, configuration schema, Cargo features, and public
-managed APIs.
+This section is verified between the latest published tag and `HEAD`. The next
+release is a breaking update to the CLI, configuration schema, Cargo features,
+and public managed APIs.
 
 ### Added
 
@@ -79,7 +79,6 @@ managed APIs.
 - Reorganized project documentation around current protocol, architecture,
   CLI, configuration, security, support, and interoperability evidence rather
   than deployment-specific instructions.
-- Set the next package version and documentation target to `0.3.0`.
 
 ### Removed
 

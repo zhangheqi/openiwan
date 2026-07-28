@@ -1,7 +1,7 @@
 # Architecture
 
-This document describes the component boundaries and runtime invariants of the
-unreleased `0.3.0` implementation. It is intended for contributors and library
+This document describes the component boundaries and runtime invariants of
+the current `main` branch. It is intended for contributors and library
 integrators; wire details belong in [Protocol Reference](PROTOCOL.md).
 
 ## Design goals

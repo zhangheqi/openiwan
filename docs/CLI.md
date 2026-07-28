@@ -1,7 +1,7 @@
 # Command-Line Guide
 
-This guide describes the unreleased `0.3.0` command-line interface on
-`main`. The built-in help is the final authority for the installed binary:
+This guide describes the unreleased command-line interface on `main`. The
+built-in help is the final authority for the installed binary:
 
 ```console
 openiwan --help

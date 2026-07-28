@@ -1,8 +1,8 @@
 # Managed Connections
 
 The `managed` feature implements domain discovery, authentication, controller
-policy, ingress selection, and persistent tunnel setup for the unreleased
-`0.3.0` series.
+policy, ingress selection, and persistent tunnel setup on the current `main`
+branch.
 
 This is an integration reference. Command examples and local state operations
 belong in the [CLI guide](CLI.md) and

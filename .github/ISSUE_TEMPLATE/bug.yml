@@ -15,7 +15,7 @@ body:
     attributes:
       label: openiwan version
       description: Paste the output of `openiwan --version`, or the commit SHA.
-      placeholder: "openiwan 0.3.0 or commit SHA"
+      placeholder: "openiwan X.Y.Z or commit SHA"
     validations:
       required: true
   - type: dropdown

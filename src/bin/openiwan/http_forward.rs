@@ -512,7 +512,7 @@ mod tests {
         *connector.dns_cache.lock().await = Some(CachedResolution {
             addresses: vec![target_address],
             source: ResolutionSource::SystemDns,
-            expires_at: Instant::now() + Duration::from_secs(60),
+            expires_at: Instant::now() + Duration::from_mins(1),
         });
         connector
     }

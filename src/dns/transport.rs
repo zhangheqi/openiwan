@@ -298,7 +298,7 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5)),
             ]
         );
-        assert_eq!(parsed.ttl, Duration::from_secs(60));
+        assert_eq!(parsed.ttl, Duration::from_mins(1));
     }
 
     #[test]

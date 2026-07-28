@@ -2158,7 +2158,7 @@ mod tests {
             }) if timeout == Duration::from_millis(750)
         ));
         assert_eq!(parse_duration("2s").unwrap(), Duration::from_secs(2));
-        assert_eq!(parse_duration("3m").unwrap(), Duration::from_secs(180));
+        assert_eq!(parse_duration("3m").unwrap(), Duration::from_mins(3));
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("1000").is_err());
     }

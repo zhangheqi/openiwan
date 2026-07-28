@@ -40,9 +40,9 @@ const MAX_CONNECTIONS: usize = 256;
 const ERROR_CLOSE_GRACE: Duration = Duration::from_millis(250);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
-const SYSTEM_DNS_TTL: Duration = Duration::from_secs(60);
+const SYSTEM_DNS_TTL: Duration = Duration::from_mins(1);
 const MIN_DNS_TTL: Duration = Duration::from_secs(5);
-const MAX_DNS_TTL: Duration = Duration::from_secs(3_600);
+const MAX_DNS_TTL: Duration = Duration::from_hours(1);
 
 #[derive(Clone)]
 pub struct ForwardConfig {
@@ -1441,7 +1441,7 @@ mod tests {
                     SocketAddr::new(server_ip.into(), 9_000),
                 ],
                 source: ResolutionSource::SystemDns,
-                expires_at: Instant::now() + Duration::from_secs(60),
+                expires_at: Instant::now() + Duration::from_mins(1),
             });
             assert_eq!(
                 connector.resolve().await.unwrap().addresses,

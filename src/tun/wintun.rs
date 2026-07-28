@@ -217,7 +217,13 @@ fn validate_file(path: &Path) -> Result<bool> {
         }
         hasher.update(&buffer[..length]);
     }
-    Ok(format!("{:x}", hasher.finalize()) == EMBEDDED_SHA256)
+    let digest = hasher.finalize();
+    let mut digest_hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut digest_hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(digest_hex == EMBEDDED_SHA256)
 }
 
 fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {

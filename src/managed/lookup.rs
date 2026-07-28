@@ -10,7 +10,7 @@ use url::Url;
 
 pub const LOOKUP_PRIMARY: &str = "https://lookup.gsase.com/lookup";
 pub const LOOKUP_FALLBACK: &str = "https://lookupbak.hypersase.com/lookup";
-pub const LOOKUP_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const LOOKUP_CACHE_TTL: Duration = Duration::from_hours(168);
 pub const LOOKUP_ATTEMPTS_PER_SERVER: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,7 +509,7 @@ mod tests {
             .with_cache(&directory)
             .with_endpoints(vec![LOOKUP_PRIMARY.into(), LOOKUP_FALLBACK.into()]);
         let result = client
-            .lookup_at("example", "device", now + Duration::from_secs(60))
+            .lookup_at("example", "device", now + Duration::from_mins(1))
             .unwrap();
         assert_eq!(result.source, LookupSource::Cache);
         let _ = fs::remove_dir_all(directory);
@@ -545,7 +545,7 @@ mod tests {
         let result = LookupClient::with_transport(transport)
             .with_cache(&directory)
             .with_endpoints(vec![LOOKUP_PRIMARY.into()])
-            .lookup_at("example", "device", now + Duration::from_secs(60))
+            .lookup_at("example", "device", now + Duration::from_mins(1))
             .unwrap();
         assert_eq!(result.source, LookupSource::Cache);
         let _ = fs::remove_dir_all(directory);
@@ -572,7 +572,7 @@ mod tests {
         let error = LookupClient::with_transport(transport)
             .with_cache(&directory)
             .with_endpoints(vec![LOOKUP_PRIMARY.into()])
-            .lookup_at("example", "device", now + Duration::from_secs(60))
+            .lookup_at("example", "device", now + Duration::from_mins(1))
             .unwrap_err();
         assert!(matches!(error, Error::Http(ref message) if message == "offline"));
         let _ = fs::remove_dir_all(directory);

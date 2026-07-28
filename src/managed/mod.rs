@@ -12,10 +12,9 @@ mod workflow;
 pub use auth::{AUTH_REQUEST_ATTEMPTS, AuthMethod, ControllerAuth, ControllerOidcConfig};
 pub use controller::{
     API_LOGIN_PATH, APP_LOGIN_PATH, AUTH_PATH, CONFIG_PATH, ControllerConfiguration,
-    DeviceBindingStatus, DnsConfiguration, DomainFilterConfiguration, HEALTH_PATH,
-    IpFilterConfiguration, KEEPALIVE_RELOAD_PATH, LOGOS_PATH, LOOKUP_PATH, POSTURE_EVALUATE_PATH,
-    POSTURE_RELOAD_PATH, RoutingConfiguration, RoutingMode, ServerCredentials, ServerInfo, SrEntry,
-    SrGroup, SrIngress, SrPath, UPDATE_CHECK_PATH,
+    DeviceBindingStatus, HEALTH_PATH, IpFilterConfiguration, KEEPALIVE_RELOAD_PATH, LOGOS_PATH,
+    LOOKUP_PATH, POSTURE_EVALUATE_PATH, POSTURE_RELOAD_PATH, RoutingConfiguration, RoutingMode,
+    ServerCredentials, ServerInfo, SrEntry, SrGroup, SrIngress, SrPath, UPDATE_CHECK_PATH,
 };
 pub use http::{HttpRequest, HttpResponse, HttpTransport, UreqTransport};
 pub use keepalive::{

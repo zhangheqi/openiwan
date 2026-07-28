@@ -10,23 +10,30 @@ mod state;
 
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
+use openiwan::dns::{
+    DnsDefaults, DnsOverrides, DnsPacketDevice, DnsPolicyResolver, DnsRuntime, DnsServerMode,
+    DomainRule, EffectiveDnsPolicy, EncryptedDnsMode, RelayConfig, SplitDnsMode,
+    discover_physical_resolvers,
+};
+#[cfg(feature = "forward")]
+use openiwan::dns::{ResolveVia, ResolverConfig};
 #[cfg(feature = "managed")]
 use openiwan::managed::{
     AuthMethod, DiscoveredDomain, DomainClient, LinePreference, LineProbe, OidcLoginOptions,
     PreparedConnection, RoutingMode, SelectedIngress, ServiceType,
 };
 use openiwan::protocol::{self, Tlv};
-#[cfg(feature = "managed")]
 use openiwan::tun::resolve_route_policy;
-use openiwan::tun::{DnsGuard, RouteGuard, TunDevice, resolve_route_targets};
+use openiwan::tun::{RouteGuard, TunDevice};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
 use std::fs;
 #[cfg(feature = "managed")]
 use std::io::Write;
+#[cfg(feature = "forward")]
+use std::net::SocketAddr;
 #[cfg(feature = "managed")]
 use std::net::ToSocketAddrs;
-#[cfg(feature = "forward")]
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,6 +121,8 @@ struct ConnectArgs {
     tun: Option<String>,
     #[command(flatten)]
     routes: RouteArgs,
+    #[command(flatten)]
+    dns: DnsOverrideArgs,
 }
 
 #[cfg(feature = "forward")]
@@ -131,17 +140,17 @@ struct ForwardOptions {
     /// Fixed target URI using tcp://, http://, or https://.
     #[arg(long, value_parser = forward::parse_target_argument)]
     target: String,
-    /// DNS policy: auto uses iWAN DNS when available, otherwise host DNS;
-    /// iwan requires iWAN DNS; system uses only host DNS.
+    /// Target resolution path: auto selects tunnel or system DNS, tunnel
+    /// requires a resolver reachable through iWAN, and system uses host DNS.
     #[arg(long, value_enum, default_value = "auto")]
-    dns_mode: DnsModeArg,
+    resolve_via: ResolveViaArg,
     /// Recursive DNS server reached through the iWAN userspace stack. An
     /// omitted port defaults to 53. Repeat for multiple servers.
-    #[arg(long = "dns-server", value_parser = parse_dns_server)]
-    dns_servers: Vec<SocketAddr>,
+    #[arg(long = "resolver", value_parser = parse_resolver)]
+    resolvers: Vec<SocketAddr>,
     /// Timeout for one DNS server query.
     #[arg(long, default_value_t = 3_000)]
-    dns_timeout_ms: u64,
+    resolver_timeout_ms: u64,
     /// Loopback address for the local listener.
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
@@ -155,31 +164,161 @@ struct ForwardOptions {
 
 #[cfg(feature = "forward")]
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum DnsModeArg {
+enum ResolveViaArg {
     Auto,
-    Iwan,
+    Tunnel,
     System,
 }
 
 #[cfg(feature = "forward")]
-impl From<DnsModeArg> for forward::DnsMode {
-    fn from(value: DnsModeArg) -> Self {
+impl From<ResolveViaArg> for ResolveVia {
+    fn from(value: ResolveViaArg) -> Self {
         match value {
-            DnsModeArg::Auto => Self::Auto,
-            DnsModeArg::Iwan => Self::Iwan,
-            DnsModeArg::System => Self::System,
+            ResolveViaArg::Auto => Self::Auto,
+            ResolveViaArg::Tunnel => Self::Tunnel,
+            ResolveViaArg::System => Self::System,
         }
     }
 }
 
 #[cfg(feature = "forward")]
-fn parse_dns_server(value: &str) -> std::result::Result<SocketAddr, String> {
+fn parse_resolver(value: &str) -> std::result::Result<SocketAddr, String> {
     if let Ok(address) = value.parse::<IpAddr>() {
         return Ok(SocketAddr::new(address, 53));
     }
     value
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid DNS server {value}: {error}"))
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct DnsOverrideArgs {
+    /// DNS server source. `inherit` uses the profile/controller/App default.
+    #[arg(long, value_enum)]
+    dns_mode: Option<DnsServerModeArg>,
+    /// Custom IPv4 DNS server. Repeat for a secondary server.
+    #[arg(long = "dns-server")]
+    dns_servers: Vec<Ipv4Addr>,
+    /// Split-DNS behavior.
+    #[arg(long, value_enum)]
+    split_dns_mode: Option<SplitDnsModeArg>,
+    /// iWAN domain-filter rule. Repeat for multiple rules.
+    #[arg(long = "split-dns-domain")]
+    split_dns_domains: Vec<DomainRule>,
+    /// Override encrypted DNS blocking.
+    #[arg(long, value_enum)]
+    encrypted_dns: Option<EncryptedDnsModeArg>,
+    /// Additional exact `DoH` hostname to deny. Repeat for multiple hosts.
+    #[arg(long = "doh-host")]
+    doh_hosts: Vec<String>,
+}
+
+impl DnsOverrideArgs {
+    fn as_overrides(&self) -> DnsOverrides {
+        DnsOverrides {
+            server_mode: self
+                .dns_mode
+                .and_then(DnsServerModeArg::into_policy)
+                .or_else(|| (!self.dns_servers.is_empty()).then_some(DnsServerMode::Custom)),
+            servers: (!self.dns_servers.is_empty()).then(|| self.dns_servers.clone()),
+            split_mode: self
+                .split_dns_mode
+                .and_then(SplitDnsModeArg::into_policy)
+                .or_else(|| (!self.split_dns_domains.is_empty()).then_some(SplitDnsMode::Custom)),
+            split_domains: (!self.split_dns_domains.is_empty())
+                .then(|| self.split_dns_domains.clone()),
+            encrypted_dns: self.encrypted_dns.map(EncryptedDnsModeArg::into_policy),
+            doh_hosts: (!self.doh_hosts.is_empty()).then(|| self.doh_hosts.clone()),
+        }
+    }
+
+    #[cfg(feature = "managed")]
+    fn patch_profile(&self, target: &mut DnsOverrides) {
+        if let Some(mode) = self.dns_mode {
+            target.server_mode = mode.into_policy();
+        }
+        if !self.dns_servers.is_empty() {
+            target.servers = Some(self.dns_servers.clone());
+            if self.dns_mode.is_none() {
+                target.server_mode = Some(DnsServerMode::Custom);
+            }
+        }
+        if let Some(mode) = self.split_dns_mode {
+            target.split_mode = mode.into_policy();
+        }
+        if !self.split_dns_domains.is_empty() {
+            target.split_domains = Some(self.split_dns_domains.clone());
+            if self.split_dns_mode.is_none() {
+                target.split_mode = Some(SplitDnsMode::Custom);
+            }
+        }
+        if let Some(mode) = self.encrypted_dns {
+            target.encrypted_dns = match mode {
+                EncryptedDnsModeArg::Inherit => None,
+                _ => Some(mode.into_policy()),
+            };
+        }
+        if !self.doh_hosts.is_empty() {
+            target.doh_hosts = Some(self.doh_hosts.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum DnsServerModeArg {
+    Inherit,
+    Server,
+    Custom,
+    Disabled,
+}
+
+impl DnsServerModeArg {
+    const fn into_policy(self) -> Option<DnsServerMode> {
+        match self {
+            Self::Inherit => None,
+            Self::Server => Some(DnsServerMode::Server),
+            Self::Custom => Some(DnsServerMode::Custom),
+            Self::Disabled => Some(DnsServerMode::Disabled),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum SplitDnsModeArg {
+    Inherit,
+    Off,
+    TunnelAll,
+    Managed,
+    Custom,
+}
+
+impl SplitDnsModeArg {
+    const fn into_policy(self) -> Option<SplitDnsMode> {
+        match self {
+            Self::Inherit => None,
+            Self::Off => Some(SplitDnsMode::Off),
+            Self::TunnelAll => Some(SplitDnsMode::TunnelAll),
+            Self::Managed => Some(SplitDnsMode::Managed),
+            Self::Custom => Some(SplitDnsMode::Custom),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum EncryptedDnsModeArg {
+    Inherit,
+    Block,
+    Allow,
+}
+
+impl EncryptedDnsModeArg {
+    const fn into_policy(self) -> EncryptedDnsMode {
+        match self {
+            Self::Inherit => EncryptedDnsMode::Inherit,
+            Self::Block => EncryptedDnsMode::Block,
+            Self::Allow => EncryptedDnsMode::Allow,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -288,6 +427,8 @@ struct ManagedConnectArgs {
     tun: Option<String>,
     #[command(flatten)]
     routes: RouteArgs,
+    #[command(flatten)]
+    dns: DnsOverrideArgs,
 }
 
 #[cfg(all(feature = "managed", feature = "forward"))]
@@ -336,7 +477,7 @@ enum ProfileCommand {
     },
     /// Create or update a profile. New profiles require a domain; Device ID is
     /// generated automatically unless overridden.
-    Set(ProfileSetArgs),
+    Set(Box<ProfileSetArgs>),
     /// Select the default profile used by `openiwan managed`.
     Use { name: String },
     /// Remove a profile.
@@ -360,6 +501,22 @@ struct ProfileSetArgs {
     clear_username: bool,
     #[arg(long)]
     line: Option<LinePreference>,
+    #[command(flatten)]
+    dns: DnsOverrideArgs,
+    /// Remove every saved DNS override from this profile.
+    #[arg(long)]
+    clear_dns_overrides: bool,
+    /// Remove one saved DNS list override. Repeat for multiple list fields.
+    #[arg(long = "clear-dns", value_enum)]
+    clear_dns: Vec<ProfileDnsListArg>,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ProfileDnsListArg {
+    Servers,
+    SplitDomains,
+    DohHosts,
 }
 
 fn main() {
@@ -409,7 +566,12 @@ fn run() -> Result<()> {
 
 fn connect(arguments: ConnectArgs) -> Result<()> {
     let client = build_client(&arguments.connection)?;
-    run_client(client, arguments.tun.as_deref(), &arguments.routes)
+    run_client(
+        client,
+        arguments.tun.as_deref(),
+        &arguments.routes,
+        &arguments.dns,
+    )
 }
 
 #[cfg(feature = "forward")]
@@ -418,35 +580,76 @@ fn forward(arguments: ForwardArgs) -> Result<()> {
     run_forward(client, &arguments.forward, &[])
 }
 
-fn run_client(client: Client, tun: Option<&str>, route_arguments: &RouteArgs) -> Result<()> {
+fn run_client(
+    client: Client,
+    tun: Option<&str>,
+    route_arguments: &RouteArgs,
+    dns_arguments: &DnsOverrideArgs,
+) -> Result<()> {
     let session = client.authenticate()?;
     print_session(session.info());
+    let overrides = dns_arguments.as_overrides();
+    if overrides.split_mode == Some(SplitDnsMode::Managed) {
+        return Err(Error::InvalidConfig(
+            "direct connect cannot use managed split DNS without controller domain rules".into(),
+        ));
+    }
+    let defaults = DnsDefaults::default();
+    let policy = DnsPolicyResolver::resolve(&defaults, &overrides, &session.info().dns_servers)?;
+    let physical = discover_physical_resolvers()?;
 
     let mut route_ips = route_arguments.route_ips.clone();
     route_ips.extend(
-        session
-            .info()
-            .dns_servers
+        policy
+            .servers
             .iter()
-            .filter(|server| **server != session.info().peer.ip())
-            .map(ToString::to_string),
+            .map(|server| IpAddr::V4(*server))
+            .filter(|server| *server != session.info().peer.ip())
+            .map(|server| server.to_string()),
     );
-    let routes = resolve_route_targets(
+    let physical_exclusions = if policy.server_mode == DnsServerMode::Disabled
+        || matches!(
+            policy.split_mode,
+            SplitDnsMode::Managed | SplitDnsMode::Custom
+        ) {
+        physical
+            .iter()
+            .map(|resolver| {
+                let address = resolver.address.ip();
+                format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let routes = resolve_route_policy(
         &route_arguments.routes,
         &route_ips,
         &route_arguments.route_domains,
-        Some(session.info().peer.ip()),
+        &physical_exclusions,
+        session.info().peer.ip(),
+        false,
     )?;
-    let device = Arc::new(TunDevice::open(tun, session.info())?);
+    let mut interface_session = session.info().clone();
+    interface_session.dns_servers = policy.servers.iter().copied().map(IpAddr::V4).collect();
+    let device = Arc::new(TunDevice::open(tun, &interface_session)?);
     let _routes = RouteGuard::configure(&device, &routes)?;
-    let _dns = DnsGuard::configure(&device, &session.info().dns_servers, &[])?;
+    let runtime = Arc::new(DnsRuntime::new(
+        device.dns_platform_target(),
+        defaults,
+        overrides,
+        physical,
+        RelayConfig::default(),
+    )?);
+    let dns_device = Arc::new(DnsPacketDevice::new(Arc::clone(&device), runtime));
     for route in &routes {
         println!("route {route} -> {}", device.name());
     }
+    print_dns_policy(&policy);
     println!("TUN {} is active; press Ctrl-C to stop", device.name());
 
     let shutdown = install_shutdown_handler()?;
-    let end = client.run_reconnecting_from(session, device, shutdown)?;
+    let end = client.run_reconnecting_from(session, dns_device, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
@@ -480,7 +683,19 @@ fn build_forward_config(
     arguments: &ForwardOptions,
     configured_dns_servers: &[IpAddr],
 ) -> Result<forward::ForwardConfig> {
-    let mut dns_servers = arguments.dns_servers.clone();
+    build_forward_config_with_route(arguments, configured_dns_servers, None)
+}
+
+#[cfg(feature = "forward")]
+fn build_forward_config_with_route(
+    arguments: &ForwardOptions,
+    configured_dns_servers: &[IpAddr],
+    auto_tunnel: Option<bool>,
+) -> Result<forward::ForwardConfig> {
+    let include_session_servers = arguments.resolvers.is_empty()
+        && configured_dns_servers.is_empty()
+        && auto_tunnel.is_none();
+    let mut dns_servers = arguments.resolvers.clone();
     if dns_servers.is_empty() {
         dns_servers.extend(
             configured_dns_servers
@@ -489,11 +704,17 @@ fn build_forward_config(
                 .map(|address| SocketAddr::new(address, 53)),
         );
     }
-    let dns = forward::DnsConfig::new(
-        arguments.dns_mode.into(),
+    let mode = match (arguments.resolve_via, auto_tunnel, dns_servers.is_empty()) {
+        (ResolveViaArg::Auto, Some(true), false) => ResolveVia::Tunnel,
+        (ResolveViaArg::Auto, Some(_), _) => ResolveVia::System,
+        (mode, _, _) => mode.into(),
+    };
+    let dns = ResolverConfig::new(
+        mode,
         dns_servers,
-        Duration::from_millis(arguments.dns_timeout_ms),
-    )?;
+        Duration::from_millis(arguments.resolver_timeout_ms),
+    )?
+    .with_session_servers(include_session_servers);
     forward::ForwardConfig::new(
         arguments.listen,
         &arguments.target,
@@ -501,6 +722,23 @@ fn build_forward_config(
         arguments.ca_certificates.clone(),
         Duration::from_millis(arguments.connect_timeout_ms),
     )
+}
+
+fn print_dns_policy(policy: &EffectiveDnsPolicy) {
+    let servers = if policy.servers.is_empty() {
+        "none".into()
+    } else {
+        policy
+            .servers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    println!(
+        "DNS policy: mode={:?}, servers={servers}, split={:?}, encrypted={}",
+        policy.server_mode, policy.split_mode, policy.block_encrypted_dns
+    );
 }
 
 #[cfg(feature = "managed")]
@@ -512,6 +750,7 @@ struct ManagedContext {
     username: Option<String>,
     line: LinePreference,
     credential_id: Option<String>,
+    dns: DnsOverrides,
 }
 
 #[cfg(feature = "managed")]
@@ -550,7 +789,13 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
             print_prepared(&prepared);
-            run_managed_client(prepared, connect.tun.as_deref(), &connect.routes)?;
+            run_managed_client(
+                prepared,
+                connect.tun.as_deref(),
+                &connect.routes,
+                &context.dns,
+                &connect.dns,
+            )?;
         }
         #[cfg(feature = "forward")]
         ManagedCommand::Forward(forward) => {
@@ -565,7 +810,7 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 Duration::from_millis(arguments.ping_timeout_ms),
             )?;
             print_prepared(&prepared);
-            run_managed_forward(&prepared, &forward.forward)?;
+            run_managed_forward(&prepared, &forward.forward, &context.dns)?;
         }
         ManagedCommand::Lines(lines) => {
             // A stale saved preference must not prevent the recovery command
@@ -649,6 +894,9 @@ fn resolve_managed_context(
             .as_ref()
             .map(|profile| profile.credential_id.clone())
             .filter(|identifier| !identifier.is_empty()),
+        dns: profile
+            .as_ref()
+            .map_or_else(DnsOverrides::default, |profile| profile.dns.clone()),
     })
 }
 
@@ -671,7 +919,7 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
             })?;
             print_profile(&name, profile, persisted.default_profile.as_deref(), json)?;
         }
-        ProfileCommand::Set(arguments) => set_profile(arguments, store)?,
+        ProfileCommand::Set(arguments) => set_profile(*arguments, store)?,
         ProfileCommand::Use { name } => {
             state::validate_profile_name(&name)?;
             store.update(|persisted| {
@@ -752,6 +1000,23 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
         }
         if let Some(line) = &arguments.line {
             profile.line = line.clone();
+        }
+        if arguments.clear_dns_overrides {
+            profile.dns = DnsOverrides::default();
+        } else {
+            arguments.dns.patch_profile(&mut profile.dns);
+            if arguments.clear_dns.contains(&ProfileDnsListArg::Servers) {
+                profile.dns.servers = None;
+            }
+            if arguments
+                .clear_dns
+                .contains(&ProfileDnsListArg::SplitDomains)
+            {
+                profile.dns.split_domains = None;
+            }
+            if arguments.clear_dns.contains(&ProfileDnsListArg::DohHosts) {
+                profile.dns.doh_hosts = None;
+            }
         }
         if authentication_changed {
             profile.credential_id.clear();
@@ -897,6 +1162,16 @@ fn print_profile(
         profile.username.as_deref().unwrap_or("<prompt>")
     );
     println!("  line: {}", profile.line);
+    println!(
+        "  DNS overrides: {}",
+        if profile.dns == DnsOverrides::default() {
+            "inherit".into()
+        } else {
+            serde_json::to_string(&profile.dns).map_err(|error| {
+                Error::InvalidConfig(format!("serialize profile DNS output: {error}"))
+            })?
+        }
+    );
     Ok(())
 }
 
@@ -913,6 +1188,7 @@ fn profile_json(
         "device_id": profile.device_id,
         "username": profile.username,
         "line": profile.line.to_string(),
+        "dns": profile.dns,
     })
 }
 
@@ -992,10 +1268,19 @@ fn run_managed_client(
     prepared: PreparedConnection,
     tun: Option<&str>,
     route_arguments: &RouteArgs,
+    profile_dns: &DnsOverrides,
+    dns_arguments: &DnsOverrideArgs,
 ) -> Result<()> {
     let client = prepared.client()?;
     let session = client.authenticate()?;
     print_session(session.info());
+    let defaults = prepared
+        .configuration
+        .dns_defaults(prepared.service_type() == ServiceType::Controller)?;
+    let cli_dns = dns_arguments.as_overrides();
+    let overrides = DnsOverrides::layered(profile_dns, &cli_dns);
+    let policy = DnsPolicyResolver::resolve(&defaults, &overrides, &session.info().dns_servers)?;
+    let physical = discover_physical_resolvers()?;
 
     let routing = prepared.configuration.routing()?;
     let mode = routing
@@ -1023,19 +1308,25 @@ fn run_managed_client(
         cidrs.extend(routing.custom_routes.iter().cloned());
     }
 
-    let dns_servers = effective_managed_dns(&prepared, session.info())?;
     if mode != RoutingMode::All {
-        cidrs.extend(
-            dns_servers
-                .iter()
-                .map(|server| format!("{server}/{}", if server.is_ipv4() { 32 } else { 128 })),
-        );
+        cidrs.extend(policy.servers.iter().map(|server| format!("{server}/32")));
     }
     let mut exclusions = ip_filter
         .as_ref()
         .filter(|_| has_ip_filter)
         .map_or_else(Vec::new, |filter| valid_filter_cidrs(&filter.exclusive));
     exclusions.extend(managed_server_exclusions(&prepared.configuration)?);
+    if policy.server_mode == DnsServerMode::Disabled
+        || matches!(
+            policy.split_mode,
+            SplitDnsMode::Managed | SplitDnsMode::Custom
+        )
+    {
+        exclusions.extend(physical.iter().map(|resolver| {
+            let address = resolver.address.ip();
+            format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
+        }));
+    }
     let routes = resolve_route_policy(
         &cidrs,
         &route_arguments.route_ips,
@@ -1053,44 +1344,56 @@ fn run_managed_client(
     {
         interface_session.mtu = mtu;
     }
-    interface_session.dns_servers.clone_from(&dns_servers);
+    interface_session.dns_servers = policy.servers.iter().copied().map(IpAddr::V4).collect();
     let device = Arc::new(TunDevice::open(tun, &interface_session)?);
     let _routes = RouteGuard::configure(&device, &routes)?;
-    let split_domains = routing
-        .as_ref()
-        .filter(|routing| routing.split_dns_enabled)
-        .map_or(&[][..], |routing| {
-            routing.split_dns_custom_domains.as_slice()
-        });
-    let _dns = DnsGuard::configure(&device, &dns_servers, split_domains)?;
+    let runtime = Arc::new(DnsRuntime::new(
+        device.dns_platform_target(),
+        defaults,
+        overrides,
+        physical,
+        RelayConfig::default(),
+    )?);
+    let dns_device = Arc::new(DnsPacketDevice::new(Arc::clone(&device), runtime));
     for route in &routes {
         println!("route {route} -> {}", device.name());
     }
-    if !dns_servers.is_empty() {
-        println!(
-            "DNS policy: {}",
-            dns_servers
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+    print_dns_policy(&policy);
     println!("TUN {} is active; press Ctrl-C to stop", device.name());
 
     let shutdown = install_shutdown_handler()?;
-    let end = client.run_reconnecting_from(session, device, shutdown)?;
+    let end = client.run_reconnecting_from(session, dns_device, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
 
 #[cfg(all(feature = "managed", feature = "forward"))]
-fn run_managed_forward(prepared: &PreparedConnection, arguments: &ForwardOptions) -> Result<()> {
+fn run_managed_forward(
+    prepared: &PreparedConnection,
+    arguments: &ForwardOptions,
+    profile_dns: &DnsOverrides,
+) -> Result<()> {
     let client = prepared.client()?;
     let session = client.authenticate()?;
     print_session(session.info());
-    let dns_servers = effective_managed_dns(prepared, session.info())?;
-    let config = build_forward_config(arguments, &dns_servers)?;
+    let defaults = prepared
+        .configuration
+        .dns_defaults(prepared.service_type() == ServiceType::Controller)?;
+    let policy = DnsPolicyResolver::resolve(&defaults, profile_dns, &session.info().dns_servers)?;
+    let dns_servers = policy
+        .servers
+        .iter()
+        .copied()
+        .map(IpAddr::V4)
+        .collect::<Vec<_>>();
+    let target = url::Url::parse(&arguments.target)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned));
+    let auto_tunnel = target
+        .as_deref()
+        .filter(|host| host.parse::<IpAddr>().is_err())
+        .map(|host| policy.routes_through_tunnel(host));
+    let config = build_forward_config_with_route(arguments, &dns_servers, auto_tunnel)?;
     let shutdown = install_shutdown_handler()?;
     let end = forward::run(client, session, config, shutdown)?;
     println!("session ended: {end:?}");
@@ -1159,66 +1462,6 @@ fn managed_server_exclusions(
     exclusions.sort();
     exclusions.dedup();
     Ok(exclusions)
-}
-
-#[cfg(feature = "managed")]
-fn effective_managed_dns(
-    prepared: &PreparedConnection,
-    session: &openiwan::SessionInfo,
-) -> Result<Vec<std::net::IpAddr>> {
-    let routing = prepared.configuration.routing()?;
-    let dns_mode = routing
-        .as_ref()
-        .map_or("server", |routing| routing.dns_mode.as_str());
-    if dns_mode == "disabled" {
-        return Ok(Vec::new());
-    }
-    let mut servers = if dns_mode == "custom" {
-        let mut servers = Vec::new();
-        if let Some(routing) = routing {
-            for value in [&routing.custom_dns1, &routing.custom_dns2] {
-                if !value.trim().is_empty() {
-                    servers.push(value.trim().parse().map_err(|_| {
-                        Error::InvalidConfig(format!("invalid custom DNS server {value:?}"))
-                    })?);
-                }
-            }
-        }
-        servers
-    } else {
-        let configured = prepared
-            .configuration
-            .dns()
-            .map_or_else(Vec::new, |configuration| configuration.servers);
-        effective_managed_server_dns(&configured, &session.dns_servers, prepared.service_type())
-    };
-    servers.sort_unstable();
-    servers.dedup();
-    Ok(servers)
-}
-
-#[cfg(feature = "managed")]
-fn effective_managed_server_dns(
-    configured: &[String],
-    open_ack: &[std::net::IpAddr],
-    service_type: ServiceType,
-) -> Vec<std::net::IpAddr> {
-    let mut servers = configured
-        .iter()
-        .filter_map(|value| value.parse::<std::net::IpAddr>().ok())
-        .chain(open_ack.iter().copied())
-        .filter(|address| !address.is_unspecified())
-        .collect::<Vec<_>>();
-    if servers.is_empty() && service_type == ServiceType::Controller {
-        tracing::warn!(
-            "managed controller supplied no usable DNS server; using public fallback resolvers"
-        );
-        servers.extend([
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(114, 114, 114, 114)),
-        ]);
-    }
-    servers
 }
 
 #[cfg(feature = "managed")]
@@ -1836,6 +2079,43 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn parses_typed_dns_overrides() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "connect",
+            "--server",
+            "192.0.2.10:6001",
+            "--username",
+            "alice",
+            "--dns-mode",
+            "custom",
+            "--dns-server",
+            "192.0.2.53",
+            "--split-dns-mode",
+            "custom",
+            "--split-dns-domain",
+            "@corp.example",
+            "--encrypted-dns",
+            "block",
+            "--doh-host",
+            "dns.example",
+        ])
+        .unwrap();
+        let Command::Connect(arguments) = parsed.command else {
+            panic!("expected connect");
+        };
+        let overrides = arguments.dns.as_overrides();
+        assert_eq!(overrides.server_mode, Some(DnsServerMode::Custom));
+        assert_eq!(overrides.servers, Some(vec![Ipv4Addr::new(192, 0, 2, 53)]));
+        assert_eq!(overrides.split_mode, Some(SplitDnsMode::Custom));
+        assert_eq!(
+            overrides.split_domains,
+            Some(vec!["@corp.example".parse().unwrap()])
+        );
+        assert_eq!(overrides.encrypted_dns, Some(EncryptedDnsMode::Block));
+    }
+
     #[cfg(feature = "managed")]
     #[test]
     fn parses_managed_login_command() {
@@ -1945,6 +2225,9 @@ mod tests {
                 username: Some("alice".into()),
                 clear_username: false,
                 line: None,
+                dns: DnsOverrideArgs::default(),
+                clear_dns_overrides: false,
+                clear_dns: Vec::new(),
             },
             &store,
         )
@@ -1976,12 +2259,12 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Command::Profile(ProfileArgs {
-                command: ProfileCommand::Set(ProfileSetArgs {
-                    name,
-                    line: Some(LinePreference::Iwan { server_id }),
-                    ..
-                })
-            }) if name == "work" && server_id == "7"
+                command: ProfileCommand::Set(arguments)
+            }) if arguments.name == "work"
+                && matches!(
+                    arguments.line,
+                    Some(LinePreference::Iwan { ref server_id }) if server_id == "7"
+                )
         ));
 
         let parsed = Cli::try_parse_from([
@@ -2033,24 +2316,31 @@ mod tests {
     #[cfg(feature = "managed")]
     #[test]
     fn managed_controller_dns_rejects_unspecified_and_uses_official_fallbacks() {
-        let servers = effective_managed_server_dns(
-            &[],
+        let servers = DnsPolicyResolver::resolve(
+            &DnsDefaults {
+                controller_service: true,
+                ..DnsDefaults::default()
+            },
+            &DnsOverrides::default(),
             &["0.0.0.0".parse().unwrap()],
-            ServiceType::Controller,
-        );
+        )
+        .unwrap()
+        .servers;
         assert_eq!(
             servers,
             [
-                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "1.1.1.1".parse::<Ipv4Addr>().unwrap(),
                 "114.114.114.114".parse().unwrap()
             ]
         );
         assert!(
-            effective_managed_server_dns(
-                &[],
+            DnsPolicyResolver::resolve(
+                &DnsDefaults::default(),
+                &DnsOverrides::default(),
                 &["0.0.0.0".parse().unwrap()],
-                ServiceType::ServerList
             )
+            .unwrap()
+            .servers
             .is_empty()
         );
     }
@@ -2067,9 +2357,9 @@ mod tests {
             "alice",
             "--target",
             "tcp://db.example.test:5432",
-            "--dns-mode",
-            "iwan",
-            "--dns-server",
+            "--resolve-via",
+            "tunnel",
+            "--resolver",
             "192.0.2.53",
             "--listen",
             "127.0.0.1:9080",
@@ -2081,14 +2371,14 @@ mod tests {
                 forward: ForwardOptions {
                     listen,
                     target,
-                    dns_mode: DnsModeArg::Iwan,
-                    dns_servers,
+                    resolve_via: ResolveViaArg::Tunnel,
+                    resolvers,
                     ..
                 },
                 ..
             }) if listen == "127.0.0.1:9080".parse().unwrap()
                 && target == "tcp://db.example.test:5432"
-                && dns_servers == vec!["192.0.2.53:53".parse::<SocketAddr>().unwrap()]
+                && resolvers == vec!["192.0.2.53:53".parse::<SocketAddr>().unwrap()]
         ));
         assert!(
             Cli::try_parse_from([

@@ -252,6 +252,42 @@ profile 和已保存认证必须由执行 `--remember` 的同一系统账号访�
 下发的路由、IP filter、DNS、split DNS 和 MTU 策略。详见
 [托管客户端流程](docs/MANAGED_CLIENT_FLOW.md)。
 
+## DNS 策略
+
+direct 与 managed TUN 连接共用公共的 `openiwan::dns` 策略和包处理引擎。一次性
+覆盖参数如下：
+
+```console
+openiwan connect --server 192.0.2.10:6001 --username alice \
+  --dns-mode custom --dns-server 192.0.2.53 \
+  --split-dns-mode custom --split-dns-domain @corp.example \
+  --encrypted-dns block --doh-host dns.example
+```
+
+managed profile 可以保存同一组非敏感覆盖项。标量值使用 `inherit` 取消覆盖，
+`--clear-dns-overrides` 清除整个 DNS 覆盖层：
+
+```console
+openiwan profile set work --dns-mode custom --dns-server 192.0.2.53
+openiwan profile set work --clear-dns-overrides
+```
+
+优先级固定为：本次 CLI、profile、控制器策略、OPEN_ACK/官方服务默认值。split DNS
+在数据包路径中执行，而不是依赖平台的 resolver-domain 规则；排除规则优先于包含
+规则，支持 `tunnel-all`、managed 规则，以及与官方客户端一致的 `*`、`@`、`^`
+自定义规则。
+
+加密 DNS 阻断只覆盖 TUN 可见的 IPv4 流量：丢弃 TCP/UDP 853，并对配置的 DoH
+主机名和 `use-application-dns.net` 返回 NXDOMAIN。它不做 TLS 中间人、SNI/IP
+黑名单或通用 QUIC/DoH 流量识别。不创建 TUN 的 forward 只控制固定目标的解析
+路径：
+
+```console
+openiwan forward --server 192.0.2.10:6001 --username alice \
+  --target tcp://db.example:5432 --resolve-via tunnel \
+  --resolver 192.0.2.53
+```
+
 ## 代码模块
 
 - `protocol`：标准头、TLV、控制签名、ping 与心跳；
@@ -259,9 +295,10 @@ profile 和已保存认证必须由执行 `--remember` 的同一系统账号访�
 - `fragment`：传统/SR 分片和重组；
 - `sr`：SR 封装、加密、数据规划和监控；
 - `client`：认证与会话 worker；
+- `dns`：强类型策略、包级阻断、物理 DNS relay、平台 lease 和用户态解析；
 - `managed`：lookup、认证、OIDC、控制器配置、posture、入口选择、SR 模型和
   HTTP keepalive；
-- `tun`：原生接口、路由和 DNS 集成。
+- `tun`：原生接口和路由集成。
 
 ## 开发
 

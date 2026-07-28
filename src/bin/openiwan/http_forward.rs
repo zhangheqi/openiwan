@@ -432,13 +432,11 @@ fn error_response(status: StatusCode) -> Response<ProxyBody> {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{linked_userspace_nets, test_session};
-    use super::super::{
-        CachedResolution, ConnectorSettings, DnsConfig, DnsMode, ForwardConfig, Net,
-        ResolutionSource,
-    };
+    use super::super::{CachedResolution, ConnectorSettings, ForwardConfig, Net, ResolutionSource};
     use super::*;
     use http_body_util::StreamBody;
     use hyper::body::Frame;
+    use openiwan::dns::{ResolveVia, ResolverConfig};
     use rustls::ServerConfig;
     use std::fs::File;
     use std::io::BufReader;
@@ -505,7 +503,7 @@ mod tests {
             &test_session(client_ip),
             ConnectorSettings {
                 target,
-                dns_mode: DnsMode::Auto,
+                dns_mode: ResolveVia::Auto,
                 dns_servers: Vec::new(),
                 dns_timeout: Duration::from_secs(1),
                 timeout: connect_timeout,
@@ -709,7 +707,7 @@ mod tests {
                 &test_session(client_ip),
                 ConnectorSettings {
                     target: target.clone(),
-                    dns_mode: DnsMode::Auto,
+                    dns_mode: ResolveVia::Auto,
                     dns_servers: Vec::new(),
                     dns_timeout: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
@@ -849,7 +847,7 @@ mod tests {
             let error = ForwardConfig::new(
                 "127.0.0.1:19384".parse().unwrap(),
                 target,
-                DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(1)).unwrap(),
+                ResolverConfig::new(ResolveVia::Auto, Vec::new(), Duration::from_secs(1)).unwrap(),
                 vec![missing.clone()],
                 Duration::from_secs(1),
             )
@@ -867,7 +865,7 @@ mod tests {
             ForwardConfig::new(
                 "127.0.0.1:19384".parse().unwrap(),
                 "https://service.example.test",
-                DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(1)).unwrap(),
+                ResolverConfig::new(ResolveVia::Auto, Vec::new(), Duration::from_secs(1)).unwrap(),
                 vec![fixture_path("forward-ca.pem")],
                 Duration::from_secs(1),
             )

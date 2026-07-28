@@ -1,4 +1,5 @@
 use fs2::FileExt;
+use openiwan::dns::DnsOverrides;
 use openiwan::managed::{LinePreference, validate_domain};
 use openiwan::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,8 @@ pub struct ManagedProfile {
     pub line: LinePreference,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub credential_id: String,
+    #[serde(default, skip_serializing_if = "dns_overrides_are_empty")]
+    pub dns: DnsOverrides,
 }
 
 impl ManagedProfile {
@@ -84,6 +87,7 @@ impl ManagedProfile {
             username: None,
             line: LinePreference::Auto,
             credential_id: String::new(),
+            dns: DnsOverrides::default(),
         };
         profile.validate()?;
         Ok(profile)
@@ -112,6 +116,7 @@ impl ManagedProfile {
                 "profile credential ID must be 32 lowercase hexadecimal characters".into(),
             ));
         }
+        self.dns.validate()?;
         Ok(())
     }
 
@@ -269,6 +274,10 @@ impl StateStore {
             counter
         ))
     }
+}
+
+fn dns_overrides_are_empty(value: &DnsOverrides) -> bool {
+    value == &DnsOverrides::default()
 }
 
 pub fn validate_profile_name(name: &str) -> Result<()> {
@@ -546,7 +555,7 @@ mod tests {
         assert_eq!(profile.username.as_deref(), Some("alice"));
         assert_eq!(profile.line, "iwan:7".parse().unwrap());
         let raw = fs::read_to_string(store.directory().join(STATE_FILE_NAME)).unwrap();
-        assert!(raw.contains("version = 1"));
+        assert!(raw.contains(&format!("version = {STATE_VERSION}")));
         assert!(!raw.contains("password"));
         assert!(!raw.contains("token"));
 
@@ -617,5 +626,28 @@ mod tests {
         assert!(validate_profile_name("").is_err());
         assert!(validate_profile_name("../escape").is_err());
         assert!(validate_profile_name("中文").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_state_versions() {
+        let store = test_store("unknown-version");
+        store
+            .update(|state| {
+                state.profiles.insert(
+                    "work".into(),
+                    ManagedProfile::new("iwan.example".into(), "device-1".into())?,
+                );
+                Ok(())
+            })
+            .unwrap();
+        let path = store.directory().join(STATE_FILE_NAME);
+        let invalid = fs::read_to_string(&path)
+            .unwrap()
+            .replacen("version = 1", "version = 99", 1);
+        fs::write(&path, invalid).unwrap();
+        let error = store.load().unwrap_err().to_string();
+        assert!(error.contains("unsupported CLI state version 99"));
+        assert!(error.contains("expected 1"));
+        fs::remove_dir_all(store.directory()).unwrap();
     }
 }

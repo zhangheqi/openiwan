@@ -30,6 +30,12 @@ const HEARTBEAT_MAX_MISSES: u32 = 10;
 
 pub trait PacketDevice: Send + Sync + 'static {
     fn name(&self) -> &str;
+    fn activate_session(&self, _session: &SessionInfo) -> Result<()> {
+        Ok(())
+    }
+    fn deactivate_session(&self) -> Result<()> {
+        Ok(())
+    }
     fn read_packet(&self, buffer: &mut [u8]) -> std::io::Result<usize>;
     fn write_packet(&self, packet: &[u8]) -> std::io::Result<usize>;
 }
@@ -388,6 +394,20 @@ impl ConnectedSession {
     }
 
     pub fn run(
+        self,
+        device: Arc<dyn PacketDevice>,
+        external_shutdown: Arc<AtomicBool>,
+    ) -> Result<SessionEnd> {
+        device.activate_session(&self.info)?;
+        let outcome = self.run_active(Arc::clone(&device), external_shutdown);
+        let deactivation = device.deactivate_session();
+        match (outcome, deactivation) {
+            (Ok(end), Ok(())) => Ok(end),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn run_active(
         self,
         device: Arc<dyn PacketDevice>,
         external_shutdown: Arc<AtomicBool>,

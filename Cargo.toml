@@ -46,7 +46,7 @@ ctrlc = "3.4"
 futures = { version = "0.3", optional = true }
 fs2 = { version = "0.4", optional = true }
 getrandom = "0.3"
-hickory-proto = { version = "0.25", default-features = false, features = ["std"], optional = true }
+hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
 hmac = { version = "0.12", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["client", "server", "http1"], optional = true }
@@ -62,6 +62,7 @@ rustls-pemfile = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sha2 = "0.10"
+socket2 = { version = "0.6", features = ["all"] }
 thiserror = "2"
 time = { version = "=0.3.44", optional = true }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
@@ -96,7 +97,6 @@ default = ["managed", "forward"]
 forward = [
     "dep:bytes",
     "dep:futures",
-    "dep:hickory-proto",
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",

@@ -7,6 +7,7 @@
 pub mod client;
 pub mod config;
 pub mod crypto;
+pub mod dns;
 pub mod error;
 pub mod fragment;
 #[cfg(feature = "managed")]

@@ -1,3 +1,5 @@
+//! DNS resolution over the route-free iWAN userspace network stack.
+
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use std::collections::HashSet;
@@ -15,12 +17,12 @@ const MAX_CNAME_DEPTH: usize = 8;
 const UDP_RESPONSE_SIZE: usize = 4_096;
 
 #[derive(Debug)]
-pub(super) struct DnsLookup {
-    pub(super) addresses: Vec<IpAddr>,
-    pub(super) ttl: Duration,
+pub struct DnsLookup {
+    pub addresses: Vec<IpAddr>,
+    pub ttl: Duration,
 }
 
-pub(super) async fn lookup(
+pub async fn lookup(
     net: &Arc<Net>,
     server: SocketAddr,
     host: &str,
@@ -260,7 +262,7 @@ impl ParsedResponse {
     }
 }
 
-pub(super) const fn default_port() -> u16 {
+pub const fn default_port() -> u16 {
     DNS_PORT
 }
 

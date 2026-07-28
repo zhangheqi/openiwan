@@ -7,6 +7,13 @@ All notable changes to OpeniWAN are documented here. The project follows
 
 ### Added
 
+- A unified public DNS subsystem with typed server, split, encrypted-DNS, and
+  domain-rule policies; packet-level DNS routing and enforcement; bounded
+  physical resolver relay; reconnect-aware runtime state; and link-scoped
+  Linux, macOS, and Windows DNS leases.
+- One-shot and profile DNS overrides with deterministic
+  CLI > profile > controller > OPEN_ACK precedence.
+
 - Full Segment Routing transport with directional headers, inner and outer
   encryption, exact two-fragment planning, offset-aware reassembly, monitor
   handshakes, counters, and peer-down timing.
@@ -40,6 +47,14 @@ All notable changes to OpeniWAN are documented here. The project follows
   optional CLI overrides for existing enrollments.
 
 ### Changed
+
+- Replaced `DnsGuard`, controller `DnsConfiguration`/raw routing DNS fields,
+  and forward-only `DnsMode`/`DnsConfig` with the breaking public
+  `openiwan::dns` API. Forward flags are now `--resolve-via`, `--resolver`, and
+  `--resolver-timeout-ms`.
+- Split DNS is enforced in the TUN packet path instead of platform
+  route-only resolver domains. Encrypted-DNS compatibility now drops visible
+  TCP/UDP 853 and denies configured DoH hostnames without TLS interception.
 
 - Set the next package version to 0.3.0. Public APIs may change until the
   release is published.

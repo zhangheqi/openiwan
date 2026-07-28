@@ -1,11 +1,8 @@
 use crate::client::{PacketDevice, SessionInfo};
+use crate::dns::DnsPlatformTarget;
 use crate::{Error, Result};
 use std::fmt;
-#[cfg(target_os = "macos")]
-use std::io::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
-#[cfg(target_os = "macos")]
-use std::process::Stdio;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Output};
 #[cfg(windows)]
@@ -51,7 +48,6 @@ struct InterfaceSettings {
     address: IpAddr,
     netmask: IpAddr,
     mtu: u16,
-    dns_servers: Vec<IpAddr>,
 }
 
 impl TunDevice {
@@ -67,6 +63,17 @@ impl TunDevice {
     #[cfg(windows)]
     const fn luid(&self) -> u64 {
         self.luid
+    }
+
+    pub fn dns_platform_target(&self) -> DnsPlatformTarget {
+        #[cfg(windows)]
+        {
+            DnsPlatformTarget::with_platform_id(self.name.clone(), self.luid)
+        }
+        #[cfg(not(windows))]
+        {
+            DnsPlatformTarget::new(self.name.clone())
+        }
     }
 }
 
@@ -85,7 +92,6 @@ fn interface_settings(
         address,
         netmask,
         mtu: session.mtu,
-        dns_servers: session.dns_servers.clone(),
     })
 }
 
@@ -221,7 +227,6 @@ fn open_device(settings: &InterfaceSettings) -> Result<TunDevice> {
         .up();
     configuration.platform_config(|platform| {
         platform.wintun_file(wintun_path.as_os_str());
-        platform.dns_servers(&settings.dns_servers);
         platform.wait_for_interfaces(
             settings.address.is_ipv4(),
             settings.address.is_ipv6(),
@@ -500,156 +505,6 @@ impl Drop for RouteGuard {
     fn drop(&mut self) {
         cleanup_routes(&self.device, &self.routes, &mut self.platform);
     }
-}
-
-/// Restores platform DNS state when dropped.
-pub struct DnsGuard {
-    #[cfg(target_os = "linux")]
-    device: Option<String>,
-    #[cfg(target_os = "macos")]
-    key: Option<String>,
-}
-
-impl fmt::Debug for DnsGuard {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("DnsGuard").finish_non_exhaustive()
-    }
-}
-
-impl DnsGuard {
-    /// Apply DNS servers to the TUN interface.
-    ///
-    /// Empty `split_domains` makes the VPN resolver the default. Non-empty
-    /// domains install route-only split-DNS rules. Windows DNS is applied
-    /// while Wintun is created, so this guard is a no-op there.
-    pub fn configure(
-        device: &TunDevice,
-        servers: &[IpAddr],
-        split_domains: &[String],
-    ) -> Result<Self> {
-        validate_dns_domains(split_domains)?;
-
-        #[cfg(target_os = "linux")]
-        {
-            if servers.is_empty() {
-                return Ok(Self { device: None });
-            }
-            let mut dns_arguments = vec!["dns", device.name()];
-            let server_strings = servers.iter().map(ToString::to_string).collect::<Vec<_>>();
-            dns_arguments.extend(server_strings.iter().map(String::as_str));
-            run_command("resolvectl", &dns_arguments)?;
-
-            let domains = if split_domains.is_empty() {
-                vec!["~.".into()]
-            } else {
-                split_domains
-                    .iter()
-                    .map(|domain| format!("~{domain}"))
-                    .collect()
-            };
-            let mut domain_arguments = vec!["domain", device.name()];
-            domain_arguments.extend(domains.iter().map(String::as_str));
-            if let Err(error) = run_command("resolvectl", &domain_arguments) {
-                let _ = Command::new("resolvectl")
-                    .args(["revert", device.name()])
-                    .output();
-                return Err(error);
-            }
-            if split_domains.is_empty()
-                && let Err(error) =
-                    run_command("resolvectl", &["default-route", device.name(), "yes"])
-            {
-                let _ = Command::new("resolvectl")
-                    .args(["revert", device.name()])
-                    .output();
-                return Err(error);
-            }
-            Ok(Self {
-                device: Some(device.name().to_owned()),
-            })
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            if servers.is_empty() {
-                return Ok(Self { key: None });
-            }
-            let key = format!("State:/Network/Service/openiwan-{}/DNS", device.name());
-            let server_values = servers
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let domain_values = if split_domains.is_empty() {
-                "\"\"".into()
-            } else {
-                split_domains.join(" ")
-            };
-            let script = format!(
-                "d.init\nd.add ServerAddresses * {server_values}\n\
-                 d.add SupplementalMatchDomains * {domain_values}\nset {key}\n"
-            );
-            run_scutil(&script)?;
-            Ok(Self { key: Some(key) })
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = (device, servers, split_domains);
-            Ok(Self {})
-        }
-    }
-}
-
-impl Drop for DnsGuard {
-    fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        if let Some(device) = &self.device {
-            let _ = Command::new("resolvectl").args(["revert", device]).output();
-        }
-
-        #[cfg(target_os = "macos")]
-        if let Some(key) = &self.key {
-            let _ = run_scutil(&format!("remove {key}\n"));
-        }
-    }
-}
-
-fn validate_dns_domains(domains: &[String]) -> Result<()> {
-    for domain in domains {
-        if domain.is_empty()
-            || !domain
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            return Err(Error::InvalidConfig(format!(
-                "invalid split-DNS domain {domain:?}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn run_scutil(script: &str) -> Result<()> {
-    let mut child = Command::new("scutil")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| Error::Tun("failed to open scutil stdin".into()))?
-        .write_all(script.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        return Err(Error::CommandFailed {
-            program: "scutil".into(),
-            message: String::from_utf8_lossy(&output.stderr).trim().into(),
-        });
-    }
-    Ok(())
 }
 
 /// Resolve CIDR, IP-address, and domain route targets into validated CIDRs.
@@ -1352,13 +1207,6 @@ mod tests {
                 .iter()
                 .any(|route| route.contains("10.2.3.4".parse().unwrap()))
         );
-    }
-
-    #[test]
-    fn split_dns_domains_reject_command_separators_and_whitespace() {
-        validate_dns_domains(&["corp.example".into(), "_service.example".into()]).unwrap();
-        assert!(validate_dns_domains(&["bad domain".into()]).is_err());
-        assert!(validate_dns_domains(&["bad\nset State:/evil".into()]).is_err());
     }
 
     #[test]

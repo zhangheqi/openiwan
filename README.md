@@ -278,6 +278,45 @@ Local posture results can be supplied as a JSON array with
 DNS, split-DNS, and MTU policy. See
 [Managed Client Flow](docs/MANAGED_CLIENT_FLOW.md).
 
+## DNS policy
+
+Direct and managed TUN connections share the public `openiwan::dns` policy
+and packet engine. One-shot overrides use:
+
+```console
+openiwan connect --server 192.0.2.10:6001 --username alice \
+  --dns-mode custom --dns-server 192.0.2.53 \
+  --split-dns-mode custom --split-dns-domain @corp.example \
+  --encrypted-dns block --doh-host dns.example
+```
+
+Managed profiles persist the same non-secret overrides. `inherit` removes a
+scalar override, while `--clear-dns-overrides` removes the complete saved DNS
+layer:
+
+```console
+openiwan profile set work --dns-mode custom --dns-server 192.0.2.53
+openiwan profile set work --clear-dns-overrides
+```
+
+Precedence is one-shot CLI, profile, controller policy, then OPEN_ACK and
+official service defaults. Split DNS is enforced in the packet path rather
+than with platform resolver-domain rules. Exclusions win over inclusions;
+`tunnel-all`, managed rules, and custom `*`, `@`, and `^` rules match the
+official client behavior.
+
+Encrypted-DNS blocking applies only to IPv4 traffic visible to a TUN
+connection. It drops TCP/UDP port 853 and returns NXDOMAIN for configured DoH
+hostnames and `use-application-dns.net`. It does not perform TLS interception,
+SNI/IP blocking, or general QUIC/DoH traffic inspection. Route-free forwarding
+only selects how its fixed target is resolved:
+
+```console
+openiwan forward --server 192.0.2.10:6001 --username alice \
+  --target tcp://db.example:5432 --resolve-via tunnel \
+  --resolver 192.0.2.53
+```
+
 ## Library layout
 
 - `protocol`: standard headers, TLVs, control signatures, ping, and heartbeat;
@@ -285,9 +324,11 @@ DNS, split-DNS, and MTU policy. See
 - `fragment`: traditional and SR fragment codecs and reassembly;
 - `sr`: Segment Routing framing, encryption, data planning, and monitoring;
 - `client`: authentication and connected-session workers;
+- `dns`: typed policy resolution, packet enforcement, protected physical
+  relay, platform leases, and userspace resolution;
 - `managed`: lookup, authentication, OIDC, controller configuration, posture,
   ingress selection, SR models, and HTTP keepalive;
-- `tun`: native interface, routing, and DNS integration.
+- `tun`: native interface and route integration.
 
 `Client`, `ConnectedSession`, and `PacketDevice` allow applications to supply
 their own packet device or userspace stack.

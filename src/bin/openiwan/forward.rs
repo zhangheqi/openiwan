@@ -1,10 +1,10 @@
-mod dns;
 mod http_forward;
 
 // URI-driven TCP and HTTP(S) forwarding over one iWAN userspace network stack.
 
 use futures::{Sink, Stream};
 use hickory_proto::rr::Name;
+use openiwan::dns::{ResolveVia, ResolverConfig, default_dns_port, lookup_with_net};
 use openiwan::{Client, ConnectedSession, Error, PacketDevice, Result, SessionEnd, SessionInfo};
 use rustls::pki_types::ServerName;
 use std::future::Future;
@@ -44,47 +44,11 @@ const SYSTEM_DNS_TTL: Duration = Duration::from_secs(60);
 const MIN_DNS_TTL: Duration = Duration::from_secs(5);
 const MAX_DNS_TTL: Duration = Duration::from_secs(3_600);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DnsMode {
-    Auto,
-    Iwan,
-    System,
-}
-
-#[derive(Debug, Clone)]
-pub struct DnsConfig {
-    mode: DnsMode,
-    servers: Vec<SocketAddr>,
-    timeout: Duration,
-}
-
-impl DnsConfig {
-    pub fn new(mode: DnsMode, servers: Vec<SocketAddr>, timeout: Duration) -> Result<Self> {
-        if timeout.is_zero() {
-            return Err(Error::InvalidConfig(
-                "DNS timeout must be greater than zero".into(),
-            ));
-        }
-        if servers.iter().any(|server| {
-            server.port() == 0 || server.ip().is_unspecified() || server.ip().is_multicast()
-        }) {
-            return Err(Error::InvalidConfig(
-                "DNS servers must be unicast addresses with a nonzero port".into(),
-            ));
-        }
-        Ok(Self {
-            mode,
-            servers,
-            timeout,
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct ForwardConfig {
     listen: SocketAddr,
     target: Target,
-    dns: DnsConfig,
+    dns: ResolverConfig,
     tls: Option<tokio_rustls::TlsConnector>,
     connect_timeout: Duration,
 }
@@ -93,10 +57,11 @@ impl ForwardConfig {
     pub fn new(
         listen: SocketAddr,
         target: &str,
-        dns: DnsConfig,
+        dns: ResolverConfig,
         ca_certificates: Vec<PathBuf>,
         connect_timeout: Duration,
     ) -> Result<Self> {
+        dns.validate()?;
         if !listen.ip().is_loopback() {
             return Err(Error::InvalidConfig(format!(
                 "forward listen address {listen} is not a loopback address"
@@ -437,16 +402,20 @@ fn build_tcp_connector(
     net: Arc<Net>,
     session: &SessionInfo,
     target: Target,
-    dns: DnsConfig,
+    dns: ResolverConfig,
     connect_timeout: Duration,
 ) -> TcpConnector {
-    let dns_servers = effective_dns_servers(&dns.servers, session);
+    let dns_servers = if dns.include_session_servers {
+        effective_dns_servers(&dns.servers, session)
+    } else {
+        dns.servers.clone()
+    };
     TcpConnector::new(
         net,
         session,
         ConnectorSettings {
             target,
-            dns_mode: dns.mode,
+            dns_mode: dns.via,
             dns_servers,
             dns_timeout: dns.timeout,
             timeout: connect_timeout,
@@ -646,7 +615,7 @@ fn effective_dns_servers(configured: &[SocketAddr], session: &SessionInfo) -> Ve
         .copied()
         .filter(|address| !address.is_unspecified() && !address.is_multicast())
     {
-        let server = SocketAddr::new(address, dns::default_port());
+        let server = SocketAddr::new(address, default_dns_port());
         if !servers.contains(&server) {
             servers.push(server);
         }
@@ -849,7 +818,7 @@ fn session_random_seed(session: &SessionInfo) -> u64 {
 struct TcpConnector {
     net: Arc<Net>,
     target: Target,
-    dns_mode: DnsMode,
+    dns_mode: ResolveVia,
     dns_servers: Arc<[SocketAddr]>,
     dns_timeout: Duration,
     dns_cache: Arc<TokioMutex<Option<CachedResolution>>>,
@@ -861,7 +830,7 @@ struct TcpConnector {
 
 struct ConnectorSettings {
     target: Target,
-    dns_mode: DnsMode,
+    dns_mode: ResolveVia,
     dns_servers: Vec<SocketAddr>,
     dns_timeout: Duration,
     timeout: Duration,
@@ -980,9 +949,9 @@ impl TcpConnector {
 
     async fn resolve_uncached(&self) -> io::Result<CachedResolution> {
         match self.dns_mode {
-            DnsMode::Iwan => self.resolve_iwan_dns().await,
-            DnsMode::System => self.resolve_system_dns().await,
-            DnsMode::Auto => {
+            ResolveVia::Tunnel => self.resolve_iwan_dns().await,
+            ResolveVia::System => self.resolve_system_dns().await,
+            ResolveVia::Auto => {
                 if self.dns_servers.is_empty() {
                     self.resolve_system_dns().await
                 } else {
@@ -997,7 +966,7 @@ impl TcpConnector {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "no usable iWAN DNS server was advertised or configured; \
-                 supply controller DNS servers or pass --dns-server",
+                 supply controller DNS servers or pass --resolver",
             ));
         }
 
@@ -1009,7 +978,7 @@ impl TcpConnector {
             .filter(|server| server.is_ipv4() == self.ipv4)
         {
             self.ensure_userspace_route(server.ip())?;
-            match dns::lookup(
+            match lookup_with_net(
                 &self.net,
                 server,
                 &self.target.host,
@@ -1241,7 +1210,7 @@ mod tests {
         let config = ForwardConfig::new(
             "127.0.0.1:8080".parse().unwrap(),
             "tcp://db.example.test:5432",
-            DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
+            ResolverConfig::new(ResolveVia::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
             Vec::new(),
             Duration::from_secs(10),
         )
@@ -1253,7 +1222,7 @@ mod tests {
             ForwardConfig::new(
                 "0.0.0.0:8080".parse().unwrap(),
                 "tcp://db.example.test:5432",
-                DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
+                ResolverConfig::new(ResolveVia::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
                 Vec::new(),
                 Duration::from_secs(10),
             )
@@ -1263,15 +1232,15 @@ mod tests {
             ForwardConfig::new(
                 "127.0.0.1:8080".parse().unwrap(),
                 "tcp://db.example.test:5432",
-                DnsConfig::new(DnsMode::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
+                ResolverConfig::new(ResolveVia::Auto, Vec::new(), Duration::from_secs(3)).unwrap(),
                 Vec::new(),
                 Duration::ZERO,
             )
             .is_err()
         );
         assert!(
-            DnsConfig::new(
-                DnsMode::Iwan,
+            ResolverConfig::new(
+                ResolveVia::Tunnel,
                 vec!["0.0.0.0:53".parse().unwrap()],
                 Duration::from_secs(3),
             )
@@ -1460,7 +1429,7 @@ mod tests {
                 &test_session(client_ip),
                 ConnectorSettings {
                     target: Target::parse("tcp://service.example.test:9000").unwrap(),
-                    dns_mode: DnsMode::Auto,
+                    dns_mode: ResolveVia::Auto,
                     dns_servers: Vec::new(),
                     dns_timeout: Duration::from_secs(1),
                     timeout: Duration::from_secs(1),
@@ -1532,7 +1501,7 @@ mod tests {
                 &test_session(client_ip),
                 ConnectorSettings {
                     target: Target::parse(&format!("tcp://{server_ip}:8080")).unwrap(),
-                    dns_mode: DnsMode::Auto,
+                    dns_mode: ResolveVia::Auto,
                     dns_servers: Vec::new(),
                     dns_timeout: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
@@ -1609,7 +1578,7 @@ mod tests {
                 &test_session(client_ip),
                 ConnectorSettings {
                     target: Target::parse(&format!("tcp://{server_ip}:8081")).unwrap(),
-                    dns_mode: DnsMode::Auto,
+                    dns_mode: ResolveVia::Auto,
                     dns_servers: Vec::new(),
                     dns_timeout: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
@@ -1715,7 +1684,7 @@ mod tests {
 
             let lookup = timeout(
                 Duration::from_secs(5),
-                dns::lookup(
+                lookup_with_net(
                     &client_net,
                     dns_address,
                     "api.example.test",

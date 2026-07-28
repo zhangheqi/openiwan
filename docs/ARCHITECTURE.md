@@ -6,10 +6,11 @@ OpeniWAN separates wire-protocol behavior from host integration.
 ClientConfig
     -> OPEN authentication
     -> ConnectedSession
+       -> PacketDevice::activate_session
        -> traditional DATA/heartbeat
        -> or SR envelope/data/monitor
     -> PacketDevice
-       -> native TUN
+       -> DnsPacketDevice -> native TUN
        -> or userspace forwarding stack
 ```
 
@@ -82,9 +83,40 @@ The `managed` feature contains:
 Managed connection turns the `all`, `ipfilter`, or `custom` setting
 into a platform route transaction. CIDR subtraction preserves exclusive
 networks and every known ingress outside the TUN, preventing the persistent
-UDP socket from routing into itself. DNS configuration is guarded and rolled
-back with the route transaction; Windows uses Wintun DNS, Linux uses
-`resolvectl`, and macOS uses a scoped SystemConfiguration entry.
+UDP socket from routing into itself.
+
+## DNS subsystem
+
+`dns::policy` parses controller, profile, CLI, and OPEN_ACK inputs into one
+immutable `EffectiveDnsPolicy`. Controller wire strings do not cross this
+boundary. `DnsPacketDevice` decorates the native TUN and is activated for the
+initial session and each reconnect:
+
+```text
+controller/App defaults <- profile <- one-shot CLI
+                  + OPEN_ACK DNS
+                         |
+                EffectiveDnsPolicy
+          +--------------+---------------+
+          |              |               |
+ platform DNS lease  packet engine  userspace resolver
+                         |
+                 protected physical relay
+```
+
+The engine handles unfragmented IPv4. UDP/53 queries are either passed to the
+tunnel, answered synthetically, or relayed over a physical-interface-bound
+socket. It returns empty NOERROR for AAAA, NXDOMAIN for blocked DoH hostnames,
+and drops visible TCP/UDP 853 when blocking is enabled. The relay bounds
+concurrency, rewrites transaction IDs, validates replies, retries servers,
+and falls back from truncated UDP to TCP. Session changes reset its generation
+so obsolete replies cannot be injected.
+
+Platform DNS uses a link-scoped RAII lease: systemd-resolved with a
+`resolvconf` fallback on Linux, a scoped SystemConfiguration entry on macOS,
+and IP Helper DNS APIs on Windows. Physical resolvers are captured before the
+lease is installed. Session teardown stops the packet engine and relay workers
+before restoring DNS and routes.
 
 Unknown nested policy fields remain `serde_json::Value`. Traditional
 top-level `serverlist` and SR `sites` are mutually exclusive.
@@ -106,8 +138,10 @@ authentication.
 
 ## Packet devices
 
-`PacketDevice` is the data-plane boundary. `TunDevice` implements it with the
-`tun` crate and host route management. The optional `forward` feature
+`PacketDevice` is the data-plane boundary. Its session lifecycle callbacks
+allow decorators to refresh state on reconnect. `TunDevice` implements it
+with the `tun` crate and host route management. `DnsPacketDevice` provides the
+TUN DNS behavior without coupling it to native interface creation. The optional `forward` feature
 implements it with bounded in-memory channels and a userspace TCP/IP stack.
 Both direct and managed authentication feed the same forward data plane.
 

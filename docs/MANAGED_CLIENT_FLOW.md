@@ -185,7 +185,7 @@ Typed members include:
 - traditional server identity, host, port, auto flag, and optional IP;
 - `server_credentials` keyed by `server_id`;
 - SR group `id`, names, `primary_index`, and `sr` entries;
-- DNS mode and servers;
+- effective DNS defaults parsed into `DnsDefaults`;
 - posture, keepalive, device-binding, routing, IP-filter, domain-filter, and
   branding outer blocks.
 
@@ -223,21 +223,29 @@ and link-local IPv4 remain outside the tunnel. Full routing is represented as
 a CIDR difference instead of an unsafe default route that could feed the UDP
 transport back into its own TUN.
 
-`dns_mode=server` uses controller and OPEN_ACK DNS, `custom` uses
-`custom_dns1`/`custom_dns2`, and `disabled` installs no VPN DNS. An unspecified
-OPEN_ACK address such as `0.0.0.0` is ignored; controller deployments with no
-usable server then use the official-client fallback resolvers `1.1.1.1` and
-`114.114.114.114`. DNS servers receive tunnel host routes in split modes.
-Linux uses `resolvectl`, macOS uses a scoped SystemConfiguration DNS entry, and
-Windows configures the Wintun adapter; guards restore platform state when the
-connection ends.
-`split_dns_enabled` and `split_dns_custom_domains` become route-only resolver
-domains. A valid `mtu_mode=custom` value in `576..=9000` overrides the TUN MTU.
+`dns_mode=server` resolves serverlist custom/disabled/auto behavior and then
+OPEN_ACK DNS. Invalid serverlist custom entries fall through to OPEN_ACK;
+controller deployments with no usable server use `1.1.1.1` and
+`114.114.114.114`. `custom` requires one or two valid IPv4 servers, while
+`disabled` installs no VPN DNS and excludes captured physical resolvers from
+full-tunnel routes.
 
-The IP-filter cache shape, 12-field routing settings model, and domain-filter
-model are typed. Domain-filter enforcement and encrypted-DNS blocking remain
-outside the current DNS engine; the configuration fields stay available to
-library users.
+Split DNS runs inside `DnsPacketDevice`. `tunnel_all` passes every query to the
+tunnel. `managed` applies controller inclusive/exclusive domain-filter rules.
+`custom` combines local rules with managed inclusions when applicable and
+retains managed exclusions; exclusions always win. Names are normalized and
+deduplicated, controller lists are capped at 100,000 entries, and `*`, `@`,
+`^`, and unprefixed rules retain official matching semantics.
+
+When encrypted DNS blocking is effective, visible TCP/UDP 853 is dropped and
+UDP/53 lookups for configured DoH hosts or `use-application-dns.net` receive
+NXDOMAIN. AAAA receives an empty NOERROR response. This is packet-level
+compatibility behavior, not TLS interception or general DoH/QUIC inspection.
+
+Profile and one-shot overrides layer above controller settings. The active
+OPEN_ACK is reapplied after reconnect, relay generations are reset, and the
+link-scoped platform DNS lease is restored on disconnect. A valid
+`mtu_mode=custom` value in `576..=9000` overrides the TUN MTU.
 
 ## Posture gate
 

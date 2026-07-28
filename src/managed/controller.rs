@@ -1,10 +1,13 @@
 use super::http::{HttpRequest, HttpTransport};
 use super::password;
 use super::security;
+use crate::dns::{DnsDefaults, DnsServerMode, DomainRule, ServerListDnsMode, SplitDnsMode};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::str::FromStr as _;
 use url::Url;
 use zeroize::Zeroize;
 
@@ -177,30 +180,6 @@ impl ControllerConfiguration {
         }))
     }
 
-    pub fn domain_filter_raw(&self) -> Option<&Value> {
-        self.raw.get("domainfilter")
-    }
-
-    pub fn domain_filter(&self) -> Result<Option<DomainFilterConfiguration>> {
-        let Some(raw) = self.domain_filter_raw() else {
-            return Ok(None);
-        };
-        let object = raw
-            .as_object()
-            .ok_or_else(|| Error::Controller("domainfilter must be an object".into()))?;
-        Ok(Some(DomainFilterConfiguration {
-            version: string_member(object, "version", ""),
-            mode: string_member(object, "mode", ""),
-            inclusive: nonempty_string_array(object.get("inclusive")),
-            exclusive: nonempty_string_array(object.get("exclusive")),
-            drop_secure_dns: object
-                .get("drop_secure_dns")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            secure_dns_hosts: nonempty_string_array(object.get("secure_dns_hosts")),
-        }))
-    }
-
     pub fn branding(&self) -> Option<&Value> {
         self.raw.get("branding")
     }
@@ -242,25 +221,12 @@ impl ControllerConfiguration {
         Ok(Some(RoutingConfiguration {
             mode,
             custom_routes,
-            dns_mode: string_member(object, "dns_mode", "server"),
-            custom_dns1: string_member(object, "custom_dns1", ""),
-            custom_dns2: string_member(object, "custom_dns2", ""),
             mtu_mode: string_member(object, "mtu_mode", "server"),
             custom_mtu: object
                 .get("custom_mtu")
                 .and_then(Value::as_i64)
                 .and_then(|value| i32::try_from(value).ok())
                 .unwrap_or(0),
-            split_dns_enabled: object
-                .get("split_dns_enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            split_dns_mode: string_member(object, "split_dns_mode", ""),
-            split_dns_custom_domains: string_list(object.get("split_dns_custom_domains")),
-            block_encrypted_dns_override: object
-                .get("block_encrypted_dns_override")
-                .and_then(Value::as_bool),
-            block_encrypted_dns_hosts: string_list(object.get("block_encrypted_dns_hosts")),
         }))
     }
 
@@ -276,26 +242,107 @@ impl ControllerConfiguration {
             .map_or_else(Vec::new, |routing| routing.custom_routes))
     }
 
-    pub fn dns(&self) -> Option<DnsConfiguration> {
-        let object = self.raw.get("dns")?.as_object()?;
-        Some(DnsConfiguration {
-            mode: object
-                .get("mode")
-                .and_then(Value::as_str)
-                .unwrap_or("auto")
-                .to_owned(),
-            servers: object
-                .get("servers")
-                .and_then(Value::as_array)
-                .map(|servers| {
-                    servers
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect()
+    /// Decode every controller DNS source into one strongly typed policy.
+    ///
+    /// Malformed remote list entries are ignored with diagnostics. Structural
+    /// errors and invalid scalar modes fail the configuration instead of
+    /// leaking stringly typed values into the data plane.
+    pub fn dns_defaults(&self, controller_service: bool) -> Result<DnsDefaults> {
+        let mut defaults = DnsDefaults {
+            controller_service,
+            ..DnsDefaults::default()
+        };
+
+        if let Some(object) = self.raw.get("dns").and_then(Value::as_object) {
+            defaults.server_mode = ServerListDnsMode::from_server_value(
+                object.get("mode").and_then(Value::as_str).unwrap_or("auto"),
+            );
+            defaults.server_dns = parse_ipv4_list(object.get("servers"), "server-list DNS");
+        }
+
+        if let Some(raw) = self.raw.get("domainfilter") {
+            let object = raw
+                .as_object()
+                .ok_or_else(|| Error::Controller("domainfilter must be an object".into()))?;
+            let domain_filter_mode = object.get("mode").and_then(Value::as_str).unwrap_or("");
+            defaults.managed_domain_filter =
+                domain_filter_mode.eq_ignore_ascii_case("domain_filter");
+            if !domain_filter_mode.is_empty()
+                && !defaults.managed_domain_filter
+                && !domain_filter_mode.eq_ignore_ascii_case("tunnel_all")
+            {
+                tracing::warn!(
+                    %domain_filter_mode,
+                    "invalid controller domain-filter mode; failing open to tunnel-all"
+                );
+            }
+            defaults.managed_inclusive =
+                parse_domain_rules(object.get("inclusive"), "inclusive domain-filter");
+            defaults.managed_exclusive =
+                parse_domain_rules(object.get("exclusive"), "exclusive domain-filter");
+            defaults.block_encrypted_dns = object
+                .get("drop_secure_dns")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            defaults.secure_dns_hosts =
+                parse_dns_hosts(object.get("secure_dns_hosts"), "secure DNS");
+        }
+
+        if let Some(raw) = self.routing_policy() {
+            let object = raw
+                .as_object()
+                .ok_or_else(|| Error::Controller("routing policy must be an object".into()))?;
+            defaults.local_mode = DnsServerMode::from_str(
+                object
+                    .get("dns_mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("server"),
+            )?;
+            defaults.local_dns = ["custom_dns1", "custom_dns2"]
+                .into_iter()
+                .filter_map(|key| {
+                    let value = object.get(key)?.as_str()?.trim();
+                    if value.is_empty() {
+                        return None;
+                    }
+                    if let Ok(address) = value.parse::<Ipv4Addr>() {
+                        Some(address)
+                    } else {
+                        tracing::warn!(%value, "ignoring invalid controller custom DNS");
+                        None
+                    }
                 })
-                .unwrap_or_default(),
-        })
+                .collect();
+            defaults.split_mode = if object
+                .get("split_dns_enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                object
+                    .get("split_dns_mode")
+                    .and_then(Value::as_str)
+                    .filter(|mode| !mode.is_empty())
+                    .map_or(Ok(SplitDnsMode::Managed), SplitDnsMode::from_str)?
+            } else {
+                SplitDnsMode::Off
+            };
+            if defaults.split_mode == SplitDnsMode::Managed && !defaults.managed_domain_filter {
+                defaults.split_mode = SplitDnsMode::TunnelAll;
+            }
+            defaults.custom_domains =
+                parse_domain_rules(object.get("split_dns_custom_domains"), "custom split-DNS");
+            if let Some(value) = object
+                .get("block_encrypted_dns_override")
+                .and_then(Value::as_bool)
+            {
+                defaults.block_encrypted_dns = value;
+            }
+            defaults.secure_dns_hosts.extend(parse_dns_hosts(
+                object.get("block_encrypted_dns_hosts"),
+                "encrypted-DNS override",
+            ));
+        }
+        Ok(defaults)
     }
 
     pub fn iwan_servers(&self) -> Result<Vec<ServerInfo>> {
@@ -499,20 +546,44 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnsConfiguration {
-    pub mode: String,
-    pub servers: Vec<String>,
+fn parse_ipv4_list(value: Option<&Value>, label: &str) -> Vec<Ipv4Addr> {
+    string_list(value)
+        .into_iter()
+        .filter_map(|value| {
+            if let Ok(address) = value.parse::<Ipv4Addr>() {
+                Some(address)
+            } else {
+                tracing::warn!(%value, %label, "ignoring invalid controller DNS server");
+                None
+            }
+        })
+        .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DomainFilterConfiguration {
-    pub version: String,
-    pub mode: String,
-    pub inclusive: Vec<String>,
-    pub exclusive: Vec<String>,
-    pub drop_secure_dns: bool,
-    pub secure_dns_hosts: Vec<String>,
+fn parse_domain_rules(value: Option<&Value>, label: &str) -> Vec<DomainRule> {
+    string_list(value)
+        .into_iter()
+        .filter_map(|value| match DomainRule::parse(&value) {
+            Ok(rule) => Some(rule),
+            Err(error) => {
+                tracing::warn!(%value, %label, %error, "ignoring invalid controller DNS rule");
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_dns_hosts(value: Option<&Value>, label: &str) -> Vec<String> {
+    string_list(value)
+        .into_iter()
+        .filter_map(|value| match DomainRule::parse(&format!("^{value}")) {
+            Ok(rule) => Some(rule.domain().to_owned()),
+            Err(error) => {
+                tracing::warn!(%value, %label, %error, "ignoring invalid controller DNS host");
+                None
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -587,16 +658,8 @@ pub enum RoutingMode {
 pub struct RoutingConfiguration {
     pub mode: RoutingMode,
     pub custom_routes: Vec<String>,
-    pub dns_mode: String,
-    pub custom_dns1: String,
-    pub custom_dns2: String,
     pub mtu_mode: String,
     pub custom_mtu: i32,
-    pub split_dns_enabled: bool,
-    pub split_dns_mode: String,
-    pub split_dns_custom_domains: Vec<String>,
-    pub block_encrypted_dns_override: Option<bool>,
-    pub block_encrypted_dns_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1107,8 +1170,8 @@ mod tests {
         assert_eq!(credentials["7"].username, "entry-user");
         assert_eq!(credentials["7"].password, "entry-password");
         assert_eq!(
-            configuration.dns().unwrap().servers,
-            ["10.0.0.53".to_owned()]
+            configuration.dns_defaults(true).unwrap().server_dns,
+            [Ipv4Addr::new(10, 0, 0, 53)]
         );
     }
 
@@ -1271,12 +1334,16 @@ mod tests {
         }));
         let routing = configuration.routing().unwrap().unwrap();
         assert_eq!(routing.mode, RoutingMode::IpFilter);
-        assert_eq!(routing.dns_mode, "custom");
-        assert_eq!(routing.custom_dns1, "10.0.0.53");
         assert_eq!(routing.custom_mtu, 1300);
-        assert!(routing.split_dns_enabled);
-        assert_eq!(routing.split_dns_custom_domains, ["example.test"]);
-        assert_eq!(routing.block_encrypted_dns_override, Some(true));
+        let dns = configuration.dns_defaults(true).unwrap();
+        assert_eq!(dns.local_mode, DnsServerMode::Custom);
+        assert_eq!(
+            dns.local_dns,
+            [Ipv4Addr::new(10, 0, 0, 53), Ipv4Addr::new(10, 0, 0, 54)]
+        );
+        assert_eq!(dns.split_mode, SplitDnsMode::Custom);
+        assert_eq!(dns.custom_domains, ["example.test".parse().unwrap()]);
+        assert!(dns.block_encrypted_dns);
         assert!(configuration.custom_routes().unwrap().is_empty());
     }
 
@@ -1315,17 +1382,12 @@ mod tests {
                 "secure_dns_hosts": ["dns.google"]
             }
         }));
-        assert_eq!(
-            configuration.domain_filter().unwrap(),
-            Some(DomainFilterConfiguration {
-                version: "v3".into(),
-                mode: "domain_filter".into(),
-                inclusive: vec!["corp.example".into()],
-                exclusive: vec!["public.example".into()],
-                drop_secure_dns: true,
-                secure_dns_hosts: vec!["dns.google".into()]
-            })
-        );
+        let dns = configuration.dns_defaults(true).unwrap();
+        assert!(dns.managed_domain_filter);
+        assert_eq!(dns.managed_inclusive, ["corp.example".parse().unwrap()]);
+        assert_eq!(dns.managed_exclusive, ["public.example".parse().unwrap()]);
+        assert!(dns.block_encrypted_dns);
+        assert_eq!(dns.secure_dns_hosts, ["dns.google"]);
     }
 
     #[test]

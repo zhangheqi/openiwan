@@ -76,8 +76,10 @@ Changes in these areas require new interoperability evidence and an update to
 
 Protocol reports should include:
 
-- affected OpeniWAN version and platform;
-- peer or server version when known;
+- Panabit iWAN software or component and version, or `Unknown` when it cannot
+  be determined;
+- OpeniWAN version and platform only when the behavior was reproduced with
+  OpeniWAN;
 - evidence level (`S`, `C`, `L`, or `R`);
 - a minimal synthetic reproducer;
 - redacted packet bytes or structured traces;

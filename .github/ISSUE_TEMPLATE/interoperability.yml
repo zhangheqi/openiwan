@@ -1,5 +1,5 @@
 name: Interoperability report
-description: Report behavior observed with an authorized iWAN deployment
+description: Report Panabit iWAN protocol behavior or authorized interoperability evidence
 title: "interop: "
 labels: ["interoperability"]
 body:
@@ -9,18 +9,19 @@ body:
         Interoperability evidence improves the protocol reference. Share only
         information you are authorized to disclose, and redact all private data.
   - type: input
-    id: client
+    id: panabit
     attributes:
-      label: Peer or deployment version
-      placeholder: "Server, controller, or peer version; use Unknown if unavailable"
+      label: Panabit iWAN software and version
+      description: Identify the official client, server, or controller where the behavior was observed.
+      placeholder: "For example: Android client 2.3.0, controller version, or Unknown"
+    validations:
+      required: true
   - type: input
     id: openiwan
     attributes:
-      label: openiwan version
-      description: Paste the output of `openiwan --version`, or the commit SHA.
+      label: OpeniWAN version or commit
+      description: Optional; fill this only if you reproduced the behavior with OpeniWAN.
       placeholder: "openiwan 0.3.0 or commit SHA"
-    validations:
-      required: true
   - type: dropdown
     id: evidence
     attributes:

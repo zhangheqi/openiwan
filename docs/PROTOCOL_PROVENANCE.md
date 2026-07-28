@@ -51,9 +51,9 @@ conditions is met:
 4. an authorized server test confirms the behavior.
 
 The evidence must identify its level, protocol surface, smallest reproducer,
-expected bytes or state transition, peer version when known, and any
-deployment-specific assumptions. Plausible field names, symbol names, or
-schemas are not sufficient.
+expected bytes or state transition, Panabit iWAN client, server, or controller
+version (or `Unknown`), and any deployment-specific assumptions. Plausible
+field names, symbol names, or schemas are not sufficient.
 
 ## Current protocol boundaries
 
@@ -76,8 +76,8 @@ Changes in these areas require new interoperability evidence and an update to
 
 Protocol reports should include:
 
-- Panabit iWAN software or component and version, or `Unknown` when it cannot
-  be determined;
+- Panabit iWAN client, server, or controller version, or `Unknown` when it
+  cannot be determined;
 - OpeniWAN version and platform when OpeniWAN was part of the observation or
   comparison;
 - evidence level (`S`, `C`, `L`, or `R`);

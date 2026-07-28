@@ -91,7 +91,7 @@ A protocol contribution should identify:
 
 1. the exact protocol surface;
 2. the evidence level;
-3. the peer or client version when known;
+3. the Panabit iWAN client, server, or controller version, or `Unknown`;
 4. the smallest reproducible input;
 5. expected bytes or state transition;
 6. remaining uncertainty and deployment assumptions.

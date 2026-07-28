@@ -4,7 +4,7 @@ Describe the problem and the change.
 
 ## Interoperability and evidence
 
-- Target peer or deployment version:
+- Panabit iWAN client, server, or controller version:
 - Evidence level, if this changes the wire protocol:
 - Platforms tested:
 

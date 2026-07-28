@@ -137,7 +137,8 @@ and public managed APIs.
 - Bounded fragment reassembly and reconnect policies.
 - Linux TUN and macOS utun support.
 - `ping`, `auth`, `connect`, and `decode` CLI commands.
-- Static-analysis evidence and wire-protocol reference for client version 2.3.0.
+- Static-analysis evidence and wire-protocol reference for Panabit iWAN client
+  version 2.3.0.
 - Unit tests and a synthetic local UDP authentication endpoint.
 - English-first community and technical documentation.
 - Simplified Chinese README translation.

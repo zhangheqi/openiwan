@@ -1217,24 +1217,66 @@ fn print_line_probes(probes: &[LineProbe], json: bool) -> Result<()> {
         );
         return Ok(());
     }
-    println!("ID\tLATENCY\tENDPOINT\tNAME");
-    for probe in probes {
-        let latency = probe.latency.map_or_else(
-            || "unreachable".into(),
-            |latency| format!("{:.3} ms", latency.as_secs_f64() * 1_000.0),
-        );
-        println!(
-            "{}\t{}\t{}\t{}",
-            probe.preference,
-            latency,
-            probe.endpoint.as_deref().unwrap_or("-"),
-            probe.name
-        );
-        if let Some(error) = &probe.error {
-            println!("  error: {error}");
+    print!("{}", format_line_probes(probes));
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn format_line_probes(probes: &[LineProbe]) -> String {
+    use std::fmt::Write as _;
+
+    let rows = probes
+        .iter()
+        .map(|probe| {
+            (
+                probe.preference.to_string(),
+                probe.latency.map_or_else(
+                    || "unreachable".into(),
+                    |latency| format!("{:.3} ms", latency.as_secs_f64() * 1_000.0),
+                ),
+                probe.endpoint.as_deref().unwrap_or("-"),
+                probe.name.as_str(),
+                probe.error.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let id_width = rows
+        .iter()
+        .map(|row| row.0.len())
+        .max()
+        .unwrap_or_default()
+        .max("ID".len());
+    let latency_width = rows
+        .iter()
+        .map(|row| row.1.len())
+        .max()
+        .unwrap_or_default()
+        .max("LATENCY".len());
+    let endpoint_width = rows
+        .iter()
+        .map(|row| row.2.len())
+        .max()
+        .unwrap_or_default()
+        .max("ENDPOINT".len());
+
+    let mut output = String::new();
+    writeln!(
+        output,
+        "{:<id_width$}  {:<latency_width$}  {:<endpoint_width$}  NAME",
+        "ID", "LATENCY", "ENDPOINT"
+    )
+    .expect("writing to a String cannot fail");
+    for (id, latency, endpoint, name, error) in rows {
+        writeln!(
+            output,
+            "{id:<id_width$}  {latency:<latency_width$}  {endpoint:<endpoint_width$}  {name}"
+        )
+        .expect("writing to a String cannot fail");
+        if let Some(error) = error {
+            writeln!(output, "  error: {error}").expect("writing to a String cannot fail");
         }
     }
-    Ok(())
+    output
 }
 
 #[cfg(feature = "managed")]
@@ -2298,6 +2340,59 @@ mod tests {
                 command: ProfileCommand::Logout { name: Some(name) }
             }) if name == "work"
         ));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn formats_managed_lines_with_dynamic_column_widths() {
+        let probes = [
+            LineProbe {
+                preference: LinePreference::Iwan {
+                    server_id: "2".into(),
+                },
+                name: "教育网线路".into(),
+                name_en: "Education network".into(),
+                endpoint: Some("202.38.64.106:6001".into()),
+                latency: Some(Duration::from_micros(35_687)),
+                error: None,
+            },
+            LineProbe {
+                preference: LinePreference::Iwan {
+                    server_id: "30".into(),
+                },
+                name: "移动线路".into(),
+                name_en: "Mobile network".into(),
+                endpoint: None,
+                latency: None,
+                error: Some("probe timed out".into()),
+            },
+        ];
+
+        let output = format_line_probes(&probes);
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[0].find("LATENCY"),
+            lines[1].find("35.687 ms"),
+            "latency column should align with its heading"
+        );
+        assert_eq!(
+            lines[0].find("ENDPOINT"),
+            lines[1].find("202.38.64.106:6001"),
+            "endpoint column should align with its heading"
+        );
+        assert_eq!(
+            lines[0].find("NAME"),
+            lines[1].find("教育网线路"),
+            "name column should align with its heading"
+        );
+        assert_eq!(
+            lines[0].find("NAME"),
+            lines[2].find("移动线路"),
+            "short values should be padded to the computed column width"
+        );
+        assert_eq!(lines[3], "  error: probe timed out");
+        assert!(!output.contains('\t'));
     }
 
     #[cfg(feature = "managed")]

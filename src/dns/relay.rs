@@ -220,8 +220,7 @@ fn exchange_udp(
     socket.set_write_timeout(Some(timeout))?;
     socket.send(request)?;
     let requested_size = Message::from_vec(request)
-        .map(|request| usize::from(request.max_payload()))
-        .unwrap_or(512)
+        .map_or(512, |request| usize::from(request.max_payload()))
         .clamp(512, MAX_UDP_DNS_MESSAGE);
     let mut buffer = vec![0_u8; requested_size];
     let length = socket.recv(&mut buffer)?;

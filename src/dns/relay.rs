@@ -87,15 +87,14 @@ impl DnsRelay {
         }
         let request_message = Message::from_vec(request)
             .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
-        if request_message.message_type() != MessageType::Query
-            || request_message.queries().len() != 1
+        if request_message.message_type != MessageType::Query || request_message.queries.len() != 1
         {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "DNS relay requires one query",
             ));
         }
-        let original_id = request_message.id();
+        let original_id = request_message.id;
         let resolvers = Arc::clone(
             &self
                 .resolvers
@@ -119,7 +118,7 @@ impl DnsRelay {
             }
             let relay_id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let mut relayed = request_message.clone();
-            relayed.set_id(relay_id);
+            relayed.metadata.id = relay_id;
             let request_bytes = relayed
                 .to_vec()
                 .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
@@ -135,7 +134,7 @@ impl DnsRelay {
                             "DNS relay generation changed",
                         ));
                     }
-                    response.set_id(original_id);
+                    response.metadata.id = original_id;
                     let response = response.to_vec().map_err(|error| {
                         io::Error::new(ErrorKind::InvalidData, error.to_string())
                     })?;
@@ -188,7 +187,7 @@ impl Drop for RelayPermit<'_> {
 
 fn exchange(resolver: &PhysicalResolver, request: &[u8], timeout: Duration) -> io::Result<Message> {
     match exchange_udp(resolver, request, timeout) {
-        Ok(response) if response.truncated() => exchange_tcp(resolver, request, timeout),
+        Ok(response) if response.truncation => exchange_tcp(resolver, request, timeout),
         Ok(response) => Ok(response),
         Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
             exchange_tcp(resolver, request, timeout)
@@ -264,10 +263,10 @@ fn exchange_tcp(
 }
 
 fn validate_response(request: &Message, response: &Message) -> io::Result<()> {
-    if response.message_type() != MessageType::Response
-        || response.id() != request.id()
-        || response.op_code() != request.op_code()
-        || response.queries() != request.queries()
+    if response.message_type != MessageType::Response
+        || response.id != request.id
+        || response.op_code != request.op_code
+        || response.queries != request.queries
     {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
@@ -365,15 +364,11 @@ mod tests {
     use std::thread;
 
     fn query(id: u16) -> Message {
-        let mut query = Message::new();
-        query
-            .set_id(id)
-            .set_message_type(MessageType::Query)
-            .set_op_code(OpCode::Query)
-            .add_query(Query::query(
-                Name::from_ascii("example.test").unwrap(),
-                RecordType::A,
-            ));
+        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii("example.test").unwrap(),
+            RecordType::A,
+        ));
         query
     }
 
@@ -381,9 +376,9 @@ mod tests {
     fn rejects_mismatched_transaction_or_question() {
         let request = query(1);
         let mut response = query(2);
-        response.set_message_type(MessageType::Response);
+        response.metadata.message_type = MessageType::Response;
         assert!(validate_response(&request, &response).is_err());
-        response.set_id(1);
+        response.metadata.id = 1;
         assert!(validate_response(&request, &response).is_ok());
     }
 
@@ -423,9 +418,8 @@ mod tests {
             let mut buffer = [0_u8; 512];
             let (length, peer) = udp.recv_from(&mut buffer).unwrap();
             let mut truncated = Message::from_vec(&buffer[..length]).unwrap();
-            truncated
-                .set_message_type(MessageType::Response)
-                .set_truncated(true);
+            truncated.metadata.message_type = MessageType::Response;
+            truncated.metadata.truncation = true;
             udp.send_to(&truncated.to_vec().unwrap(), peer).unwrap();
 
             let (mut stream, _) = tcp.accept().unwrap();
@@ -434,9 +428,8 @@ mod tests {
             let mut request = vec![0_u8; usize::from(u16::from_be_bytes(length))];
             stream.read_exact(&mut request).unwrap();
             let mut response = Message::from_vec(&request).unwrap();
-            response
-                .set_message_type(MessageType::Response)
-                .set_truncated(false);
+            response.metadata.message_type = MessageType::Response;
+            response.metadata.truncation = false;
             let response = response.to_vec().unwrap();
             stream
                 .write_all(&u16::try_from(response.len()).unwrap().to_be_bytes())
@@ -458,7 +451,7 @@ mod tests {
         let response = relay
             .relay(&query(0x1234).to_vec().unwrap(), relay.generation())
             .unwrap();
-        assert_eq!(Message::from_vec(&response).unwrap().id(), 0x1234);
+        assert_eq!(Message::from_vec(&response).unwrap().id, 0x1234);
         server.join().unwrap();
     }
 
@@ -477,7 +470,7 @@ mod tests {
             let mut request = vec![0_u8; usize::from(u16::from_be_bytes(length))];
             stream.read_exact(&mut request).unwrap();
             let mut response = Message::from_vec(&request).unwrap();
-            response.set_message_type(MessageType::Response);
+            response.metadata.message_type = MessageType::Response;
             let response = response.to_vec().unwrap();
             stream
                 .write_all(&u16::try_from(response.len()).unwrap().to_be_bytes())
@@ -499,7 +492,7 @@ mod tests {
         let response = relay
             .relay(&query(0x4321).to_vec().unwrap(), relay.generation())
             .unwrap();
-        assert_eq!(Message::from_vec(&response).unwrap().id(), 0x4321);
+        assert_eq!(Message::from_vec(&response).unwrap().id, 0x4321);
         server.join().unwrap();
     }
 }

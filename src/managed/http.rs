@@ -62,10 +62,13 @@ impl UreqTransport {
     pub fn new() -> Self {
         let timeout = Duration::from_secs(5);
         Self {
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(timeout)
-                .timeout_read(timeout)
-                .build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_connect(Some(timeout))
+                .timeout_recv_response(Some(timeout))
+                .timeout_recv_body(Some(timeout))
+                .http_status_as_error(false)
+                .build()
+                .new_agent(),
         }
     }
 }
@@ -78,34 +81,41 @@ impl Default for UreqTransport {
 
 impl HttpTransport for UreqTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
-        let mut builder = match request.method {
-            "GET" => self.agent.get(&request.url),
-            "POST" => self.agent.post(&request.url),
+        let response = match request.method {
+            "GET" => {
+                let mut builder = self.agent.get(&request.url);
+                for (name, value) in &request.headers {
+                    builder = builder.header(name, value);
+                }
+                if let Some(timeout) = request.timeout {
+                    builder = builder.config().timeout_global(Some(timeout)).build();
+                }
+                builder.call()
+            }
+            "POST" => {
+                let mut builder = self.agent.post(&request.url);
+                for (name, value) in &request.headers {
+                    builder = builder.header(name, value);
+                }
+                if let Some(timeout) = request.timeout {
+                    builder = builder.config().timeout_global(Some(timeout)).build();
+                }
+                builder.send(&request.body)
+            }
             other => {
                 return Err(Error::Http(format!("unsupported HTTP method {other}")));
             }
         };
-        for (name, value) in &request.headers {
-            builder = builder.set(name, value);
-        }
-        if let Some(timeout) = request.timeout {
-            builder = builder.timeout(timeout);
-        }
-        let response = match request.method {
-            "GET" => builder.call(),
-            "POST" => builder.send_bytes(&request.body),
-            _ => unreachable!("method checked above"),
-        };
         match response {
-            Ok(response) | Err(ureq::Error::Status(_, response)) => read_response(response),
+            Ok(response) => read_response(response),
             Err(error) => Err(Error::Http(format!("request failed: {error}"))),
         }
     }
 }
 
-fn read_response(response: ureq::Response) -> Result<HttpResponse> {
-    let status = response.status();
+fn read_response(mut response: ureq::http::Response<ureq::Body>) -> Result<HttpResponse> {
+    let status = response.status().as_u16();
     let mut body = Vec::new();
-    response.into_reader().read_to_end(&mut body)?;
+    response.body_mut().as_reader().read_to_end(&mut body)?;
     Ok(HttpResponse { status, body })
 }

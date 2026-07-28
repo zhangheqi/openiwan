@@ -1,6 +1,5 @@
 use crate::{Error, Result};
-use hmac::{Hmac, Mac};
-use rand::RngCore;
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -222,7 +221,7 @@ pub(crate) fn timestamp_now() -> Result<String> {
 
 pub(crate) fn random_nonce() -> String {
     let mut bytes = [0_u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
     hex_lower(&bytes)
 }
 

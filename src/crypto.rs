@@ -6,7 +6,7 @@
 
 use crate::{EncryptionMethod, Error, Result};
 use aes::Aes128;
-use cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
+use cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use md5::Digest;
 use zeroize::Zeroize;
 
@@ -70,8 +70,8 @@ pub fn encrypt_password(password: &str, username: &str) -> [u8; KEY_LEN] {
     block[..copy_len].copy_from_slice(&password_bytes[..copy_len]);
     password_bytes.zeroize();
 
-    let cipher = Aes128::new(GenericArray::from_slice(&key));
-    let mut generic_block = GenericArray::clone_from_slice(&block);
+    let cipher = Aes128::new(&Array::from(key));
+    let mut generic_block = Array::from(block);
     cipher.encrypt_block(&mut generic_block);
     block.copy_from_slice(&generic_block);
     key.zeroize();
@@ -185,9 +185,9 @@ impl DataCipher for AesCipher {
         let padded_len = plaintext.len().div_ceil(AES_BLOCK_LEN) * AES_BLOCK_LEN;
         let mut output = vec![0_u8; padded_len];
         output[..plaintext.len()].copy_from_slice(plaintext);
-        let cipher = Aes128::new(GenericArray::from_slice(&self.key));
+        let cipher = Aes128::new(&Array::from(self.key));
         for block in output.chunks_exact_mut(AES_BLOCK_LEN) {
-            cipher.encrypt_block(GenericArray::from_mut_slice(block));
+            cipher.encrypt_block(block.try_into().expect("AES block length is fixed"));
         }
         Ok(output)
     }
@@ -199,9 +199,9 @@ impl DataCipher for AesCipher {
             ));
         }
         let mut output = ciphertext.to_vec();
-        let cipher = Aes128::new(GenericArray::from_slice(&self.key));
+        let cipher = Aes128::new(&Array::from(self.key));
         for block in output.chunks_exact_mut(AES_BLOCK_LEN) {
-            cipher.decrypt_block(GenericArray::from_mut_slice(block));
+            cipher.decrypt_block(block.try_into().expect("AES block length is fixed"));
         }
         Ok(output)
     }

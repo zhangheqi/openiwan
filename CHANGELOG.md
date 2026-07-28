@@ -46,6 +46,8 @@ and public managed APIs.
 
 ### Changed
 
+- Updated the dependency graph to the latest stable releases and raised the
+  minimum supported Rust version to 1.91.
 - Rebuilt managed operation around customer-domain discovery and live
   controller policy instead of provider files and serialized controller
   responses.

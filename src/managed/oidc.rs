@@ -1,7 +1,6 @@
 use super::http::{HttpRequest, HttpTransport};
 use crate::{Error, Result};
 use base64::Engine;
-use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -424,7 +423,7 @@ fn parse_https_url(name: &str, value: &str) -> Result<Url> {
 
 fn random_urlsafe(length: usize) -> String {
     let mut bytes = vec![0_u8; length];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 

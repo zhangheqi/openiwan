@@ -5,7 +5,7 @@ use crate::fragment::{Fragment, SrFragmentReassembler, fragment_sr_packet, trim_
 use crate::protocol::{EncryptionMethod, HEADER_LEN, PacketHeader, PacketType};
 use crate::{Error, Result};
 use aes::{Aes128, Aes256};
-use cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
+use cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
@@ -260,22 +260,23 @@ impl SrOuterCipher {
         match self.algorithm {
             SrEncryptionAlgorithm::None => {}
             SrEncryptionAlgorithm::Aes128 => {
-                let cipher = Aes128::new(GenericArray::from_slice(&self.key[..16]));
+                let key = Array::try_from(&self.key[..16]).expect("AES-128 key length is fixed");
+                let cipher = Aes128::new(&key);
                 for block in bytes.chunks_exact_mut(AES_BLOCK_LEN) {
                     if encrypt {
-                        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+                        cipher.encrypt_block(block.try_into().expect("AES block length is fixed"));
                     } else {
-                        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+                        cipher.decrypt_block(block.try_into().expect("AES block length is fixed"));
                     }
                 }
             }
             SrEncryptionAlgorithm::Aes256 => {
-                let cipher = Aes256::new(GenericArray::from_slice(&self.key));
+                let cipher = Aes256::new(&Array::from(self.key));
                 for block in bytes.chunks_exact_mut(AES_BLOCK_LEN) {
                     if encrypt {
-                        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+                        cipher.encrypt_block(block.try_into().expect("AES block length is fixed"));
                     } else {
-                        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+                        cipher.decrypt_block(block.try_into().expect("AES block length is fixed"));
                     }
                 }
             }

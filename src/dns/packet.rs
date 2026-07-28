@@ -103,10 +103,10 @@ impl DnsPacketEngine {
         let Ok(request) = Message::from_vec(udp.payload) else {
             return DnsPacketAction::Pass;
         };
-        if request.message_type() != MessageType::Query || request.queries().len() != 1 {
+        if request.message_type != MessageType::Query || request.queries.len() != 1 {
             return DnsPacketAction::Pass;
         }
-        let query = &request.queries()[0];
+        let query = &request.queries[0];
         let name = query.name().to_utf8();
 
         let synthetic = if query.query_type() == RecordType::AAAA {
@@ -203,17 +203,11 @@ impl<'a> UdpPacket<'a> {
 }
 
 fn synthetic_response(request: &Message, code: ResponseCode) -> Option<Vec<u8>> {
-    let mut response = Message::new();
-    response
-        .set_id(request.id())
-        .set_message_type(MessageType::Response)
-        .set_op_code(request.op_code())
-        .set_recursion_desired(request.recursion_desired())
-        .set_recursion_available(true)
-        .set_response_code(code);
-    for query in request.queries() {
-        response.add_query(query.clone());
-    }
+    let mut response = Message::response(request.id, request.op_code);
+    response.metadata.recursion_desired = request.recursion_desired;
+    response.metadata.recursion_available = true;
+    response.metadata.response_code = code;
+    response.add_queries(request.queries.iter().cloned());
     response.to_vec().ok()
 }
 
@@ -294,12 +288,9 @@ mod tests {
     use hickory_proto::rr::Name;
 
     fn query(record_type: RecordType, name: &str, transport: u8, port: u16) -> Vec<u8> {
-        let mut dns = Message::new();
-        dns.set_id(7)
-            .set_message_type(MessageType::Query)
-            .set_op_code(OpCode::Query)
-            .set_recursion_desired(true)
-            .add_query(Query::query(Name::from_ascii(name).unwrap(), record_type));
+        let mut dns = Message::new(7, MessageType::Query, OpCode::Query);
+        dns.metadata.recursion_desired = true;
+        dns.add_query(Query::query(Name::from_ascii(name).unwrap(), record_type));
         let dns = dns.to_vec().unwrap();
         if transport == 17 {
             let mut packet = build_udp_response(
@@ -351,8 +342,8 @@ mod tests {
         let ipv4 = Ipv4Packet::parse(&packet).unwrap();
         let udp = UdpPacket::parse(ipv4.payload).unwrap();
         let response = Message::from_vec(udp.payload).unwrap();
-        assert_eq!(response.response_code(), ResponseCode::NoError);
-        assert!(response.answers().is_empty());
+        assert_eq!(response.response_code, ResponseCode::NoError);
+        assert!(response.answers.is_empty());
 
         let DnsPacketAction::Inject(packet) =
             engine().process(&query(RecordType::A, "dns.example.test", 17, 53))
@@ -362,7 +353,7 @@ mod tests {
         let ipv4 = Ipv4Packet::parse(&packet).unwrap();
         let udp = UdpPacket::parse(ipv4.payload).unwrap();
         assert_eq!(
-            Message::from_vec(udp.payload).unwrap().response_code(),
+            Message::from_vec(udp.payload).unwrap().response_code,
             ResponseCode::NXDomain
         );
     }
@@ -409,10 +400,8 @@ mod tests {
         malformed[24..26].copy_from_slice(&u16::MAX.to_be_bytes());
         assert_eq!(engine().process(&malformed), DnsPacketAction::Pass);
 
-        let mut message = Message::new();
+        let mut message = Message::new(9, MessageType::Query, OpCode::Query);
         message
-            .set_id(9)
-            .set_message_type(MessageType::Query)
             .add_query(Query::query(
                 Name::from_ascii("dns.example.test").unwrap(),
                 RecordType::A,

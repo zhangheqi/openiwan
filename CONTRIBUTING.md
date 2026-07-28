@@ -30,7 +30,7 @@ for the crate, executable, commands, paths, configuration keys, and URLs.
 
 ## Development setup
 
-The minimum supported Rust version is 1.88. Stable Rust is recommended for
+The minimum supported Rust version is 1.91. Stable Rust is recommended for
 development.
 
 Clone and run the primary checks:
@@ -73,7 +73,7 @@ Every behavior change needs tests at the lowest useful layer:
   practical.
 
 Networking changes must consider Linux, macOS, Windows x86_64, and Windows
-ARM64. CI tests Rust 1.88 and stable on Linux, macOS, and Windows, compiles
+ARM64. CI tests Rust 1.91 and stable on Linux, macOS, and Windows, compiles
 Windows ARM64, installs the Windows package, and runs formatting, Clippy,
 rustdoc, and package checks.
 

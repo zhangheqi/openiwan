@@ -71,13 +71,9 @@ pub async fn lookup(
 }
 
 fn build_query(id: u16, name: Name, record_type: RecordType) -> io::Result<Vec<u8>> {
-    let mut request = Message::new();
-    request
-        .set_id(id)
-        .set_message_type(MessageType::Query)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(true)
-        .add_query(Query::query(name, record_type));
+    let mut request = Message::new(id, MessageType::Query, OpCode::Query);
+    request.metadata.recursion_desired = true;
+    request.add_query(Query::query(name, record_type));
     request
         .to_vec()
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))
@@ -90,7 +86,7 @@ async fn exchange(
     id: u16,
 ) -> io::Result<Message> {
     let response = exchange_udp(net, server, request, id).await?;
-    if response.truncated() {
+    if response.truncation {
         exchange_tcp(net, server, request, id).await
     } else {
         Ok(response)
@@ -119,7 +115,7 @@ async fn exchange_udp(
         }
         let response = Message::from_vec(&buffer[..length])
             .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
-        if response.id() == id {
+        if response.id == id {
             return Ok(response);
         }
     }
@@ -149,7 +145,7 @@ async fn exchange_tcp(
     stream.read_exact(&mut response).await?;
     let response = Message::from_vec(&response)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
-    if response.id() != id {
+    if response.id != id {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "DNS-over-TCP transaction ID mismatch",
@@ -170,29 +166,29 @@ fn parse_response(
     name: &Name,
     record_type: RecordType,
 ) -> io::Result<ParsedResponse> {
-    if response.id() != id
-        || response.message_type() != MessageType::Response
-        || response.op_code() != OpCode::Query
+    if response.id != id
+        || response.message_type != MessageType::Response
+        || response.op_code != OpCode::Query
     {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "DNS response header does not match the query",
         ));
     }
-    if response.response_code() != ResponseCode::NoError {
-        let kind = if response.response_code() == ResponseCode::NXDomain {
+    if response.response_code != ResponseCode::NoError {
+        let kind = if response.response_code == ResponseCode::NXDomain {
             ErrorKind::NotFound
         } else {
             ErrorKind::Other
         };
         return Err(io::Error::new(
             kind,
-            format!("DNS server returned {}", response.response_code()),
+            format!("DNS server returned {}", response.response_code),
         ));
     }
-    if response.queries().len() != 1
-        || response.queries()[0].name() != name
-        || response.queries()[0].query_type() != record_type
+    if response.queries.len() != 1
+        || response.queries[0].name() != name
+        || response.queries[0].query_type() != record_type
     {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
@@ -205,13 +201,13 @@ fn parse_response(
     let mut ttl = u32::MAX;
     for _ in 0..MAX_CNAME_DEPTH {
         let mut changed = false;
-        for record in response.answers() {
-            if accepted_names.contains(record.name())
-                && let RData::CNAME(target) = record.data()
+        for record in &response.answers {
+            if accepted_names.contains(&record.name)
+                && let RData::CNAME(target) = &record.data
                 && accepted_names.insert(target.0.clone())
             {
                 canonical_name = Some(target.0.clone());
-                ttl = ttl.min(record.ttl());
+                ttl = ttl.min(record.ttl);
                 changed = true;
             }
         }
@@ -221,18 +217,18 @@ fn parse_response(
     }
 
     let mut addresses = Vec::new();
-    for record in response.answers() {
-        if !accepted_names.contains(record.name()) {
+    for record in &response.answers {
+        if !accepted_names.contains(&record.name) {
             continue;
         }
-        match record.data() {
+        match &record.data {
             RData::A(address) if record_type == RecordType::A => {
                 addresses.push(IpAddr::V4(address.0));
-                ttl = ttl.min(record.ttl());
+                ttl = ttl.min(record.ttl);
             }
             RData::AAAA(address) if record_type == RecordType::AAAA => {
                 addresses.push(IpAddr::V6(address.0));
-                ttl = ttl.min(record.ttl());
+                ttl = ttl.min(record.ttl);
             }
             _ => {}
         }
@@ -275,12 +271,8 @@ mod tests {
     #[test]
     fn parses_valid_address_response_and_ttl() {
         let name = Name::from_ascii("api.example.test").unwrap();
-        let mut response = Message::new();
+        let mut response = Message::response(42, OpCode::Query);
         response
-            .set_id(42)
-            .set_message_type(MessageType::Response)
-            .set_op_code(OpCode::Query)
-            .set_response_code(ResponseCode::NoError)
             .add_query(Query::query(name.clone(), RecordType::A))
             .add_answer(Record::from_rdata(
                 name.clone(),
@@ -313,12 +305,8 @@ mod tests {
     fn validates_transaction_and_follows_matching_cname() {
         let name = Name::from_ascii("api.example.test").unwrap();
         let target = Name::from_ascii("internal.example.test").unwrap();
-        let mut response = Message::new();
+        let mut response = Message::response(7, OpCode::Query);
         response
-            .set_id(7)
-            .set_message_type(MessageType::Response)
-            .set_op_code(OpCode::Query)
-            .set_response_code(ResponseCode::NoError)
             .add_query(Query::query(name.clone(), RecordType::A))
             .add_answer(Record::from_rdata(
                 name.clone(),
@@ -334,6 +322,14 @@ mod tests {
         let parsed = parse_response(response, 7, &name, RecordType::A).unwrap();
         assert_eq!(parsed.canonical_name, Some(target));
         assert!(parsed.addresses.is_empty());
-        assert!(parse_response(Message::new(), 7, &name, RecordType::A).is_err());
+        assert!(
+            parse_response(
+                Message::new(0, MessageType::Query, OpCode::Query),
+                7,
+                &name,
+                RecordType::A
+            )
+            .is_err()
+        );
     }
 }

@@ -1621,7 +1621,7 @@ mod tests {
 
     #[test]
     fn userspace_dns_uses_iwan_udp_and_tcp_fallback() {
-        use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+        use hickory_proto::op::{Message, OpCode};
         use hickory_proto::rr::rdata::A;
         use hickory_proto::rr::{RData, Record};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1644,16 +1644,11 @@ mod tests {
                 let mut request_buffer = [0_u8; 1_024];
                 let (request_length, peer) = udp.recv_from(&mut request_buffer).await.unwrap();
                 let request = Message::from_vec(&request_buffer[..request_length]).unwrap();
-                let query = request.queries()[0].clone();
+                let query = request.queries[0].clone();
 
-                let mut truncated = Message::new();
-                truncated
-                    .set_id(request.id())
-                    .set_message_type(MessageType::Response)
-                    .set_op_code(OpCode::Query)
-                    .set_response_code(ResponseCode::NoError)
-                    .set_truncated(true)
-                    .add_query(query);
+                let mut truncated = Message::response(request.id, OpCode::Query);
+                truncated.metadata.truncation = true;
+                truncated.add_query(query);
                 udp.send_to(&truncated.to_vec().unwrap(), peer)
                     .await
                     .unwrap();
@@ -1663,16 +1658,14 @@ mod tests {
                 let mut tcp_request = vec![0_u8; tcp_length];
                 stream.read_exact(&mut tcp_request).await.unwrap();
                 let tcp_request = Message::from_vec(&tcp_request).unwrap();
-                let query = tcp_request.queries()[0].clone();
+                let query = tcp_request.queries[0].clone();
                 let name = query.name().clone();
-                let mut response = Message::new();
-                response
-                    .set_id(tcp_request.id())
-                    .set_message_type(MessageType::Response)
-                    .set_op_code(OpCode::Query)
-                    .set_response_code(ResponseCode::NoError)
-                    .add_query(query)
-                    .add_answer(Record::from_rdata(name, 90, RData::A(A(answer_ip))));
+                let mut response = Message::response(tcp_request.id, OpCode::Query);
+                response.add_query(query).add_answer(Record::from_rdata(
+                    name,
+                    90,
+                    RData::A(A(answer_ip)),
+                ));
                 let response = response.to_vec().unwrap();
                 stream
                     .write_all(&u16::try_from(response.len()).unwrap().to_be_bytes())

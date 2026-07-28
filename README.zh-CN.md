@@ -39,7 +39,7 @@ iWAN 协议本身缺少的密码学安全属性，不同部署的互操作情况
 
 ## 安装
 
-OpeniWAN 需要 Rust 1.88 或更高版本。
+OpeniWAN 需要 Rust 1.91 或更高版本。
 
 安装 crates.io 上的最新正式版本：
 

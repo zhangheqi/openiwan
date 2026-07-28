@@ -44,7 +44,7 @@ before production use.
 
 ## Installation
 
-OpeniWAN requires Rust 1.88 or newer.
+OpeniWAN requires Rust 1.91 or newer.
 
 Install the latest published release:
 

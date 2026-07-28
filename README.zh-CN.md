@@ -3,62 +3,66 @@
 [![Crates.io](https://img.shields.io/crates/v/openiwan.svg)](https://crates.io/crates/openiwan)
 [![docs.rs](https://img.shields.io/docsrs/openiwan.svg)](https://docs.rs/openiwan)
 [![CI](https://img.shields.io/github/actions/workflow/status/zhangheqi/openiwan/ci.yml?branch=main&label=CI)](https://github.com/zhangheqi/openiwan/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/crates/msrv/openiwan.svg)](https://crates.io/crates/openiwan)
 [![License](https://img.shields.io/crates/l/openiwan.svg)](LICENSE)
 
-用于 iWAN 兼容网络的 Rust 客户端与协议库。
+开源 iWAN 客户端与 Rust 协议库。
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+OpeniWAN 可以直接认证 iWAN UDP 端点并建立原生 TUN 隧道，也可以在不修改主机路由的
+情况下转发单个 TCP 或 HTTP(S) 目标，还能通过控制器托管的客户域完成发现、认证和
+连接。协议库提供传统与 Segment Routing 线格式、客户端会话运行时、DNS 策略引擎
+以及托管控制器模型。
+
 > [!IMPORTANT]
-> OpeniWAN 是独立项目，与 Panabit 或任何网络运营方均无隶属或背书关系。只能在
-> 你有权访问的系统和网络中使用。
+> OpeniWAN 是独立的互操作项目，与 Panabit 或任何网络运营方均无隶属或背书关系。
+> 只能将其用于你有权访问的系统和网络。
 
-## 功能
+## 项目状态
 
-- 完整的标准包类型和 TLV 注册表；
-- 带签名的 `OPEN`、`OPEN_ACK`、`OPEN_REJECT`、心跳、ping 和 `CLOSE`；
-- Java US-ASCII 凭据转换、密码包装和会话密钥派生；
-- 明文、仅循环前 8 字节密钥的 XOR 和 AES-128-ECB 会话数据；
-- 传统 IPv4/IPv6 数据类与有界双分片重组；
-- SR 头、方向相关路径、内外层加密、分片、重组和监控；
-- 客户域发现、主备 lookup、重试、规范域替换、联网授权门禁和可选 7 天缓存；
-- 密码认证与 OIDC Authorization Code + PKCE S256；
-- 控制器配置、按服务器生成的凭据、posture 与设备绑定门禁、入口探测和
-  传统/SR 选择；
-- 版本化的非敏感 CLI profile、系统凭据库、OIDC 刷新、持久线路偏好、有并发上限的
-  线路探测，以及面向自动化的稳定 JSON 输出；
-- Linux、macOS 和 Windows 的原生 TUN、路由与 DNS 事务；
-- 通过用户态 IP 栈实现的不改路由 TCP 和 HTTP(S) 转发；
-- 控制器 keepalive 鉴权和指标模型。
+`main` 分支面向尚未发布的 `0.3.0`，包含相对于 `0.2.0` 的破坏性变更。本分支文档
+描述未发布接口；使用已发布版本时，请查阅对应的 Git tag。
 
-部署相关的嵌套策略保留为动态 JSON；稳定的外层字段和服务器/SR 模型使用强类型
-API。线协议细节见[协议参考](docs/PROTOCOL.md)。
+| 范围 | 状态 |
+|---|---|
+| 传统 iWAN 认证与隧道 | 已实现 |
+| Segment Routing 传输与监控 | 已实现 |
+| 控制器托管的密码和 OIDC 登录 | 已实现 |
+| Linux、macOS、Windows TUN 集成 | 已实现 |
+| 不改路由的 TCP 与 HTTP(S) 转发 | 已实现 |
+| 厂商认证 | 不提供 |
+
+OpeniWAN 具有防御性解析、有界资源使用、清理事务、测试和跨平台 CI，但不会补充
+iWAN 协议本身缺少的密码学安全属性，不同部署的互操作情况也可能不同。投入生产前，
+请阅读[安全模型](SECURITY.md)，并在获得授权的端点上验证。
 
 ## 安装
 
 OpeniWAN 需要 Rust 1.88 或更高版本。
 
+安装 crates.io 上的最新正式版本：
+
 ```console
 cargo install openiwan --locked
 ```
 
-从源码构建：
+构建 `main` 分支文档所描述的未发布接口：
 
 ```console
+git clone https://github.com/zhangheqi/openiwan.git
+cd openiwan
 cargo build --release --locked
 ```
 
-只需要 UDP 协议库时，可关闭默认的 `managed` 与 `forward` feature：
+可执行文件位于 `target/release/openiwan`，Windows 上为 `openiwan.exe`。将当前
+checkout 安装到 Cargo 的二进制目录：
 
 ```console
-cargo add openiwan --no-default-features
+cargo install --path . --locked
 ```
 
-## 命令行
-
-以下命令均使用单行形式，可直接用于 POSIX shell 和 PowerShell。Unix 上创建 TUN
-通常需要 `sudo`；Windows 用户应在管理员 PowerShell 中运行相同命令，不使用
-`sudo`。时长值必须带单位，例如 `500ms`、`3s` 或 `1m`。
+## 快速开始
 
 探测端点：
 
@@ -66,271 +70,128 @@ cargo add openiwan --no-default-features
 openiwan ping 192.0.2.10:6001
 ```
 
-仅认证、不创建接口：
+只认证，不修改主机网络：
 
 ```console
 openiwan auth --server 192.0.2.10:6001 --username alice --encryption xor
 ```
 
-未设置 `OPENIWAN_PASSWORD` 时会隐藏输入密码；也可使用权限受保护的
-`--password-file`。密码不会作为命令行值传入。
-
-创建 TUN 并添加显式路由：
+建立仅包含一条路由的隧道：
 
 ```console
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8
 ```
 
-在管理员 PowerShell 中：
+Windows 用户应在管理员终端中执行隧道命令，不使用 `sudo`。如果未设置
+`OPENIWAN_PASSWORD`，CLI 会无回显地提示输入密码；也可以使用权限受保护的
+`--password-file`。密码不能作为命令行值传入。
 
-```powershell
-openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8
-```
+### 托管连接
 
-Linux/Windows 默认接口名为 `openiwan0`，macOS 自动请求可用的 `utunN`。默认路由
-以及包含当前 UDP 端点的路由会被拒绝。
-
-解码传统或 SR 数据报：
-
-```console
-openiwan decode 2900ffffffffffff815db7391fcafc3df035553a42cc5db6
-```
-
-## 配置
-
-传统连接：
-
-```toml
-server = "192.0.2.10:6001"
-mtu = 1400
-encryption = "xor"
-receive_poll_ms = 250
-
-[reconnect]
-attempts = 10
-initial_delay_ms = 1000
-max_delay_ms = 30000
-```
-
-认证与心跳时间是协议常量，而不是部署设置。
-
-SR 连接追加：
-
-```toml
-[segment_routing]
-id = 1
-keepalive = true
-encrypt_algo = "aes128"
-encrypt_key = "0123456789abcdef"
-links = [1, 258, 11259375]
-```
-
-`links` 使用客户端到网络的逻辑顺序，只有发送 SR 包时才反转。`encrypt_key` 是
-原始 UTF-8 字节；AES-128 取前 16 字节，AES-256 取前 32 字节。
-
-使用配置文件：
-
-```console
-openiwan auth --config openiwan.toml --username alice
-```
-
-## 不改路由的转发
-
-可选 `forward` feature 使用用户态 IP 栈，不创建 TUN、不修改主机路由：
-
-```console
-openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
-```
-
-`tcp://` 原样转发字节；`http://`、`https://` 对一个固定 origin 提供 HTTP/1.1
-反向代理。HTTPS 会验证上游证书，并支持重复使用 `--ca-cert` 添加 CA。监听地址
-必须是 loopback。
-
-## 托管连接
-
-托管连接从客户域开始。OpeniWAN 首次使用时会生成安装级 UUID，后续稳定复用为
-Device ID，和官方 App 一样不需要用户填写。需要沿用控制器中已有的设备注册时，仍可用
-`--device-id` 显式覆盖。
-
-查询服务和认证方式：
-
-```console
-openiwan managed --domain iwan.example discover
-```
-
-完成认证和入口选择，但不创建 TUN：
-
-```console
-openiwan managed --domain iwan.example login --username alice
-```
-
-OIDC 域会忽略 `--username` 并输出 PKCE 授权地址；按提示粘贴完整回调 URL。密码域
-会探测可用入口，并使用临时 UDP 会话验证凭据。
-
-在 Unix 上建立持久隧道：
-
-```console
-sudo openiwan managed --domain iwan.example connect --username alice
-```
-
-在管理员 PowerShell 中：
-
-```powershell
-openiwan managed --domain iwan.example connect --username alice
-```
-
-托管认证也可以直接使用不改路由的转发：
-
-```console
-openiwan managed --domain iwan.example forward --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
-```
-
-重复使用时，可创建不含秘密信息的 profile，并将其设为默认：
+创建可复用且不含秘密信息的 profile：
 
 ```console
 openiwan profile set work --domain iwan.example --username alice
 ```
 
-首个 profile 会自动成为默认项；存在多个 profile 时用 `openiwan profile use NAME`
-切换。之后无需重复输入 domain、设备 ID 和用户名：
+查看发现结果，将验证后的认证信息保存到系统凭据库，然后连接：
 
 ```console
-openiwan profile list
 openiwan managed discover
+openiwan managed login --save
 sudo openiwan managed connect
 ```
 
-profile 存储绝不会写入密码或 OIDC token。密码仍然来自环境变量、权限受保护的文件或
-无回显交互提示。验证并保存认证信息：
+首个 profile 会自动成为默认项。OIDC 域会输出授权 URL 并要求粘贴完整回调 URL；
+密码域从配置的受保护来源读取密码。
+
+### 不改路由的转发
+
+将单个固定目标暴露到 loopback 监听地址，不创建 TUN、不修改主机路由：
 
 ```console
-openiwan managed login --save
+openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
 ```
 
-密码或 OIDC refresh token 会写入 macOS Keychain、Windows Credential Manager 或
-Unix Secret Service；access token 只保留在内存。后续命令会复用密码或用 refresh
-token 换取新的 access token，因此 service 可以无交互启动并在缺少凭据时立即失败：
+目标可以使用 `tcp://`、`http://` 或 `https://`。HTTPS 会验证上游证书，也可以
+重复传入 `--ca-cert` 来增加信任根。
+
+完整命令树、权限要求、profile 生命周期、自动化输出、时长格式和环境变量见
+[CLI 指南](docs/CLI.md)。
+
+## Rust 库
+
+添加包含托管和转发功能的默认依赖：
 
 ```console
-openiwan managed connect --non-interactive
+cargo add openiwan
 ```
 
-认证过期或账号变化时使用 `--reauth --save` 覆盖；使用
-`openiwan profile logout work` 删除。正在运行的 `managed connect` 也会复用内存中
-的凭据完成隧道重连。
-
-列出并重新测试所有可选线路：
+只使用协议与直接客户端，关闭可选的托管和转发依赖：
 
 ```console
-openiwan managed lines
-openiwan managed lines --json
+cargo add openiwan --no-default-features
 ```
 
-传统线路使用 `iwan:7` 这样的稳定 ID；SR 线路使用 `sr:3` 这样的稳定组 ID。根据
-当前控制器配置验证后，可以保存偏好：
+凭据与可序列化配置相互独立：
 
-```console
-openiwan managed lines --set iwan:7
+```rust
+use openiwan::{Client, ClientConfig, EncryptionMethod, Result};
+
+fn client(password: String) -> Result<Client> {
+    let mut config = ClientConfig::new("192.0.2.10:6001");
+    config.encryption = EncryptionMethod::Xor;
+    Client::new(config, "alice", password)
+}
 ```
 
-`auto` 会选择实测延迟最低的可达线路。选择 SR 组后，组内仍遵守控制器的主路径/故障
-切换顺序。在 `login`、`connect` 或 `lines` 上使用一次性的 `--line iwan:7` 或
-`--line sr:3` 可以覆盖本次选择，但不会修改已保存的偏好。
+应用可以实现自己的 `PacketDevice`，使用原生 `TunDevice`，或单独集成 DNS 和协议
+模块。公开 API 文档发布在 [docs.rs](https://docs.rs/openiwan)。
 
-profile 使用版本化 TOML、跨进程文件锁和原子替换。Unix 上目录权限为 `0700`，文件为
-`0600`。Windows 默认位于 `%LOCALAPPDATA%\OpeniWAN`，macOS 位于
-`~/Library/Application Support/openiwan`，其他 Unix 位于
-`$XDG_STATE_HOME/openiwan`（或 `~/.local/state/openiwan`）。可用 `--state-dir`
-或 `OPENIWAN_STATE_DIR` 覆盖。
+### Cargo features
 
-profile 和已保存认证必须由执行 `--save` 的同一系统账号访问。跨 `sudo` 传入
-`--state-dir` 只能修正 profile 路径，不能跨越系统凭据库的账号边界。service 应以该
-账号运行，并仅授予所需的网络权限；否则必须用实际 service 账号完成认证登记。
-`--non-interactive` 可保证凭据缺失、锁定、撤销或不匹配时直接失败，而不会卡在提示符。
+| Feature | 默认 | 内容 |
+|---|:---:|---|
+| `managed` | 是 | 域发现、密码/OIDC 认证、控制器策略、profile 和 keepalive 模型 |
+| `forward` | 是 | 通过用户态 IP 栈进行不改路由的 TCP 与 HTTP(S) 转发 |
 
-本地 posture 结果可通过 `--posture-results` 传入 JSON 数组。托管连接会应用控制器
-下发的路由、IP filter、DNS、split DNS 和 MTU 策略。详见
-[托管连接](docs/MANAGED_CONNECTIONS.md)。
+核心包、密码、Segment Routing、DNS 策略、客户端和 TUN API 不依赖可选 feature。
 
-## DNS 策略
+## 平台支持
 
-direct 与 managed TUN 连接共用公共的 `openiwan::dns` 策略和包处理引擎。一次性
-覆盖参数如下：
+| 平台 | TUN 与路由 | 说明 |
+|---|:---:|---|
+| Linux | 支持 | 通常需要 root 或等效网络 capability |
+| macOS | 支持 | 默认自动分配 `utunN` |
+| Windows 10/11 x86_64 | 支持 | 需要管理员终端 |
+| Windows 10/11 ARM64 | 支持 | 需要管理员终端 |
 
-```console
-openiwan connect --server 192.0.2.10:6001 --username alice \
-  --dns-mode custom --dns-server 192.0.2.53 \
-  --split-dns-mode custom --split-dns-domain @corp.example \
-  --encrypted-dns block --doh-host dns.example
-```
+Windows x86_64 和 ARM64 使用的已签名 Wintun 0.14.1 二进制嵌入可执行文件。
+OpeniWAN 会验证释放出的动态库后再加载。
 
-profile 可以保存同一组非敏感覆盖项。标量值使用 `inherit` 取消覆盖，
-`--unset-dns` 清除单个列表，`--reset-dns` 清除整个 DNS 覆盖层：
+## 文档
 
-```console
-openiwan profile set work --dns-mode custom --dns-server 192.0.2.53
-openiwan profile set work --reset-dns
-```
+| 文档 | 用途 |
+|---|---|
+| [CLI 指南](docs/CLI.md) | 命令、凭据、profile、转发、权限与自动化 |
+| [配置指南](docs/CONFIGURATION.md) | TOML、路由、DNS 策略、状态和优先级 |
+| [托管连接](docs/MANAGED_CONNECTIONS.md) | 域发现、认证、控制器策略、posture 和 keepalive |
+| [架构](docs/ARCHITECTURE.md) | 组件、生命周期、信任边界和清理 |
+| [协议参考](docs/PROTOCOL.md) | 传统、Segment Routing 和托管 HTTP 线协议 |
+| [协议证据](docs/PROTOCOL_PROVENANCE.md) | 证据要求和未解决协议范围 |
+| [安全策略](SECURITY.md) | 漏洞报告和运行安全边界 |
+| [变更日志](CHANGELOG.md) | 按版本整理的用户可见变更 |
 
-优先级固定为：本次 CLI、profile、控制器策略、OPEN_ACK/官方服务默认值。split DNS
-在数据包路径中执行，而不是依赖平台的 resolver-domain 规则；排除规则优先于包含
-规则，支持 `tunnel-all`、managed 规则，以及与官方客户端一致的 `*`、`@`、`^`
-自定义规则。
+[文档索引](docs/README.md)标明了每篇英文指南的目标读者和权威性。技术文档以英文为
+准，中文 README 是项目入口的同步翻译。
 
-加密 DNS 阻断只覆盖 TUN 可见的 IPv4 流量：丢弃 TCP/UDP 853，并对配置的 DoH
-主机名和 `use-application-dns.net` 返回 NXDOMAIN。它不做 TLS 中间人、SNI/IP
-黑名单或通用 QUIC/DoH 流量识别。不创建 TUN 的 forward 只控制固定目标的解析
-路径：
+## 贡献与支持
 
-```console
-openiwan forward --server 192.0.2.10:6001 --username alice \
-  --target tcp://db.example:5432 --resolve tunnel \
-  --dns-server 192.0.2.53
-```
+欢迎提交 bug、功能建议、文档修复和可复现的互操作证据。重大修改前请阅读
+[贡献指南](CONTRIBUTING.md)。通过 [SUPPORT.md](SUPPORT.md) 选择正确的支持渠道；
+漏洞必须按照 [SECURITY.md](SECURITY.md) 私下报告。
 
-## 代码模块
-
-- `protocol`：标准头、TLV、控制签名、ping 与心跳；
-- `crypto`：密码包装和会话加密；
-- `fragment`：传统/SR 分片和重组；
-- `sr`：SR 封装、加密、数据规划和监控；
-- `client`：认证与会话 worker；
-- `dns`：强类型策略、包级阻断、物理 DNS relay、平台 lease 和用户态解析；
-- `managed`：lookup、认证、OIDC、控制器配置、posture、入口选择、SR 模型和
-  HTTP keepalive；
-- `tun`：原生接口和路由集成。
-
-## 开发
-
-运行仓库检查：
-
-```console
-cargo test --all-targets --all-features --locked
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-```
-
-在 POSIX shell 中生成 API 文档：
-
-```console
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
-```
-
-在 PowerShell 中生成 API 文档：
-
-```powershell
-$env:RUSTDOCFLAGS = "-D warnings"; cargo doc --no-deps --all-features --locked; Remove-Item Env:RUSTDOCFLAGS
-```
-
-通过协议向量测试不代表厂商认证；真实部署仍应在获授权端点验证。
-
-## 安全限制
-
-控制签名是 `MD5(header || "mw")`，不覆盖 body。XOR、AES-ECB 与 SR 外层 AES
-均不提供数据完整性或重放保护。这些机制只用于互操作，不具备现代 VPN 协议的
-安全属性。
-
-漏洞报告与运行建议见 [SECURITY.md](SECURITY.md)。
+所有参与者都必须遵守[行为准则](CODE_OF_CONDUCT.md)。
 
 ## 许可证
 

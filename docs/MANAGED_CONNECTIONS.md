@@ -1,7 +1,23 @@
 # Managed Connections
 
 The `managed` feature implements domain discovery, authentication, controller
-policy, ingress selection, and persistent tunnel setup.
+policy, ingress selection, and persistent tunnel setup for the unreleased
+`0.3.0` series.
+
+This is an integration reference. Command examples and local state operations
+belong in the [CLI guide](CLI.md) and
+[Configuration guide](CONFIGURATION.md).
+
+```text
+customer domain
+    -> lookup and canonical domain
+    -> credential or OIDC authentication
+    -> controller/server-list configuration
+    -> posture and device-binding gates
+    -> ingress probing and stable line selection
+    -> temporary authentication OPEN
+    -> persistent connection OPEN
+```
 
 ## Domain discovery
 
@@ -120,6 +136,10 @@ parsed and its nonce is checked. The session contains:
 - expiry.
 
 Secrets use zeroizing owners and are redacted from debug output.
+
+OpeniWAN does not perform mandatory OIDC discovery or JWKS signature
+verification. Authentication therefore depends on the HTTPS controller
+configuration and token endpoint. See [Security Policy](../SECURITY.md).
 
 ## Controller configuration
 
@@ -285,116 +305,30 @@ The CLI accepts already evaluated local results using
 `check_results`; collecting platform posture data remains the calling
 application's responsibility.
 
-## CLI
+## CLI state and saved authentication
 
-Inspect discovery:
+The CLI generates one installation Device ID and persists non-secret profiles.
+A profile stores domain, Device ID, optional username, stable line preference,
+DNS overrides, and an opaque credential reference.
 
-```console
-openiwan managed --domain iwan.example discover
-```
+Passwords and OIDC refresh tokens can be saved only through the operating
+system credential service. Access tokens, controller responses, generated
+credentials, and SR keys remain in memory.
 
-Complete login without creating TUN:
+On a later OIDC process, the client sends
+`grant_type=refresh_token` to the current controller-provided token endpoint.
+A rotated refresh token replaces the saved value immediately; the refreshed
+access token is not persisted.
 
-```console
-openiwan managed --domain iwan.example login --username alice
-```
+Stable line preferences are `auto`, `iwan:<server-id>`, and
+`sr:<group-id>`. An SR group remains the persisted selection unit while its
+entries retain controller primary/failover order. Line probing uses at most 16
+workers, and recovery listing ignores a stale saved selection so it can be
+replaced.
 
-Establish the tunnel:
-
-```console
-sudo openiwan managed --domain iwan.example connect --username alice
-```
-
-Windows users run the same connect command without `sudo` in an elevated
-PowerShell session. Extra `--route`, `--route-ip`, and `--route-domain` values
-augment the managed routing policy.
-
-Forward one fixed target through the managed connection without creating TUN
-or modifying host routes:
-
-```console
-openiwan managed --domain iwan.example forward --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
-```
-
-On first use the CLI generates an installation-wide UUID and persists it as
-the Device ID. All managed commands and newly created profiles reuse it
-automatically. `--device-id` is an optional override for preserving an
-existing controller enrollment; `managed discover` prints the effective ID.
-
-Credential passwords are read from `OPENIWAN_PASSWORD`, a protected
-`--password-file`, or a no-echo prompt. OIDC prints the authorization URL and
-accepts the complete callback URL.
-
-## Profiles and line selection
-
-The CLI persists only non-secret connection preferences. State contains
-the generated installation Device ID, and each profile contains the customer
-domain, its effective Device ID, optional username, and line preference.
-Passwords, access tokens, refresh tokens, controller configurations, generated
-server credentials, and SR encryption keys are never written to the profile
-store. `managed login --save` writes only the verified password or OIDC
-refresh token plus the minimum identity metadata to the operating-system
-credential store. The implementation uses macOS Keychain, Windows Credential
-Manager, or the Unix Secret Service. Access tokens, controller responses,
-generated server credentials, and SR encryption keys remain in memory.
-
-On a later process, password authentication reuses the saved password. OIDC
-authentication sends the standard `grant_type=refresh_token` request to the
-current controller-provided token endpoint. A rotated refresh token replaces
-the previous value immediately. The refreshed access token is not persisted.
-`--reauth` skips saved authentication, while `--non-interactive`
-converts every otherwise-interactive prompt into an error. `profile logout`
-deletes saved authentication.
-
-The state document has an explicit schema version. Updates hold an
-inter-process lock, write and sync a same-directory temporary file, atomically
-replace the destination, and sync the parent directory on Unix. Unix state
-directories and files use modes `0700` and `0600`; symlinked state paths are
-rejected. `--state-dir` or `OPENIWAN_STATE_DIR` can override the platform
-location.
-
-Privilege elevation must not silently select a second profile or credential
-store. `--state-dir` can preserve the profile path when `sudo` changes `HOME`,
-but an operating-system credential store remains scoped to the security
-principal. Enrollment and the long-running service must therefore use the
-same account. A service should pass `--non-interactive` so unavailable,
-revoked, or mismatched authentication fails instead of waiting on stdin.
-
-Create a profile:
-
-```console
-openiwan profile set work --domain iwan.example --username alice
-```
-
-`profile list`, `profile show`, `profile use`, `profile logout`, and `profile
-remove` provide explicit lifecycle operations. The first profile becomes the
-default automatically; later changes are explicit through `profile use`.
-`profile list --json` and `profile show --json` produce stable
-machine-readable output.
-
-Managed line preferences use these canonical forms:
-
-- `auto`: probe all lines and choose the lowest-latency reachable candidate;
-- `iwan:<server-id>`: select one traditional server by controller ID;
-- `sr:<group-id>`: select one SR group by controller ID.
-
-An SR group is the stable selection unit. Its entries remain ordered
-primary/failover paths; runtime-only SR IDs are deliberately not persisted.
-`managed lines` authenticates using an automatic recovery selection, then
-probes controller lines with at most 16 concurrent workers. This means a stale
-saved preference cannot prevent the user from listing and replacing it.
-
-```console
-openiwan managed lines
-openiwan managed lines --json
-openiwan managed lines --set iwan:7
-```
-
-`--set` requires an explicit or default profile and validates that the line
-exists in the current controller configuration. An unavailable but existing
-line may still be saved, with a warning, because temporary reachability must
-not silently rewrite user intent. `--line` is a one-shot override and never
-changes persisted state.
+See [Command-Line Guide](CLI.md) for commands and
+[Configuration](CONFIGURATION.md) for state layout, permissions, and
+credential-store boundaries.
 
 ## HTTP keepalive
 

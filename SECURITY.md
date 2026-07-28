@@ -1,157 +1,209 @@
 # Security Policy
 
-## Supported Versions
+## Supported versions
 
-Security fixes are provided for the latest released version. Older releases may
-receive a fix when the change can be backported safely, but this is not
-guaranteed.
-
-| Version | Supported |
+| Version | Security support |
 |---|---|
-| Latest release | Yes |
-| Earlier releases | Best effort |
-| Unreleased development code | Case by case |
+| Latest published release | Fixes are provided |
+| `main` / unreleased | Issues are fixed before release |
+| Older releases | No guaranteed backports |
 
-## Reporting a Vulnerability
+Use `openiwan --version` and the matching Git tag when assessing an issue.
 
-Do not open a public issue for a suspected vulnerability.
+## Report a vulnerability
 
-Use the repository host's private vulnerability-reporting feature when it is
-available. Otherwise, contact the maintainers through a private channel
-published by the repository. If no private channel is available, open a public
-issue that asks for private contact without including technical details.
+Do not open a public issue or discussion for a suspected vulnerability.
 
-Please include:
+Use GitHub's
+[private vulnerability reporting](https://github.com/zhangheqi/openiwan/security/advisories/new).
+If that channel is unavailable, open a public issue asking maintainers to
+establish private contact without including technical details.
 
-- the affected version, commit, and platform
-- the impact and required attacker capabilities
-- a minimal synthetic datagram, test, or reproduction
-- whether credentials, routes, or interface state are exposed
-- any proposed mitigation
+Include:
 
-Do not attach live credentials, private controller responses, unredacted packet
-captures, or proprietary binaries.
+- affected version, commit, platform, and architecture;
+- impact and required attacker capabilities;
+- the smallest synthetic reproduction;
+- whether credentials, routes, DNS, interfaces, or packet contents are
+  exposed;
+- any known mitigation;
+- your preferred disclosure timeline, if relevant.
 
-Maintainers should acknowledge a report promptly, establish a private
-coordination channel, and provide status updates while validating and fixing
-the issue. Disclosure timing should be agreed with the reporter when practical.
+Do not attach live credentials, tokens, callback URLs, private controller
+responses, lookup caches, proprietary iWAN binaries, unredacted packet
+captures, or identifying production logs.
 
-## Security Scope
+Maintainers will validate the report privately, coordinate remediation and
+release timing, and credit reporters who want attribution. Response and fix
+times depend on severity, reproducibility, and maintainer availability; this
+project does not promise a fixed service level.
 
-Reports are especially useful for:
+## Scope
 
-- parser or fragment-reassembly vulnerabilities
-- memory-safety or unsafe-code issues
-- credential, key, token, or log disclosure
-- route or interface cleanup failures
-- session validation bypasses
-- command invocation or privilege-boundary problems
-- OIDC callback, token, or controller-configuration validation failures
-- lookup cache poisoning, permission, or canonical-domain validation failures
+Useful reports include:
 
-The use of MD5, repeating XOR, and AES-ECB is a known property of the iWAN
-wire protocol. A report should demonstrate an implementation
-issue beyond those documented protocol limitations.
+- parser, fragment-reassembly, or resource-exhaustion vulnerabilities;
+- memory-safety or unsafe-code violations;
+- credential, token, key, callback, or log disclosure;
+- authentication, session-tuple, OIDC-state, PKCE, or nonce bypasses;
+- controller-signature, generated-credential, posture, or device-gate bypasses;
+- route, DNS, interface, worker, or credential cleanup failures;
+- lookup-cache poisoning, permission, symlink, or canonical-domain issues;
+- forwarding target escape, TLS validation bypass, or listener exposure;
+- Windows Wintun extraction or loading vulnerabilities.
 
-## Protocol Limitations
+The following are not vulnerabilities by themselves:
 
-Traditional iWAN cryptography is not modern authenticated encryption. The
-control signature does not cover the packet body, and traditional data packets
-do not have authenticated integrity. OpeniWAN must not be presented as adding
-security properties that are absent from the wire protocol.
+- cryptographic limitations inherent to the documented iWAN wire protocol;
+- a deployment rejecting an unsupported or undocumented protocol variant;
+- use against systems without authorization;
+- general weaknesses in a third-party identity provider, controller, DNS
+  server, or operating-system credential service;
+- disclosure of information the operator explicitly chose to log or publish.
 
-Use the project only on authorized networks and prefer a stronger protocol when
-the endpoint supports one.
+An implementation bug that makes a documented protocol limitation worse is
+still in scope.
 
-## Managed Credentials
+## Security model
 
-OIDC access and refresh tokens, caller-supplied keepalive secrets, SR keys, and
-ingress passwords stay in memory, are redacted from owning types' debug output,
-and use zeroizing holders where applicable. OpeniWAN does not persist controller
-responses or OIDC sessions. The optional seven-day lookup cache contains only
-domain discovery data and is replaced atomically; choose a private cache
-directory because controller addresses and customer-domain metadata may still
-be sensitive. Do not attach callback URLs, tokens, credentials, caches, or
-controller responses to public reports.
+OpeniWAN validates framing, lengths, packet classes, session tuples, returned
+Segment Routing paths, controller signatures, callback state, and configured
+resource limits. It uses rollback guards for host networking and zeroizing
+owners for secret material.
 
-The protocol uses platform-wide lookup credentials and a controller-app-ID
-secret-selection rule to sign lookup, controller-auth, and controller-config
-requests. These are distributed client constants, not confidential per-user
-credentials. Servers must not treat possession of them as proof of a trusted
-device. OIDC `/config` uses both `X-Auth-*` headers and a Bearer token.
+These controls protect the implementation; they do not turn iWAN into a modern
+authenticated VPN.
 
-OpeniWAN uses controller-supplied authorization and token endpoints directly.
-It checks callback state, redirect URI, PKCE, and ID-token nonce, but does not
-perform a mandatory discovery or JWKS request. Authenticity therefore depends
-on the HTTPS controller configuration and token endpoint.
+### Protocol cryptography
 
-## Windows TUN deployment
+- The control signature is `MD5(header || "mw")` and does not cover the body.
+- Traditional XOR and AES-128-ECB data modes provide no authenticated
+  integrity or replay protection.
+- Segment Routing outer AES is ECB without authentication.
+- Password wrapping and session keys follow the interoperability contract,
+  not current password-authentication best practice.
 
-The upstream Wintun 0.14.1 x86_64 and ARM64 binaries and their prebuilt-binary
-license are distributed with the crate. Only the active architecture is
-embedded in an executable. Before each load, OpeniWAN validates the versioned
-LocalAppData cache against the embedded size and SHA-256; replacement uses an
-atomic Windows file operation. The `tun` signature-verification feature then
-checks the Authenticode signature while loading the DLL by absolute path.
+An on-path attacker with the capabilities implied by those protocol
+limitations may observe or modify traffic. Prefer a stronger protocol when the
+endpoint supports one.
 
-Creating a Wintun adapter or changing routes requires an elevated process.
-Commands that do not create TUN state remain usable without elevation.
+### Managed authentication
+
+OIDC access and refresh tokens, controller app secrets, generated ingress
+passwords, and Segment Routing keys are redacted from owning types' debug
+output and use zeroizing holders where practical.
+
+Controller-supplied authorization and token endpoints are used directly.
+OpeniWAN checks callback origin/path, state, PKCE, and the ID-token nonce. It
+does not perform mandatory OIDC discovery or JWKS signature verification; the
+identity result therefore depends on the HTTPS controller configuration and
+token endpoint. This is an explicit interoperability boundary, not a general
+OIDC-client security claim.
+
+Lookup, controller-auth, configuration, posture, and keepalive requests use
+the documented HMAC headers. Platform and controller app secrets embedded for
+protocol compatibility are distributed client constants, not confidential
+per-user credentials. Servers must not treat their possession as proof of a
+trusted device.
+
+### Saved state and credentials
+
+Profiles contain non-secret domain, Device ID, username, line, DNS, and opaque
+credential-reference data. They never contain passwords, access tokens,
+refresh tokens, controller responses, generated server credentials, or
+Segment Routing keys.
+
+Profile updates use an inter-process lock and atomic replacement. Unix
+directories use mode `0700`, files use `0600`, and symlinked state paths are
+rejected. The optional seven-day lookup cache contains controller addresses
+and customer-domain metadata; keep its directory private.
+
+`managed login --save` stores verified passwords or OIDC refresh tokens in
+macOS Keychain, Windows Credential Manager, or the Unix Secret Service.
+Operating-system credential stores are scoped to a security principal.
+Passing `--state-dir` through `sudo` does not make another account's saved
+credential available.
+
+Use `--non-interactive` for services so unavailable, locked, revoked, or
+mismatched authentication fails instead of waiting on input.
+
+## Host networking
+
+Creating TUN or changing routes and DNS requires elevated privileges. OpeniWAN
+uses scoped guards and restores replaced state when a session exits or setup
+fails. A process kill, kernel failure, or operating-system API failure can
+still prevent cleanup; operators should know how to inspect and restore host
+networking.
+
+Full-tunnel policy excludes the active iWAN peer and known managed ingresses
+to avoid routing the UDP transport into its own TUN. Default routes supplied
+directly by users are rejected.
+
+Platform DNS is installed through a link-scoped lease. Physical resolvers are
+captured before the lease and used through protected relay sockets. Split-DNS
+and encrypted-DNS behavior applies only to traffic visible in the supported
+packet path:
+
+- visible TCP/UDP port 853 can be dropped;
+- configured DoH hostnames can receive NXDOMAIN over UDP/53;
+- TLS is not intercepted;
+- general DoH, HTTP/3, QUIC, and IP-based blocking are not provided.
 
 ## Route-free forwarding
 
-The `forward` command accepts one fixed URI target and a loopback listen
-address. Bare `HOST:PORT` values are rejected: `tcp://HOST:PORT` selects raw
-TCP, while `http://HOST[:PORT]` and `https://HOST[:PORT]` select an HTTP/1.1
-reverse proxy with default ports 80 and 443. The destination cannot be selected
-from an incoming connection. The target URI's host fixes the upstream name or
-address and, for HTTPS, the TLS identity.
+`forward` accepts one fixed `tcp://`, `http://`, or `https://` target and a
+loopback listener. The destination cannot be selected by an incoming client.
+The listener does not authenticate local processes; any process able to
+connect can use the configured target.
 
-For a `tcp://` target, each accepted connection carries arbitrary bytes
-unchanged in both directions through the iWAN userspace TCP/IP stack. OpeniWAN
-does not inspect the application protocol, terminate TLS, or verify the
-target's application-level identity.
+Raw TCP carries bytes unchanged and does not inspect or authenticate the
+application protocol. End-to-end TLS remains the responsibility of the local
+client and target.
 
-For HTTP(S), the local side is always plaintext HTTP/1.1. The proxy rewrites
-`Host` to the fixed target authority and removes hop-by-hop headers. Application
-credentials such as `Authorization` are forwarded without being logged.
-Incoming `CONNECT`, WebSocket and other HTTP Upgrade requests, and HTTP/2 are
-not supported.
+For HTTP(S):
 
-An `https://` domain target uses the target hostname for SNI and certificate
-verification. An IP literal is verified as an IP certificate identity. System
-roots are always loaded, and repeatable `--ca-cert` files can add private trust
-anchors; adding one expands the set of trusted issuers. There is no option to
-disable verification, and `--ca-cert` is rejected for `tcp://` and `http://`
-targets. An `http://` target uses unencrypted TCP inside iWAN and provides no
-TLS confidentiality or server authentication.
+- the local side is plaintext HTTP/1.1;
+- `Host` is rewritten to the fixed target;
+- hop-by-hop headers are removed;
+- application headers such as `Authorization` are forwarded without logging;
+- incoming `CONNECT`, WebSocket/Upgrade, and HTTP/2 are unsupported;
+- HTTPS uses the target host for SNI and certificate verification;
+- system roots are always loaded, and `--ca-cert` can add trust anchors;
+- certificate verification cannot be disabled.
 
-Organization DNS queries can run through the iWAN userspace stack. The client
-checks transaction IDs, response metadata and questions, bounds CNAME depth,
-caches positive results with bounded TTLs, and retries truncated UDP replies
-over TCP. `--resolve auto` uses an iWAN DNS server when one is configured and
-otherwise uses the host resolver. `--resolve tunnel` prohibits host-DNS
-fallback, while `--resolve system` explicitly exposes the target hostname to
-the host resolver. `--dns-timeout` bounds each resolver attempt, while
-`--connect-timeout` bounds the complete DNS, TCP, and, for HTTPS, TLS setup.
+The listener is capped at 256 active connections. Bind only the required
+loopback port and stop the forwarder when it is no longer needed.
 
-A literal IPv4 or bracketed IPv6 address in the target URI bypasses DNS. With
-HTTPS it remains the certificate identity and must be covered by the upstream
-certificate; it does not disable or weaken verification.
+Target resolution with `--resolve system` exposes the hostname to the host
+resolver. `--resolve tunnel` keeps lookup in the iWAN userspace path and does
+not fall back to the host. DNS replies are checked for transaction and
+question consistency, CNAME depth is bounded, cache TTLs are bounded, and
+truncated UDP replies retry over TCP.
 
-The loopback listener is intended only for processes on the same host, but it
-does not authenticate local clients. Any process that can connect to the
-listener can exchange bytes with a TCP target or issue HTTP requests to the
-configured origin. Bind only the required port and stop the forwarder when it
-is no longer needed. Browser cookie/SSO and mTLS behavior are not security
-claims of this mode. The forwarder caps active connections at 256 and closes
-newly accepted sockets while at capacity.
+## Windows TUN deployment
 
-For raw TCP, application-level confidentiality, integrity, and server
-authentication remain the responsibility of the local client and target
-service; end-to-end TLS passes through unchanged when those endpoints use it.
-For an HTTPS target, the proxy's upstream TLS protects the HTTP payload. HTTP
-and non-TLS TCP targets receive no such protection from the iWAN data
-plane, which does not add modern authenticated encryption. Destination
-metadata and traffic patterns remain visible to the iWAN transport. Only the
-outer iWAN UDP socket necessarily uses the host's existing routes and may be
-affected by another VPN.
+The upstream Wintun 0.14.1 x86_64 and ARM64 binaries and their license are
+distributed with the crate. Only the active architecture is embedded in an
+executable.
+
+Before loading, OpeniWAN validates the versioned LocalAppData cache against
+the embedded size and SHA-256, replaces it atomically, and opens the DLL by
+absolute path. The `tun` crate's signature-verification feature checks its
+Authenticode signature.
+
+## Logging and diagnostics
+
+Normal logs do not include passwords, tokens, controller app secrets, Segment
+Routing keys, authorization headers, or packet contents. Higher verbosity can
+still reveal endpoints, domains, line names, routes, timing, or other private
+deployment metadata.
+
+Review diagnostic output before sharing it. Prefer the smallest scoped
+`RUST_LOG` filter and synthetic reproduction.
+
+## Supply-chain notes
+
+The repository commits `Cargo.lock`, tests the minimum Rust version and stable
+Rust across supported desktop platforms, builds Windows ARM64, and validates
+the publishable package in CI. Review dependency and embedded-binary changes
+as security-sensitive changes.

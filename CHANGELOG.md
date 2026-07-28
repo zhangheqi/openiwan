@@ -1,105 +1,170 @@
 # Changelog
 
-All notable changes to OpeniWAN are documented here. The project follows
-[Semantic Versioning](https://semver.org/).
+All notable changes to OpeniWAN are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/), and
+the project follows [Semantic Versioning](https://semver.org/). Before `1.0`,
+minor releases may contain explicitly documented breaking changes.
+Released sections retain their published contents; current work belongs only
+under `Unreleased`.
 
 ## [Unreleased]
 
+This section is verified against `v0.2.0..HEAD`. The `0.3.0` series is a
+breaking update to the CLI, configuration schema, Cargo features, and public
+managed APIs.
+
 ### Added
 
-- A unified public DNS subsystem with typed server, split, encrypted-DNS, and
-  domain-rule policies; packet-level DNS routing and enforcement; bounded
-  physical resolver relay; reconnect-aware runtime state; and link-scoped
-  Linux, macOS, and Windows DNS leases.
-- One-shot and profile DNS overrides with deterministic
-  CLI > profile > controller > OPEN_ACK precedence.
-
-- Full Segment Routing transport with directional headers, inner and outer
-  encryption, exact two-fragment planning, offset-aware reassembly, monitor
-  handshakes, counters, and peer-down timing.
-- Byte-vector coverage for OPEN, ping, signed close, XOR, AES, SR headers,
-  fragment words, SR outer AES, and keepalive HMAC.
-- Customer-domain lookup with primary/fallback endpoints, retries,
-  canonical-domain handling, a seven-day cache, and platform
-  `X-Auth-*` authentication.
-- Controller authentication with signed requests, credential/OIDC selection,
-  Authorization Code + PKCE, posture evaluation, device-binding gates,
-  best-ingress probing, and separate temporary and persistent UDP sessions.
-- Controller-generated credential decryption using AES-256-GCM, SHA-256 key
-  derivation, and authenticated domain/user context.
-- Typed traditional server lists, per-server credentials, SR groups, DNS,
-  routing, IP-filter, and domain-filter configuration.
-- Managed TUN policy for `all`, `ipfilter`, and `custom` modes, including CIDR
-  exclusions, ingress-loop prevention, DNS routing, and platform DNS rollback.
-- HTTP keepalive request/response metric models, Java-compatible URL
-  canonicalization, HMAC headers, timeouts, and retry behavior.
-- Standalone `SREntry` serialization model.
-- Versioned CLI profiles for domain, device ID, username, and stable
-  line preferences, with locked atomic writes and strict Unix permissions.
-- Managed line listing with bounded parallel probes, stable human/JSON output,
-  one-shot selection, persisted selection, and automatic stale-line recovery.
-- Saved password and OIDC authentication in the operating-system credential
-  store, refresh-token rotation, explicit logout and reauthentication,
-  non-interactive service startup, and chunked storage for credentials larger
-  than Windows Credential Manager's per-entry limit.
-- Managed route-free TCP and HTTP(S) forwarding using controller discovery,
-  authentication, line selection, and DNS policy.
-- Automatic installation-wide Device ID generation and persistence, with
-  optional CLI overrides for existing enrollments.
+- Complete Segment Routing transport, including directional path headers,
+  inner and outer encryption, two-fragment planning and reassembly, returned
+  path validation, monitoring, counters, and peer-down handling.
+- Customer-domain discovery with primary and fallback services, canonical
+  domain handling, signed requests, retries, and a seven-day local cache.
+- Controller-managed credential and OIDC authentication, generated
+  per-ingress credential decryption, posture and device-binding gates,
+  traditional/SR line probing, and persistent connection preparation.
+- Versioned non-secret CLI profiles with atomic locked updates, a generated
+  installation Device ID, default-profile selection, stable line preferences,
+  and JSON output for profiles and line probes.
+- Saved password and OIDC refresh-token authentication through macOS Keychain,
+  Windows Credential Manager, and the Unix Secret Service, including refresh
+  rotation, `--save`, `--reauth`, `--non-interactive`, explicit logout, and
+  chunked Windows storage.
+- A shared DNS subsystem with typed policy layers, split-DNS rules,
+  encrypted-DNS handling, packet-level enforcement, a protected physical
+  resolver relay, reconnect-aware generations, and platform DNS leases.
+- Controller-driven `all`, `ipfilter`, and `custom` TUN routing with
+  transport-loop exclusions and rollback.
+- Route-free forwarding for raw TCP and fixed-origin HTTP(S), available for
+  both direct and managed authentication.
+- Typed managed keepalive request, response, and metric models with canonical
+  HMAC signing and retry behavior.
+- Protocol references and byte-vector coverage for traditional and Segment
+  Routing packets, OPEN, ping, close, XOR, AES, fragments, monitor packets,
+  generated credentials, and keepalive signing.
 
 ### Changed
 
-- Simplified CLI help and option names for saved authentication, line
-  selection, forwarding, profile edits, and timeouts. Duration arguments now
-  require an explicit `ms`, `s`, or `m` unit.
-- Replaced `DnsGuard`, controller `DnsConfiguration`/raw routing DNS fields,
-  and forward-only `DnsMode`/`DnsConfig` with the breaking public
-  `openiwan::dns` API. Forward flags are now `--resolve`, `--dns-server`, and
-  `--dns-timeout`.
-- Split DNS is enforced in the TUN packet path instead of platform
-  route-only resolver domains. Encrypted-DNS compatibility now drops visible
-  TCP/UDP 853 and denies configured DoH hostnames without TLS interception.
+- Rebuilt managed operation around customer-domain discovery and live
+  controller policy instead of provider files and serialized controller
+  responses.
+- Reworked the CLI into `ping`, `auth`, `connect`, `forward`, `decode`,
+  `managed`, and `profile` command groups. Endpoint probing now takes a
+  positional server, duration values require `ms`, `s`, or `m`, and current
+  option names follow the built-in help without compatibility aliases.
+- Renamed the default route-free Cargo feature to `forward` and extended its
+  fixed target from HTTP(S) origins to `tcp://`, `http://`, and `https://`
+  URIs.
+- Simplified `ClientConfig` to data-plane settings. Authentication and
+  heartbeat timings, AUTH_VERIFY behavior, and XOR key width now follow the
+  protocol profile; Segment Routing configuration is a first-class field.
+- Replaced the public provider-oriented managed API with domain lookup,
+  controller models, prepared connections, stable line preferences, posture,
+  and keepalive APIs.
+- Added the public `openiwan::dns` policy/runtime API and session lifecycle
+  hooks on `PacketDevice`; direct and managed TUN connections now share DNS
+  enforcement.
+- Aligned the wire profile with the analyzed 2.3.0 client behavior: Java
+  US-ASCII credentials, canonical OPEN TLV order, optional-but-validated
+  AUTH_VERIFY, eight-byte XOR repetition, 20-byte little-endian heartbeat,
+  fixed stateless ping values, traditional data-class selection, and distinct
+  traditional/SR fragmentation rules.
+- OIDC now uses controller-provided authorization and token endpoints
+  directly, preserves controller scopes, validates callback state, redirect
+  URI, PKCE, and nonce, and does not require discovery or JWKS verification.
+- Split DNS moved from platform resolver-domain routes into the TUN packet
+  path. Controller, profile, command-line, and OPEN_ACK inputs now resolve
+  through one deterministic policy.
+- Reorganized project documentation around current protocol, architecture,
+  CLI, configuration, security, support, and interoperability evidence rather
+  than deployment-specific instructions.
+- Set the next package version and documentation target to `0.3.0`.
 
-- Set the next package version to 0.3.0. Public APIs may change until the
-  release is published.
-- Made the documented iWAN wire profile the protocol contract.
-- Use the runtime client platform for controller `/config.type`.
-- Preserve controller-provided OIDC scopes, including `offline_access`, and
-  apply the protocol username-claim precedence.
-- Treat a missing or zero posture version as an empty/disabled configuration.
-- Use `0xffff` and `0xffffffff` for stateless ping session values.
-- Repeat only the first eight session-key bytes in XOR mode.
-- Use a 20-byte little-endian traditional heartbeat with the defined timing
-  and miss limits.
-- Apply Java US-ASCII replacement, canonical OPEN TLV ordering, optional
-  AUTH_VERIFY handling, defined OPEN_ACK integer widths, and structured
-  OPEN_REJECT mapping.
-- Use the traditional DATA/DATA_ENCRYPTED choice for both IPv4 and IPv6.
-- Keep traditional and SR fragmentation as separate algorithms with their
-  respective byte order and reassembly rules.
-- Rename `LegacyFragmentReassembler` to
-  `TraditionalFragmentReassembler`.
-- Managed deployments now start from customer-domain discovery.
-- Present OpeniWAN as a standalone open-source client, use protocol-oriented
-  documentation names, and provide shell-neutral command examples with
-  explicit PowerShell variants where syntax differs.
+### Removed
+
+- Provider TOML configuration, bundled deployment profiles, serialized
+  managed controller state, and the provider-based `managed fetch`, `list`,
+  `all`, and `serve` workflows.
+- The `serve` command, `http-proxy` Cargo feature, `--upstream-ip` override,
+  and HTTP-origin-only forwarding interface.
+- Configurable authentication/heartbeat timing, `require_auth_verify_echo`,
+  and `xor_key_bytes` fields from `ClientConfig`.
+- Deployment-specific provider documentation and reverse-engineering notes
+  from the published documentation set.
 
 ### Fixed
 
-- Parse the lookup response service type from `data.type` while sending
-  `serviceType: "fgb"` in the signed request body.
-- Ignore an unspecified `0.0.0.0` OPEN_ACK DNS address and use the
-  official-client fallback resolvers for managed controller connections.
-- Use canonical `Duration` units so the Rust 1.97 Clippy quality gate passes
-  with warnings denied.
+- Read the discovered service type from `data.type` while retaining
+  `serviceType: "fgb"` in the signed lookup request.
+- Ignore an unusable `0.0.0.0` OPEN_ACK DNS address and use managed controller
+  fallback resolvers when no usable configured server exists.
+- Store credentials larger than the Windows Credential Manager per-entry
+  limit as validated, versioned chunks and remove obsolete generations.
+- Align human-readable managed line columns for mixed-width Unicode names and
+  multi-digit values.
 
 ## [0.2.0] - 2026-07-25
 
-See the repository tag for the historical release.
+### Added
+
+- Windows 10/11 x86_64 and ARM64 TUN support with native IPv4/IPv6 route
+  management and rollback.
+- Embedded, signed Wintun 0.14.1 binaries with verified, atomic first-use
+  extraction for `cargo install`.
+- Cross-platform hidden password prompts and Windows managed-state
+  directories.
+
+### Changed
+
+- Replaced the hand-written Linux/macOS TUN implementation with `tun` 0.8.14.
+- Raised the minimum supported Rust version from 1.85 to 1.88.
+- Made `--tun` platform-aware: `openiwan0` on Linux/Windows and automatic
+  `utunN` allocation on macOS.
+- Changed `TunDevice::open` and `RouteGuard::configure` to accept authenticated
+  session/device state directly.
 
 ## [0.1.0] - 2026-07-25
 
-See the repository tag for the historical release.
+### Added
+
+- Traditional iWAN packet, TLV, authentication, heartbeat, and CLOSE handling.
+- Compact 8-byte heartbeat responses used by compatible USTC servers.
+- Configurable 8/16-byte XOR key cycling, with USTC using the 8-byte form.
+- Plaintext, repeating XOR, and legacy AES-128-ECB data modes.
+- IPv4, IPv6, IPFRAG, and IPFRAG6 receive paths.
+- Bounded fragment reassembly and reconnect policies.
+- Linux TUN and macOS utun support.
+- `ping`, `auth`, `connect`, and `decode` CLI commands.
+- Static-analysis evidence and wire-protocol reference for client version 2.3.0.
+- Unit tests and a synthetic local UDP authentication endpoint.
+- English-first community and technical documentation.
+- Simplified Chinese README translation.
+- Contribution guidelines, code of conduct, and architecture guide.
+- Configuration-driven `managed fetch`, `list`, `connect`, and `all` commands.
+- PKCE OIDC login with state, nonce, discovery, JWKS, and ID-token
+  validation.
+- Signed controller configuration fetch and authenticated AES-GCM
+  line-password decryption.
+- CIDR, IP, and one-time domain route targets on Linux and macOS.
+- Route-free `serve` and `managed serve` HTTP/1.1 reverse proxy commands using
+  an in-process TCP/IP stack with HTTP and verified HTTPS upstream support.
+- Fixed `--upstream-ip` connection targets that bypass VPN Fake-IP DNS while
+  retaining the configured HTTP Host and HTTPS identity.
+- Automatic organization DNS through the iWAN userspace stack with provider
+  and OPENACK resolvers, CNAME support, bounded TTL caching, response
+  validation, multi-server retry, and DNS-over-TCP fallback.
+- Explicit managed-provider compatibility for endpoints that omit AUTH_VERIFY
+  from OPENACK, while still rejecting mismatched echoes.
+
+### Changed
+
+- Isolated deployment-specific configuration and guidance from generic code,
+  examples, and documentation.
+- Require AUTH_VERIFY policy, XOR key width, and managed-provider DNS settings
+  explicitly in the current configuration schema.
+- Replace the pre-release fixed-width cipher constructors with fallible APIs
+  that require an explicit 8- or 16-byte XOR key width.
 
 [Unreleased]: https://github.com/zhangheqi/openiwan/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/zhangheqi/openiwan/compare/v0.1.0...v0.2.0

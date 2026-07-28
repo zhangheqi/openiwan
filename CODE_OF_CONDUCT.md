@@ -10,24 +10,24 @@ experience level, location, or viewpoint.
 
 Community members should:
 
-- communicate with empathy, patience, and technical honesty
-- welcome questions and help newcomers build context
-- critique ideas and code without attacking people
-- acknowledge uncertainty and correct mistakes openly
-- respect privacy, authorization boundaries, and responsible disclosure
-- keep public collaboration accessible to an international audience
+- communicate with empathy, patience, and technical honesty;
+- welcome questions and help newcomers build context;
+- critique ideas and code without attacking people;
+- acknowledge uncertainty and correct mistakes openly;
+- respect privacy, authorization boundaries, and responsible disclosure;
+- keep public collaboration accessible to an international audience.
 
 ## Unacceptable Behavior
 
 The following behavior is not acceptable:
 
-- harassment, threats, discrimination, or personal attacks
-- sexualized language or unwanted attention
-- deliberate intimidation, doxxing, or disclosure of private information
-- encouraging unauthorized access, credential sharing, or harmful network use
+- harassment, threats, discrimination, or personal attacks;
+- sexualized language or unwanted attention;
+- deliberate intimidation, doxxing, or disclosure of private information;
+- encouraging unauthorized access, credential sharing, or harmful network use;
 - publishing vulnerabilities before maintainers have had a reasonable
-  opportunity to respond
-- sustained disruption of project discussions or review
+  opportunity to respond;
+- sustained disruption of project discussions or review.
 
 ## Scope
 
@@ -36,9 +36,11 @@ community spaces, and public situations where a person represents the project.
 
 ## Enforcement
 
-Report conduct concerns privately to the project maintainers. If the hosting
-platform offers a private moderation or security-reporting channel, prefer that
-channel. Reports will be handled as confidentially as practical.
+Report conduct concerns privately to the project maintainers. Do not include
+details in a public issue. If no private community channel is available, open
+a minimal issue asking a maintainer to establish private contact. Use the
+[security reporting process](SECURITY.md) only when the concern also involves
+a vulnerability. Reports will be handled as confidentially as practical.
 
 Maintainers may edit or remove contributions, warnings, comments, or other
 content that violates this code. They may also temporarily or permanently

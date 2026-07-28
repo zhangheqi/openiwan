@@ -1,9 +1,12 @@
 # Protocol Provenance and Interoperability Evidence
 
 OpeniWAN is an independent implementation of the iWAN protocol. Its wire
-profile is based on clean-room protocol analysis, authorized interoperability
-tests, and reproducible byte vectors. No proprietary source code or vendor
-binaries are distributed with the project.
+profile is based on independent protocol analysis, authorized interoperability
+tests, and reproducible byte vectors. No proprietary iWAN source code, client
+binaries, credentials, or private captures are distributed with the project.
+
+The repository does include redistributable Wintun binaries and their license
+for Windows TUN support; they are unrelated to iWAN protocol evidence.
 
 The evidence set covers:
 
@@ -21,6 +24,21 @@ Repository tests exercise byte vectors for OPEN, ping, signed close, XOR,
 traditional AES, SR headers, SR fragment words, SR outer AES, and keepalive
 HMAC.
 
+## Evidence levels
+
+Issue templates and reviews use these labels:
+
+| Label | Evidence | Typical artifact |
+|---|---|---|
+| `S` | Independent protocol analysis | Reproducible field or control-flow analysis |
+| `C` | Independent cross-check | Agreement between implementations or observations |
+| `L` | Synthetic local endpoint | Deterministic request/response test |
+| `R` | Authorized real endpoint | Redacted observation with exact versions |
+
+An evidence label records how a claim was established; it is not a quality
+score. Claims with deployment-specific assumptions must say so regardless of
+level.
+
 ## Acceptance criteria
 
 A protocol behavior may enter the implementation when at least one of these
@@ -32,9 +50,10 @@ conditions is met:
    it;
 4. an authorized server test confirms the behavior.
 
-The evidence must identify the protocol surface, smallest reproducer, expected
-bytes or state transition, and any deployment-specific assumptions. Plausible
-field names or schemas are not sufficient.
+The evidence must identify its level, protocol surface, smallest reproducer,
+expected bytes or state transition, peer version when known, and any
+deployment-specific assumptions. Plausible field names, symbol names, or
+schemas are not sufficient.
 
 ## Current protocol boundaries
 
@@ -59,9 +78,14 @@ Protocol reports should include:
 
 - affected OpeniWAN version and platform;
 - peer or server version when known;
+- evidence level (`S`, `C`, `L`, or `R`);
 - a minimal synthetic reproducer;
 - redacted packet bytes or structured traces;
 - expected and actual behavior.
 
-Never commit credentials, tokens, private controller responses, proprietary
-binaries, or unredacted captures.
+Never commit credentials, tokens, callback URLs, private controller responses,
+proprietary iWAN binaries, non-redistributable source, or unredacted captures.
+
+When an observation changes the supported contract, update the implementation
+tests, [Protocol Reference](PROTOCOL.md), relevant security boundary, and
+changelog together.

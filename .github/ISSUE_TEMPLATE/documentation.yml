@@ -1,0 +1,32 @@
+name: Documentation issue
+description: Report missing, unclear, or incorrect documentation
+title: "docs: "
+labels: ["documentation"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the page or identify the file and section.
+      placeholder: "README.md — Quick start"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear or incorrect?
+      description: Explain what you expected to learn and what the documentation currently says.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: A proposed wording or example is welcome but not required.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed credentials, tokens, private responses, and identifying packet data.
+          required: true

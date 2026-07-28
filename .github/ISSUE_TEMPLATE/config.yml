@@ -1,1 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+contact_links:
+  - name: Support guide
+    url: https://github.com/zhangheqi/openiwan/blob/main/SUPPORT.md
+    about: Choose the right channel and collect the required diagnostic information.
+  - name: Report a vulnerability
+    url: https://github.com/zhangheqi/openiwan/security/advisories/new
+    about: Report suspected security issues privately.

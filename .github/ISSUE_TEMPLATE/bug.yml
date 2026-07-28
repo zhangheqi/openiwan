@@ -8,12 +8,14 @@ body:
       value: |
         Thank you for reporting a bug. Do not include credentials, tokens,
         private controller responses, packet captures, or vulnerability details.
-        Security issues must follow SECURITY.md.
+        Security issues must follow SECURITY.md. For setup questions, see
+        SUPPORT.md before opening an issue.
   - type: input
     id: version
     attributes:
       label: openiwan version
-      placeholder: "0.1.0 or commit SHA"
+      description: Paste the output of `openiwan --version`, or the commit SHA.
+      placeholder: "openiwan 0.3.0 or commit SHA"
     validations:
       required: true
   - type: dropdown
@@ -23,6 +25,7 @@ body:
       options:
         - Linux
         - macOS
+        - Windows
         - Other
     validations:
       required: true
@@ -40,6 +43,11 @@ body:
       description: Provide minimal commands or a synthetic test case.
     validations:
       required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS version, installation method, command mode, and relevant redacted configuration.
   - type: textarea
     id: logs
     attributes:

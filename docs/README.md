@@ -1,45 +1,65 @@
 # Documentation
 
-The technical documentation for OpeniWAN is written and reviewed in English.
-The root README may have translations, but English is the canonical language
-for protocol claims, architecture decisions, security guidance, and
-contribution policy.
+OpeniWAN documentation is organized by task and authority. The root README is
+the project landing page; built-in CLI help and Rust API documentation are the
+authoritative interface references.
 
-## Guides
+Unless a document says otherwise, files on `main` describe the unreleased
+`0.3.0` series. Use the matching Git tag for a published version.
 
-- [Architecture](ARCHITECTURE.md) — crate layout, session lifecycle, trust
-  boundaries, and extension points
-- [Managed Connections](MANAGED_CONNECTIONS.md) — lookup, auth selection, OIDC,
-  `/config`, posture, ingress selection, and keepalive contracts
-- [Protocol Reference](PROTOCOL.md) — traditional, SR, controller, and
-  keepalive wire contracts
-- [Protocol Provenance](PROTOCOL_PROVENANCE.md) — interoperability evidence,
-  reproducibility, and unresolved details
-- [Security Policy](../SECURITY.md) — supported versions and private reporting
-- [Contributing](../CONTRIBUTING.md) — development workflow and evidence
-  requirements
+## Start here
 
-## Documentation Principles
+| Document | Audience | Contents |
+|---|---|---|
+| [Project README](../README.md) | Everyone | Scope, status, installation, quick start, and support |
+| [Command-Line Guide](CLI.md) | CLI users and operators | Commands, credentials, privileges, profiles, forwarding, and automation |
+| [Configuration](CONFIGURATION.md) | Operators and integrators | TOML, routing, DNS policy, state, and credential storage |
+| [Rust API on docs.rs](https://docs.rs/openiwan) | Library users | Public types, functions, and examples |
 
-1. Describe the supported contract rather than implementation history.
-2. Record protocol evidence in the provenance document.
-3. Use synthetic examples; never publish credentials or private captures.
-4. State protocol and security boundaries prominently.
-5. Keep commands single-line or provide explicit POSIX and PowerShell forms.
-6. Update the English source before updating translated README files.
-7. Keep deployment-specific names and parameters out of the repository unless
-   they are part of a reproducible evidence record.
+## Concepts and internals
 
-API documentation is generated from the Rust source:
+| Document | Audience | Contents |
+|---|---|---|
+| [Managed Connections](MANAGED_CONNECTIONS.md) | Integrators | Lookup, authentication, controller policy, posture, line selection, and keepalive |
+| [Architecture](ARCHITECTURE.md) | Contributors | Components, session lifecycle, concurrency, cleanup, and trust boundaries |
+| [Protocol Reference](PROTOCOL.md) | Protocol implementers | Traditional, Segment Routing, and managed HTTP wire contracts |
+| [Protocol Provenance](PROTOCOL_PROVENANCE.md) | Interoperability contributors | Evidence levels, acceptance criteria, and unresolved areas |
 
-POSIX shell:
+## Project policies
 
-```console
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --open
-```
+| Document | Purpose |
+|---|---|
+| [Security Policy](../SECURITY.md) | Private reporting, supported versions, and security boundaries |
+| [Contributing](../CONTRIBUTING.md) | Development setup, review requirements, tests, and documentation style |
+| [Support](../SUPPORT.md) | Where to ask questions or report bugs, interoperability issues, and vulnerabilities |
+| [Code of Conduct](../CODE_OF_CONDUCT.md) | Community behavior and enforcement |
+| [Release Process](RELEASES.md) | Changelog verification and maintainer release checklist |
+| [Changelog](../CHANGELOG.md) | Curated user-visible changes by version |
 
-PowerShell:
+## Documentation authority
 
-```powershell
-$env:RUSTDOCFLAGS = "-D warnings"; cargo doc --no-deps --all-features --open; Remove-Item Env:RUSTDOCFLAGS
-```
+When sources disagree, use this order:
+
+1. tests and implementation for actual behavior;
+2. built-in `--help` for the installed CLI;
+3. generated Rust API documentation for the installed crate version;
+4. protocol and configuration references from the matching Git tag;
+5. translated or overview material.
+
+Open an issue when documentation and behavior disagree. Do not silently
+preserve obsolete behavior as a compatibility claim.
+
+## Writing principles
+
+1. Document the supported contract, not implementation history.
+2. Separate tutorials, operational guidance, architecture, and wire
+   reference.
+3. Use reserved example addresses and placeholder domains.
+4. State privileges, secret handling, cleanup, and protocol limitations near
+   the affected workflow.
+5. Keep shell examples single-line when they must work unchanged in POSIX
+   shells and PowerShell; label shell-specific examples.
+6. Update English canonical documentation before translations.
+7. Verify every changelog entry against the previous release tag.
+8. Never publish credentials, tokens, private controller responses,
+   proprietary iWAN binaries, or unredacted captures.

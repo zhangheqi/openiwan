@@ -56,5 +56,6 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --doc --all-features --locked
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
       - run: cargo package --locked

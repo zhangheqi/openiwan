@@ -1,8 +1,13 @@
-# iWAN Protocol Reference
+# iWAN Wire Protocol Profile
 
-This document defines the interoperable wire profile implemented by OpeniWAN.
+This document defines the interoperable wire profile implemented by the
+unreleased OpeniWAN `0.3.0` series. It is a description of observed compatible
+behavior, not a vendor specification.
+
 Protocol provenance, evidence standards, and unresolved details are documented
-separately in [Protocol Provenance](PROTOCOL_PROVENANCE.md).
+separately in [Protocol Provenance](PROTOCOL_PROVENANCE.md). Numeric fields are
+unsigned unless stated otherwise. Byte order is named explicitly; bytes shown
+as text use ASCII.
 
 ## Standard datagram
 

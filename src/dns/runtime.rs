@@ -30,6 +30,7 @@ pub struct DnsRuntime {
     workers: Mutex<Vec<JoinHandle<()>>>,
     worker_count: Arc<AtomicUsize>,
     max_workers: usize,
+    physical_ipv6: bool,
 }
 
 impl DnsRuntime {
@@ -57,7 +58,18 @@ impl DnsRuntime {
             workers: Mutex::new(Vec::new()),
             worker_count: Arc::new(AtomicUsize::new(0)),
             max_workers: relay_config.max_concurrent,
+            physical_ipv6: true,
         })
+    }
+
+    /// Allow physical IPv6 resolvers for split-DNS relay traffic.
+    ///
+    /// This is enabled by default. TUN clients that capture and drop IPv6 can
+    /// disable it so the relay cannot bypass that policy by binding directly
+    /// to a physical interface.
+    pub fn with_physical_ipv6(mut self, enabled: bool) -> Self {
+        self.physical_ipv6 = enabled;
+        self
     }
 
     pub fn policy(&self) -> Arc<EffectiveDnsPolicy> {
@@ -135,11 +147,8 @@ impl DnsRuntime {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        let physical = physical_snapshot
-            .iter()
-            .filter(|resolver| !tunnel_servers.contains(&resolver.address.ip()))
-            .cloned()
-            .collect::<Vec<_>>();
+        let physical =
+            filter_physical_resolvers(&physical_snapshot, &tunnel_servers, self.physical_ipv6);
 
         let mut lease = self
             .lease
@@ -289,6 +298,21 @@ impl DnsRuntime {
     }
 }
 
+fn filter_physical_resolvers(
+    physical: &[PhysicalResolver],
+    tunnel_servers: &[IpAddr],
+    physical_ipv6: bool,
+) -> Vec<PhysicalResolver> {
+    physical
+        .iter()
+        .filter(|resolver| {
+            (physical_ipv6 || resolver.address.ip().is_ipv4())
+                && !tunnel_servers.contains(&resolver.address.ip())
+        })
+        .cloned()
+        .collect()
+}
+
 impl Drop for DnsRuntime {
     fn drop(&mut self) {
         let _ = self.deactivate();
@@ -430,6 +454,33 @@ mod tests {
             dns_servers: vec![IpAddr::V4(dns)],
             segment_routing: false,
         }
+    }
+
+    #[test]
+    fn physical_resolver_filter_can_disable_ipv6_without_affecting_ipv4() {
+        let physical = [
+            PhysicalResolver::new("192.0.2.53".parse().unwrap()),
+            PhysicalResolver::new("2001:db8::53".parse().unwrap()),
+            PhysicalResolver::new("198.51.100.53".parse().unwrap()),
+        ];
+        let tunnel = ["198.51.100.53".parse().unwrap()];
+
+        let ipv4_only = filter_physical_resolvers(&physical, &tunnel, false);
+        assert_eq!(
+            ipv4_only
+                .iter()
+                .map(|resolver| resolver.address.ip())
+                .collect::<Vec<_>>(),
+            ["192.0.2.53".parse::<IpAddr>().unwrap()]
+        );
+
+        let dual_stack = filter_physical_resolvers(&physical, &tunnel, true);
+        assert_eq!(dual_stack.len(), 2);
+        assert!(
+            dual_stack
+                .iter()
+                .any(|resolver| resolver.address.ip().is_ipv6())
+        );
     }
 
     #[test]

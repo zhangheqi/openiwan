@@ -1,6 +1,8 @@
+use super::UserRoutingMode;
 use fs2::FileExt;
 use openiwan::dns::DnsOverrides;
 use openiwan::managed::{LinePreference, validate_domain};
+use openiwan::tun::resolve_route_targets;
 use openiwan::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -77,6 +79,19 @@ pub struct ManagedProfile {
     pub credential_id: String,
     #[serde(default, skip_serializing_if = "dns_overrides_are_empty")]
     pub dns: DnsOverrides,
+    #[serde(default, skip_serializing_if = "routing_overrides_are_empty")]
+    pub routing: RoutingOverrides,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<UserRoutingMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub block_ipv6: bool,
 }
 
 impl ManagedProfile {
@@ -88,6 +103,7 @@ impl ManagedProfile {
             line: LinePreference::Auto,
             credential_id: String::new(),
             dns: DnsOverrides::default(),
+            routing: RoutingOverrides::default(),
         };
         profile.validate()?;
         Ok(profile)
@@ -117,6 +133,7 @@ impl ManagedProfile {
             ));
         }
         self.dns.validate()?;
+        resolve_route_targets(&self.routing.routes, &[], &[], None)?;
         Ok(())
     }
 
@@ -126,6 +143,14 @@ impl ManagedProfile {
         }
         Ok(&self.credential_id)
     }
+}
+
+fn routing_overrides_are_empty(overrides: &RoutingOverrides) -> bool {
+    overrides == &RoutingOverrides::default()
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +569,11 @@ mod tests {
                 let mut profile = ManagedProfile::new("iwan.example".into(), "device-1".into())?;
                 profile.username = Some("alice".into());
                 profile.line = "iwan:7".parse().unwrap();
+                profile.routing = RoutingOverrides {
+                    mode: Some(UserRoutingMode::Custom),
+                    routes: vec!["10.0.0.0/8".into()],
+                    block_ipv6: true,
+                };
                 state.profiles.insert("work".into(), profile);
                 state.default_profile = Some("work".into());
                 Ok(())
@@ -554,8 +584,12 @@ mod tests {
         let profile = &state.profiles["work"];
         assert_eq!(profile.username.as_deref(), Some("alice"));
         assert_eq!(profile.line, "iwan:7".parse().unwrap());
+        assert_eq!(profile.routing.mode, Some(UserRoutingMode::Custom));
+        assert_eq!(profile.routing.routes, ["10.0.0.0/8"]);
+        assert!(profile.routing.block_ipv6);
         let raw = fs::read_to_string(store.directory().join(STATE_FILE_NAME)).unwrap();
         assert!(raw.contains(&format!("version = {STATE_VERSION}")));
+        assert!(raw.contains("block_ipv6 = true"));
         assert!(!raw.contains("password"));
         assert!(!raw.contains("token"));
 
@@ -583,7 +617,11 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(store.load().unwrap().profiles.len(), 2);
+        let state = store.load().unwrap();
+        assert_eq!(state.profiles.len(), 2);
+        assert_eq!(state.profiles["one"].routing, RoutingOverrides::default());
+        let raw = fs::read_to_string(store.directory().join(STATE_FILE_NAME)).unwrap();
+        assert!(!raw.contains("[profiles.one.routing]"));
         fs::remove_dir_all(store.directory()).unwrap();
     }
 

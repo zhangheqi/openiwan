@@ -82,6 +82,12 @@ openiwan auth --server 192.0.2.10:6001 --username alice --encryption xor
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8
 ```
 
+使用全 IPv4 路由，并阻止普通 IPv6 流量绕过隧道：
+
+```console
+sudo openiwan connect --server 192.0.2.10:6001 --username alice --routing-mode all --block-ipv6
+```
+
 Windows 用户应在管理员终端中执行隧道命令，不使用 `sudo`。如果未设置
 `OPENIWAN_PASSWORD`，CLI 会无回显地提示输入密码；也可以使用权限受保护的
 `--password-file`。密码不能作为命令行值传入。
@@ -91,7 +97,7 @@ Windows 用户应在管理员终端中执行隧道命令，不使用 `sudo`。�
 创建可复用且不含秘密信息的 profile：
 
 ```console
-openiwan profile set work --domain iwan.example --username alice
+openiwan profile set work --domain iwan.example --username alice --routing-mode all --block-ipv6
 ```
 
 查看发现结果，将验证后的认证信息保存到系统凭据库，然后连接：

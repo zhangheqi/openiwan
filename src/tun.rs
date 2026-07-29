@@ -1396,6 +1396,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn windows_route_plan_keeps_ipv6_capture_routes_on_link() {
+        let routes = [
+            Route::parse("::/1").unwrap(),
+            Route::parse("8000::/1").unwrap(),
+        ];
+        let requests = windows_route_requests(&routes, Some("100.100.1.3".parse().unwrap()));
+        assert_eq!(
+            requests,
+            routes
+                .into_iter()
+                .map(RouteRequest::on_link)
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[derive(Default)]
     struct MockBackend {
         rows: Mutex<HashMap<String, u8>>,

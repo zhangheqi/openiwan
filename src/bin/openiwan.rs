@@ -10,6 +10,8 @@ mod state;
 
 use clap::{Args, Parser, Subcommand};
 use openiwan::client;
+#[cfg(feature = "managed")]
+use openiwan::dns::PhysicalResolver;
 use openiwan::dns::{
     DnsDefaults, DnsOverrides, DnsPacketDevice, DnsPolicyResolver, DnsRuntime, DnsServerMode,
     DomainRule, EffectiveDnsPolicy, EncryptedDnsMode, RelayConfig, SplitDnsMode,
@@ -24,9 +26,13 @@ use openiwan::managed::{
 };
 use openiwan::protocol::{self, Tlv};
 use openiwan::tun::resolve_route_policy;
+#[cfg(feature = "managed")]
+use openiwan::tun::resolve_route_targets;
 use openiwan::tun::{RouteGuard, TunDevice};
 use openiwan::{Client, ClientConfig, EncryptionMethod, Error, PacketDevice, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 #[cfg(feature = "managed")]
 use std::io::Write;
 #[cfg(feature = "forward")]
@@ -355,8 +361,51 @@ impl EncryptedDnsModeArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum UserRoutingMode {
+    All,
+    Custom,
+}
+
+impl std::fmt::Display for UserRoutingMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => formatter.write_str("all"),
+            Self::Custom => formatter.write_str("custom"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct RoutingOverrideArgs {
+    /// Select all-IPv4 or custom routing.
+    #[arg(long, value_name = "MODE", value_enum)]
+    routing_mode: Option<UserRoutingMode>,
+    /// Capture and drop IPv6 traffic while a tunnel is active.
+    #[arg(long, conflicts_with = "allow_ipv6")]
+    block_ipv6: bool,
+    /// Allow IPv6 outside the tunnel, overriding a lower-precedence block.
+    #[arg(long, conflicts_with = "block_ipv6")]
+    allow_ipv6: bool,
+}
+
+impl RoutingOverrideArgs {
+    const fn ipv6_override(&self) -> Option<bool> {
+        if self.block_ipv6 {
+            Some(true)
+        } else if self.allow_ipv6 {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Args)]
 struct RouteArgs {
+    #[command(flatten)]
+    policy: RoutingOverrideArgs,
     /// Route a CIDR through iWAN. Repeat to add routes.
     #[arg(long = "route", value_name = "CIDR", value_delimiter = ',')]
     routes: Vec<String>,
@@ -542,6 +591,27 @@ enum ProfileCommand {
 }
 
 #[cfg(feature = "managed")]
+#[derive(Debug, Default, Args)]
+struct ProfileRoutingArgs {
+    #[command(flatten)]
+    overrides: RoutingOverrideArgs,
+    /// Remove the saved routing-mode override.
+    #[arg(long, conflicts_with = "routing_mode")]
+    unset_routing_mode: bool,
+    /// Replace the saved custom CIDR list. Repeat to add routes.
+    #[arg(
+        long = "route",
+        value_name = "CIDR",
+        value_delimiter = ',',
+        conflicts_with = "unset_routes"
+    )]
+    routes: Vec<String>,
+    /// Remove all saved custom CIDRs.
+    #[arg(long)]
+    unset_routes: bool,
+}
+
+#[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ProfileSetArgs {
     /// Profile name.
@@ -561,6 +631,8 @@ struct ProfileSetArgs {
     /// Set the preferred line.
     #[arg(long, value_name = "LINE")]
     line: Option<LinePreference>,
+    #[command(flatten)]
+    routing: ProfileRoutingArgs,
     #[command(flatten)]
     dns: DnsOverrideArgs,
     /// Remove all saved DNS settings.
@@ -632,6 +704,68 @@ fn connect(arguments: ConnectArgs) -> Result<()> {
     )
 }
 
+const IPV6_CAPTURE_ROUTES: [&str; 2] = ["::/1", "8000::/1"];
+
+fn append_ipv6_capture_routes(routes: &mut Vec<String>, block_ipv6: bool) {
+    if block_ipv6 {
+        routes.extend(IPV6_CAPTURE_ROUTES.into_iter().map(str::to_owned));
+    }
+}
+
+fn base_full_ipv4_exclusions() -> Vec<String> {
+    vec![
+        "169.254.0.0/16".into(),
+        "224.0.0.0/4".into(),
+        "127.0.0.0/8".into(),
+    ]
+}
+
+struct Ipv6BlockingDevice<D: PacketDevice + ?Sized> {
+    inner: Arc<D>,
+    block_ipv6: bool,
+}
+
+impl<D: PacketDevice + ?Sized> Ipv6BlockingDevice<D> {
+    fn new(inner: Arc<D>, block_ipv6: bool) -> Self {
+        Self { inner, block_ipv6 }
+    }
+}
+
+impl<D: PacketDevice + ?Sized> PacketDevice for Ipv6BlockingDevice<D> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn activate_session(&self, session: &openiwan::SessionInfo) -> Result<()> {
+        self.inner.activate_session(session)
+    }
+
+    fn deactivate_session(&self) -> Result<()> {
+        self.inner.deactivate_session()
+    }
+
+    fn read_packet(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let length = self.inner.read_packet(buffer)?;
+            if !self.block_ipv6 || !is_ipv6_packet(&buffer[..length]) {
+                return Ok(length);
+            }
+        }
+    }
+
+    fn write_packet(&self, packet: &[u8]) -> io::Result<usize> {
+        if self.block_ipv6 && is_ipv6_packet(packet) {
+            Ok(packet.len())
+        } else {
+            self.inner.write_packet(packet)
+        }
+    }
+}
+
+fn is_ipv6_packet(packet: &[u8]) -> bool {
+    packet.first().is_some_and(|byte| byte >> 4 == 6)
+}
+
 #[cfg(feature = "forward")]
 fn forward(arguments: ForwardArgs) -> Result<()> {
     let client = build_client(&arguments.connection)?;
@@ -646,6 +780,11 @@ fn run_client(
 ) -> Result<()> {
     let session = client.authenticate()?;
     print_session(session.info());
+    let routing_mode = route_arguments
+        .policy
+        .routing_mode
+        .unwrap_or(UserRoutingMode::Custom);
+    let block_ipv6 = route_arguments.policy.ipv6_override().unwrap_or(false);
     let overrides = dns_arguments.as_overrides();
     if overrides.split_mode == Some(SplitDnsMode::Managed) {
         return Err(Error::InvalidConfig(
@@ -665,13 +804,14 @@ fn run_client(
             .filter(|server| *server != session.info().peer.ip())
             .map(|server| server.to_string()),
     );
-    let physical_exclusions = if policy.server_mode == DnsServerMode::Disabled
+    let mut exclusions = if policy.server_mode == DnsServerMode::Disabled
         || matches!(
             policy.split_mode,
             SplitDnsMode::Managed | SplitDnsMode::Custom
         ) {
         physical
             .iter()
+            .filter(|resolver| !block_ipv6 || resolver.address.ip().is_ipv4())
             .map(|resolver| {
                 let address = resolver.address.ip();
                 format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
@@ -680,34 +820,47 @@ fn run_client(
     } else {
         Vec::new()
     };
+    if routing_mode == UserRoutingMode::All {
+        exclusions.extend(base_full_ipv4_exclusions());
+    }
+    let mut cidrs = route_arguments.routes.clone();
+    append_ipv6_capture_routes(&mut cidrs, block_ipv6);
     let routes = resolve_route_policy(
-        &route_arguments.routes,
+        &cidrs,
         &route_ips,
         &route_arguments.route_domains,
-        &physical_exclusions,
+        &exclusions,
         session.info().peer.ip(),
-        false,
+        routing_mode == UserRoutingMode::All,
     )?;
     let mut interface_session = session.info().clone();
     interface_session.dns_servers = policy.servers.iter().copied().map(IpAddr::V4).collect();
     let device = Arc::new(TunDevice::open(tun, &interface_session)?);
     let _routes = RouteGuard::configure(&device, &routes)?;
-    let runtime = Arc::new(DnsRuntime::new(
-        device.dns_platform_target(),
-        defaults,
-        overrides,
-        physical,
-        RelayConfig::default(),
-    )?);
+    let runtime = Arc::new(
+        DnsRuntime::new(
+            device.dns_platform_target(),
+            defaults,
+            overrides,
+            physical,
+            RelayConfig::default(),
+        )?
+        .with_physical_ipv6(!block_ipv6),
+    );
     let dns_device = Arc::new(DnsPacketDevice::new(Arc::clone(&device), runtime));
+    let packet_device = Arc::new(Ipv6BlockingDevice::new(dns_device, block_ipv6));
     for route in &routes {
         println!("route {route} -> {}", device.name());
     }
+    println!(
+        "routing policy: mode={routing_mode}, IPv6={}",
+        if block_ipv6 { "blocked" } else { "allowed" }
+    );
     print_dns_policy(&policy);
     println!("TUN {} is active; press Ctrl-C to stop", device.name());
 
     let shutdown = install_shutdown_handler()?;
-    let end = client.run_reconnecting_from(session, dns_device, shutdown)?;
+    let end = client.run_reconnecting_from(session, packet_device, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
@@ -805,6 +958,7 @@ struct ManagedContext {
     line: LinePreference,
     credential_id: Option<String>,
     dns: DnsOverrides,
+    routing: state::RoutingOverrides,
 }
 
 #[cfg(feature = "managed")]
@@ -849,6 +1003,7 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 &connect.routes,
                 &context.dns,
                 &connect.dns,
+                &context.routing,
             )?;
         }
         #[cfg(feature = "forward")]
@@ -951,6 +1106,11 @@ fn resolve_managed_context(
         dns: profile
             .as_ref()
             .map_or_else(DnsOverrides::default, |profile| profile.dns.clone()),
+        routing: profile
+            .as_ref()
+            .map_or_else(state::RoutingOverrides::default, |profile| {
+                profile.routing.clone()
+            }),
     })
 }
 
@@ -1056,6 +1216,7 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
         if let Some(line) = &arguments.line {
             profile.line = line.clone();
         }
+        patch_profile_routing(&mut profile.routing, &arguments.routing)?;
         if arguments.reset_dns {
             profile.dns = DnsOverrides::default();
         }
@@ -1089,6 +1250,27 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
         persisted.default_profile.as_deref(),
         false,
     )
+}
+
+#[cfg(feature = "managed")]
+fn patch_profile_routing(
+    target: &mut state::RoutingOverrides,
+    arguments: &ProfileRoutingArgs,
+) -> Result<()> {
+    if arguments.unset_routing_mode {
+        target.mode = None;
+    } else if let Some(mode) = arguments.overrides.routing_mode {
+        target.mode = Some(mode);
+    }
+    if arguments.unset_routes {
+        target.routes.clear();
+    } else if !arguments.routes.is_empty() {
+        target.routes = resolve_route_targets(&arguments.routes, &[], &[], None)?;
+    }
+    if let Some(block_ipv6) = arguments.overrides.ipv6_override() {
+        target.block_ipv6 = block_ipv6;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "managed")]
@@ -1227,6 +1409,16 @@ fn print_profile(
             })?
         }
     );
+    println!(
+        "  routing overrides: {}",
+        if profile.routing == state::RoutingOverrides::default() {
+            "inherit".into()
+        } else {
+            serde_json::to_string(&profile.routing).map_err(|error| {
+                Error::InvalidConfig(format!("serialize profile routing output: {error}"))
+            })?
+        }
+    );
     Ok(())
 }
 
@@ -1236,6 +1428,10 @@ fn profile_json(
     profile: &state::ManagedProfile,
     default_profile: Option<&str>,
 ) -> serde_json::Value {
+    let routing_mode = profile
+        .routing
+        .mode
+        .map_or_else(|| "inherit".into(), |mode| mode.to_string());
     serde_json::json!({
         "name": name,
         "default": default_profile == Some(name),
@@ -1244,6 +1440,11 @@ fn profile_json(
         "username": profile.username,
         "line": profile.line.to_string(),
         "dns": profile.dns,
+        "routing": {
+            "mode": routing_mode,
+            "routes": profile.routing.routes,
+            "block_ipv6": profile.routing.block_ipv6,
+        },
     })
 }
 
@@ -1361,12 +1562,96 @@ fn save_profile_line(
 }
 
 #[cfg(feature = "managed")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManagedRoutingSelection {
+    mode: RoutingMode,
+    user_overridden: bool,
+    block_ipv6: bool,
+}
+
+#[cfg(feature = "managed")]
+fn select_managed_routing(
+    route_arguments: &RouteArgs,
+    profile_routing: &state::RoutingOverrides,
+    controller_routing: Option<&openiwan::managed::RoutingConfiguration>,
+) -> ManagedRoutingSelection {
+    let user_mode = route_arguments.policy.routing_mode.or(profile_routing.mode);
+    let mode = user_mode.map_or_else(
+        || controller_routing.map_or(RoutingMode::All, |routing| routing.mode),
+        |mode| match mode {
+            UserRoutingMode::All => RoutingMode::All,
+            UserRoutingMode::Custom => RoutingMode::Custom,
+        },
+    );
+    ManagedRoutingSelection {
+        mode,
+        user_overridden: user_mode.is_some(),
+        block_ipv6: route_arguments
+            .policy
+            .ipv6_override()
+            .unwrap_or(profile_routing.block_ipv6),
+    }
+}
+
+#[cfg(feature = "managed")]
+fn collect_managed_cidrs(
+    route_arguments: &RouteArgs,
+    profile_routing: &state::RoutingOverrides,
+    controller_routing: Option<&openiwan::managed::RoutingConfiguration>,
+    ip_filter_inclusive: &[String],
+    selection: ManagedRoutingSelection,
+) -> Vec<String> {
+    let mut cidrs = profile_routing.routes.clone();
+    cidrs.extend(route_arguments.routes.iter().cloned());
+    cidrs.extend(valid_filter_cidrs(ip_filter_inclusive));
+    if !selection.user_overridden
+        && controller_routing.is_some_and(|routing| routing.mode == RoutingMode::Custom)
+        && let Some(routing) = controller_routing
+    {
+        cidrs.extend(routing.custom_routes.iter().cloned());
+    }
+    append_ipv6_capture_routes(&mut cidrs, selection.block_ipv6);
+    cidrs
+}
+
+#[cfg(feature = "managed")]
+fn managed_route_exclusions(
+    prepared: &PreparedConnection,
+    ip_filter: Option<&openiwan::managed::IpFilterConfiguration>,
+    physical: &[PhysicalResolver],
+    policy: &EffectiveDnsPolicy,
+    block_ipv6: bool,
+) -> Result<Vec<String>> {
+    let mut exclusions =
+        ip_filter.map_or_else(Vec::new, |filter| valid_filter_cidrs(&filter.exclusive));
+    exclusions.extend(managed_server_exclusions(&prepared.configuration)?);
+    if policy.server_mode == DnsServerMode::Disabled
+        || matches!(
+            policy.split_mode,
+            SplitDnsMode::Managed | SplitDnsMode::Custom
+        )
+    {
+        exclusions.extend(
+            physical
+                .iter()
+                .filter(|resolver| !block_ipv6 || resolver.address.ip().is_ipv4())
+                .map(|resolver| {
+                    let address = resolver.address.ip();
+                    format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
+                }),
+        );
+    }
+    Ok(exclusions)
+}
+
+#[cfg(feature = "managed")]
 fn run_managed_client(
     prepared: PreparedConnection,
     tun: Option<&str>,
     route_arguments: &RouteArgs,
     profile_dns: &DnsOverrides,
     dns_arguments: &DnsOverrideArgs,
+    profile_routing: &state::RoutingOverrides,
 ) -> Result<()> {
     let client = prepared.client()?;
     let session = client.authenticate()?;
@@ -1379,10 +1664,14 @@ fn run_managed_client(
     let policy = DnsPolicyResolver::resolve(&defaults, &overrides, &session.info().dns_servers)?;
     let physical = discover_physical_resolvers()?;
 
-    let routing = prepared.configuration.routing()?;
-    let mode = routing
-        .as_ref()
-        .map_or(RoutingMode::All, |routing| routing.mode);
+    let controller_routing = prepared.configuration.routing()?;
+    let routing_selection = select_managed_routing(
+        route_arguments,
+        profile_routing,
+        controller_routing.as_ref(),
+    );
+    let mode = routing_selection.mode;
+    let block_ipv6 = routing_selection.block_ipv6;
     let ip_filter = if mode == RoutingMode::All {
         None
     } else {
@@ -1393,37 +1682,27 @@ fn run_managed_client(
         .is_some_and(|filter| !filter.inclusive.is_empty() || !filter.exclusive.is_empty());
     let full_ipv4 = mode == RoutingMode::All || (mode == RoutingMode::IpFilter && !has_ip_filter);
 
-    let mut cidrs = route_arguments.routes.clone();
-    if let Some(filter) = &ip_filter
-        && has_ip_filter
-    {
-        cidrs.extend(valid_filter_cidrs(&filter.inclusive));
-    }
-    if mode == RoutingMode::Custom
-        && let Some(routing) = &routing
-    {
-        cidrs.extend(routing.custom_routes.iter().cloned());
-    }
+    let effective_ip_filter = ip_filter.as_ref().filter(|_| has_ip_filter);
+    let ip_filter_inclusive =
+        effective_ip_filter.map_or(&[][..], |filter| filter.inclusive.as_slice());
+    let mut cidrs = collect_managed_cidrs(
+        route_arguments,
+        profile_routing,
+        controller_routing.as_ref(),
+        ip_filter_inclusive,
+        routing_selection,
+    );
 
     if mode != RoutingMode::All {
         cidrs.extend(policy.servers.iter().map(|server| format!("{server}/32")));
     }
-    let mut exclusions = ip_filter
-        .as_ref()
-        .filter(|_| has_ip_filter)
-        .map_or_else(Vec::new, |filter| valid_filter_cidrs(&filter.exclusive));
-    exclusions.extend(managed_server_exclusions(&prepared.configuration)?);
-    if policy.server_mode == DnsServerMode::Disabled
-        || matches!(
-            policy.split_mode,
-            SplitDnsMode::Managed | SplitDnsMode::Custom
-        )
-    {
-        exclusions.extend(physical.iter().map(|resolver| {
-            let address = resolver.address.ip();
-            format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
-        }));
-    }
+    let exclusions = managed_route_exclusions(
+        &prepared,
+        effective_ip_filter,
+        &physical,
+        &policy,
+        block_ipv6,
+    )?;
     let routes = resolve_route_policy(
         &cidrs,
         &route_arguments.route_ips,
@@ -1434,7 +1713,7 @@ fn run_managed_client(
     )?;
 
     let mut interface_session = session.info().clone();
-    if let Some(routing) = &routing
+    if let Some(routing) = &controller_routing
         && routing.mtu_mode == "custom"
         && let Ok(mtu) = u16::try_from(routing.custom_mtu)
         && (576..=9_000).contains(&mtu)
@@ -1444,22 +1723,35 @@ fn run_managed_client(
     interface_session.dns_servers = policy.servers.iter().copied().map(IpAddr::V4).collect();
     let device = Arc::new(TunDevice::open(tun, &interface_session)?);
     let _routes = RouteGuard::configure(&device, &routes)?;
-    let runtime = Arc::new(DnsRuntime::new(
-        device.dns_platform_target(),
-        defaults,
-        overrides,
-        physical,
-        RelayConfig::default(),
-    )?);
+    let runtime = Arc::new(
+        DnsRuntime::new(
+            device.dns_platform_target(),
+            defaults,
+            overrides,
+            physical,
+            RelayConfig::default(),
+        )?
+        .with_physical_ipv6(!block_ipv6),
+    );
     let dns_device = Arc::new(DnsPacketDevice::new(Arc::clone(&device), runtime));
+    let packet_device = Arc::new(Ipv6BlockingDevice::new(dns_device, block_ipv6));
     for route in &routes {
         println!("route {route} -> {}", device.name());
     }
+    let mode_label = match mode {
+        RoutingMode::All => "all",
+        RoutingMode::IpFilter => "ipfilter",
+        RoutingMode::Custom => "custom",
+    };
+    println!(
+        "routing policy: mode={mode_label}, IPv6={}",
+        if block_ipv6 { "blocked" } else { "allowed" }
+    );
     print_dns_policy(&policy);
     println!("TUN {} is active; press Ctrl-C to stop", device.name());
 
     let shutdown = install_shutdown_handler()?;
-    let end = client.run_reconnecting_from(session, dns_device, shutdown)?;
+    let end = client.run_reconnecting_from(session, packet_device, shutdown)?;
     println!("session ended: {end:?}");
     Ok(())
 }
@@ -1524,11 +1816,7 @@ fn valid_filter_cidrs(values: &[String]) -> Vec<String> {
 fn managed_server_exclusions(
     configuration: &openiwan::managed::ControllerConfiguration,
 ) -> Result<Vec<String>> {
-    let mut exclusions = vec![
-        "169.254.0.0/16".into(),
-        "224.0.0.0/4".into(),
-        "127.0.0.0/8".into(),
-    ];
+    let mut exclusions = base_full_ipv4_exclusions();
     let mut endpoints = configuration
         .iwan_servers()?
         .into_iter()
@@ -2231,6 +2519,226 @@ mod tests {
         assert_eq!(overrides.encrypted_dns, Some(EncryptedDnsMode::Block));
     }
 
+    #[test]
+    fn parses_routing_mode_and_ipv6_policy() {
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "connect",
+            "--server",
+            "192.0.2.10:6001",
+            "--username",
+            "alice",
+            "--routing-mode",
+            "all",
+            "--block-ipv6",
+            "--route",
+            "10.0.0.0/8",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Connect(ConnectArgs {
+                routes: RouteArgs {
+                    policy: RoutingOverrideArgs {
+                        routing_mode: Some(UserRoutingMode::All),
+                        block_ipv6: true,
+                        allow_ipv6: false,
+                    },
+                    routes,
+                    ..
+                },
+                ..
+            }) if routes == ["10.0.0.0/8"]
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "connect",
+                "--server",
+                "192.0.2.10:6001",
+                "--username",
+                "alice",
+                "--block-ipv6",
+                "--allow-ipv6",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "profile",
+                "set",
+                "work",
+                "--routing-mode",
+                "custom",
+                "--unset-routing-mode",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "profile",
+                "set",
+                "work",
+                "--route",
+                "10.0.0.0/8",
+                "--unset-routes",
+            ])
+            .is_err()
+        );
+
+        #[cfg(feature = "managed")]
+        {
+            let parsed = Cli::try_parse_from([
+                "openiwan",
+                "managed",
+                "--domain",
+                "iwan.example",
+                "connect",
+                "--routing-mode",
+                "custom",
+                "--allow-ipv6",
+                "--route",
+                "10.0.0.0/8",
+            ])
+            .unwrap();
+            assert!(matches!(
+                parsed.command,
+                Command::Managed(ManagedArgs {
+                    action: ManagedCommand::Connect(ManagedConnectArgs {
+                        routes: RouteArgs {
+                            policy: RoutingOverrideArgs {
+                                routing_mode: Some(UserRoutingMode::Custom),
+                                block_ipv6: false,
+                                allow_ipv6: true,
+                            },
+                            routes,
+                            ..
+                        },
+                        ..
+                    }),
+                    ..
+                }) if routes == ["10.0.0.0/8"]
+            ));
+        }
+    }
+
+    #[derive(Default)]
+    struct QueuePacketDevice {
+        reads: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+        writes: std::sync::Mutex<Vec<Vec<u8>>>,
+        active: AtomicBool,
+    }
+
+    impl PacketDevice for QueuePacketDevice {
+        fn name(&self) -> &'static str {
+            "queue0"
+        }
+
+        fn activate_session(&self, _session: &openiwan::SessionInfo) -> Result<()> {
+            self.active.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn deactivate_session(&self) -> Result<()> {
+            self.active.store(false, Ordering::Release);
+            Ok(())
+        }
+
+        fn read_packet(&self, buffer: &mut [u8]) -> io::Result<usize> {
+            let packet = self
+                .reads
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "empty"))?;
+            buffer[..packet.len()].copy_from_slice(&packet);
+            Ok(packet.len())
+        }
+
+        fn write_packet(&self, packet: &[u8]) -> io::Result<usize> {
+            self.writes.lock().unwrap().push(packet.to_vec());
+            Ok(packet.len())
+        }
+    }
+
+    #[test]
+    fn ipv6_blocking_device_drops_both_packet_directions() {
+        let inner = Arc::new(QueuePacketDevice::default());
+        inner
+            .reads
+            .lock()
+            .unwrap()
+            .extend([vec![0x60, 0, 0, 0], vec![0x45, 0, 0, 0]]);
+        let device = Ipv6BlockingDevice::new(Arc::clone(&inner), true);
+        let mut buffer = [0_u8; 64];
+
+        assert_eq!(device.read_packet(&mut buffer).unwrap(), 4);
+        assert_eq!(buffer[0] >> 4, 4);
+        assert_eq!(device.write_packet(&[0x60, 1, 2, 3]).unwrap(), 4);
+        assert!(inner.writes.lock().unwrap().is_empty());
+        assert_eq!(device.write_packet(&[0x45, 1, 2, 3]).unwrap(), 4);
+        assert_eq!(&*inner.writes.lock().unwrap(), &[vec![0x45, 1, 2, 3]]);
+
+        let session = openiwan::SessionInfo {
+            peer: "192.0.2.1:6001".parse().unwrap(),
+            session_id: 1,
+            token: 2,
+            encryption: EncryptionMethod::Xor,
+            mtu: 1400,
+            address: Some("198.18.0.2".parse().unwrap()),
+            gateway: None,
+            dns_servers: Vec::new(),
+            segment_routing: false,
+        };
+        device.activate_session(&session).unwrap();
+        assert!(inner.active.load(Ordering::Acquire));
+        device.deactivate_session().unwrap();
+        assert!(!inner.active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ipv6_capture_routes_exclude_the_active_ipv6_peer() {
+        let peer: IpAddr = "2001:db8::1".parse().unwrap();
+        let mut cidrs = Vec::new();
+        append_ipv6_capture_routes(&mut cidrs, true);
+        let routes = resolve_route_policy(&cidrs, &[], &[], &[], peer, false).unwrap();
+
+        assert!(routes.iter().any(|route| route.starts_with("8000::/1")));
+        assert!(!routes.iter().any(|route| cidr_contains(route, peer)));
+        assert!(
+            routes
+                .iter()
+                .any(|route| cidr_contains(route, "2001:db8::2".parse().unwrap()))
+        );
+    }
+
+    fn cidr_contains(cidr: &str, candidate: IpAddr) -> bool {
+        let (network, prefix) = cidr.split_once('/').unwrap();
+        let network = network.parse::<IpAddr>().unwrap();
+        let prefix = prefix.parse::<u8>().unwrap();
+        match (network, candidate) {
+            (IpAddr::V4(network), IpAddr::V4(candidate)) => {
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                u32::from(network) & mask == u32::from(candidate) & mask
+            }
+            (IpAddr::V6(network), IpAddr::V6(candidate)) => {
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                u128::from(network) & mask == u128::from(candidate) & mask
+            }
+            _ => false,
+        }
+    }
+
     #[cfg(feature = "managed")]
     #[test]
     fn parses_managed_login_command() {
@@ -2347,6 +2855,7 @@ mod tests {
                 username: Some("alice".into()),
                 unset_username: false,
                 line: None,
+                routing: ProfileRoutingArgs::default(),
                 dns: DnsOverrideArgs::default(),
                 reset_dns: false,
                 unset_dns: Vec::new(),
@@ -2429,6 +2938,164 @@ mod tests {
                 ..
             }) if name == "work"
         ));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn managed_routing_precedence_and_custom_route_sources_are_stable() {
+        let controller = openiwan::managed::RoutingConfiguration {
+            mode: RoutingMode::Custom,
+            custom_routes: vec!["172.16.0.0/12".into()],
+            mtu_mode: "server".into(),
+            custom_mtu: 0,
+        };
+        let profile = state::RoutingOverrides {
+            mode: Some(UserRoutingMode::Custom),
+            routes: vec!["10.0.0.0/8".into()],
+            block_ipv6: true,
+        };
+        let mut command = RouteArgs::default();
+        command.routes.push("192.0.2.0/24".into());
+
+        let profile_selection = select_managed_routing(&command, &profile, Some(&controller));
+        assert_eq!(
+            profile_selection,
+            ManagedRoutingSelection {
+                mode: RoutingMode::Custom,
+                user_overridden: true,
+                block_ipv6: true,
+            }
+        );
+        let cidrs = collect_managed_cidrs(
+            &command,
+            &profile,
+            Some(&controller),
+            &["100.64.0.0/10".into()],
+            profile_selection,
+        );
+        assert!(cidrs.contains(&"10.0.0.0/8".into()));
+        assert!(cidrs.contains(&"192.0.2.0/24".into()));
+        assert!(cidrs.contains(&"100.64.0.0/10".into()));
+        assert!(!cidrs.contains(&"172.16.0.0/12".into()));
+        assert!(cidrs.contains(&"::/1".into()));
+        assert!(cidrs.contains(&"8000::/1".into()));
+
+        command.policy.routing_mode = Some(UserRoutingMode::All);
+        command.policy.allow_ipv6 = true;
+        let cli_selection = select_managed_routing(&command, &profile, Some(&controller));
+        assert_eq!(
+            cli_selection,
+            ManagedRoutingSelection {
+                mode: RoutingMode::All,
+                user_overridden: true,
+                block_ipv6: false,
+            }
+        );
+
+        let inherited = select_managed_routing(
+            &RouteArgs::default(),
+            &state::RoutingOverrides::default(),
+            Some(&controller),
+        );
+        let inherited_cidrs = collect_managed_cidrs(
+            &RouteArgs::default(),
+            &state::RoutingOverrides::default(),
+            Some(&controller),
+            &[],
+            inherited,
+        );
+        assert_eq!(inherited.mode, RoutingMode::Custom);
+        assert!(inherited_cidrs.contains(&"172.16.0.0/12".into()));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn profile_routing_updates_replace_and_clear_saved_routes() {
+        let store = test_state_store("profile-routing");
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "profile",
+            "set",
+            "work",
+            "--domain",
+            "iwan.example",
+            "--routing-mode",
+            "custom",
+            "--route",
+            "10.1.2.3/8",
+            "--block-ipv6",
+        ])
+        .unwrap();
+        let Command::Profile(ProfileArgs {
+            command: ProfileCommand::Set(arguments),
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected profile set");
+        };
+        set_profile(*arguments, &store).unwrap();
+
+        let profile = &store.load().unwrap().profiles["work"];
+        assert_eq!(profile.routing.mode, Some(UserRoutingMode::Custom));
+        assert_eq!(profile.routing.routes, ["10.0.0.0/8"]);
+        assert!(profile.routing.block_ipv6);
+
+        let parsed = Cli::try_parse_from([
+            "openiwan",
+            "profile",
+            "set",
+            "work",
+            "--unset-routing-mode",
+            "--route",
+            "192.0.2.0/24",
+            "--allow-ipv6",
+        ])
+        .unwrap();
+        let Command::Profile(ProfileArgs {
+            command: ProfileCommand::Set(arguments),
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected profile set");
+        };
+        set_profile(*arguments, &store).unwrap();
+
+        let persisted = store.load().unwrap();
+        let profile = &persisted.profiles["work"];
+        assert_eq!(profile.routing.mode, None);
+        assert_eq!(profile.routing.routes, ["192.0.2.0/24"]);
+        assert!(!profile.routing.block_ipv6);
+        assert_eq!(
+            profile_json("work", profile, Some("work"))["routing"]["routes"][0],
+            "192.0.2.0/24"
+        );
+        assert_eq!(
+            profile_json("work", profile, Some("work"))["routing"]["mode"],
+            "inherit"
+        );
+        assert_eq!(
+            profile_json("work", profile, Some("work"))["routing"]["block_ipv6"],
+            false
+        );
+
+        let parsed =
+            Cli::try_parse_from(["openiwan", "profile", "set", "work", "--unset-routes"]).unwrap();
+        let Command::Profile(ProfileArgs {
+            command: ProfileCommand::Set(arguments),
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected profile set");
+        };
+        set_profile(*arguments, &store).unwrap();
+        assert!(
+            store.load().unwrap().profiles["work"]
+                .routing
+                .routes
+                .is_empty()
+        );
+
+        fs::remove_dir_all(store.directory()).unwrap();
     }
 
     #[cfg(feature = "managed")]

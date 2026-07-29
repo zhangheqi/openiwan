@@ -238,10 +238,23 @@ Managed `connect` applies the controller routing settings:
 - `custom` installs the IP-filter base when present, then the comma-separated
   `custom_routes`.
 
+Users can override the controller's visible routing choice with
+`--routing-mode all|custom`, either for one connection or in a profile. The
+precedence is command line, profile, then controller. A user-selected custom
+mode preserves the controller IP-filter base but replaces controller
+`custom_routes` with saved and one-shot routes. Controller `ipfilter` is not a
+user-selectable CLI value.
+
 The active UDP peer, all resolved ingress addresses, loopback, IPv4 multicast,
 and link-local IPv4 remain outside the tunnel. Full routing is represented as
 a CIDR difference instead of an unsafe default route that could feed the UDP
 transport back into its own TUN.
+
+`--block-ipv6` adds connection-scoped IPv6 capture routes and drops IPv6 in
+both packet directions. Required IPv6 control endpoints stay outside those
+routes, while physical IPv6 DNS resolvers are disabled. `--allow-ipv6`
+overrides a saved block. The setting is a TUN-routing leak guard rather than a
+persistent system firewall.
 
 `dns_mode=server` resolves serverlist custom/disabled/auto behavior and then
 OPEN_ACK DNS. Invalid serverlist custom entries fall through to OPEN_ACK;

@@ -87,6 +87,13 @@ Open a tunnel for one route:
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8
 ```
 
+Use all-IPv4 routing and prevent ordinary IPv6 traffic from bypassing the
+tunnel:
+
+```console
+sudo openiwan connect --server 192.0.2.10:6001 --username alice --routing-mode all --block-ipv6
+```
+
 Windows users run tunnel commands from an elevated terminal without `sudo`.
 If `OPENIWAN_PASSWORD` is unset, the CLI prompts without echoing the password.
 A protected `--password-file` is also supported; passwords are never accepted
@@ -97,7 +104,7 @@ as command-line values.
 Create a reusable, non-secret profile:
 
 ```console
-openiwan profile set work --domain iwan.example --username alice
+openiwan profile set work --domain iwan.example --username alice --routing-mode all --block-ipv6
 ```
 
 Inspect discovery, save verified authentication to the operating-system

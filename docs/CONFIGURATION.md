@@ -61,9 +61,9 @@ write it by hand.
 
 ## Routes
 
-Direct `connect` starts with no data routes. Managed `connect` starts with the
-controller routing policy. In both cases, command-line routes add to the
-effective policy:
+Direct `connect` defaults to `custom` with no data routes. Managed `connect`
+defaults to the controller routing policy. `--routing-mode all|custom`
+overrides that selection, and command-line routes add to the effective policy:
 
 - `--route CIDR` adds a prefix;
 - `--route-ip IP` adds a `/32` or `/128` host route;
@@ -81,7 +81,20 @@ Managed routing modes are:
 |---|---|
 | `all` | All IPv4 destinations minus required exclusions |
 | `ipfilter` | Inclusive prefixes minus exclusive prefixes |
-| `custom` | IP-filter base plus controller custom routes |
+| `custom` | IP-filter base plus effective custom routes |
+
+The user-visible modes are `all` and `custom`. Controller `ipfilter` remains
+available only when inherited. A command-line mode wins over a profile, which
+wins over the controller. When the user selects `custom`, controller IP-filter
+rules remain the base but controller `custom_routes` are replaced by profile
+and command-line routes.
+
+`--block-ipv6` captures IPv6 through the active TUN and drops it instead of
+sending it through iWAN. `--allow-ipv6` overrides a saved block for one
+connection. This is connection-scoped protection for ordinary routing, not a
+host firewall; it does not disable interface IPv6 or promise to override
+privileged interface-bound sockets and pre-existing more-specific routes.
+Physical IPv6 DNS resolvers are not used while blocking is active.
 
 All route and interface changes use rollback guards. Dropping the session
 restores replaced state in reverse order.
@@ -170,6 +183,7 @@ A profile contains:
 - optional username;
 - stable line preference;
 - non-secret DNS overrides;
+- optional routing mode, custom CIDRs, and an IPv6 block preference;
 - an opaque credential-store identifier when authentication has been saved.
 
 It never contains a password, access token, refresh token, controller
@@ -192,6 +206,18 @@ cache data is stored in its `cache` child unless `--cache-dir` is passed.
 
 Changing a profile's domain, Device ID, or username invalidates its associated
 saved authentication. Removing a profile deletes that authentication.
+
+Profile routing can be updated with:
+
+```console
+openiwan profile set work --routing-mode custom --route 10.0.0.0/8 --block-ipv6
+openiwan profile set work --unset-routing-mode --unset-routes --allow-ipv6
+```
+
+One or more `--route` values replace the saved CIDR list as a group.
+`--unset-routing-mode` returns to controller inheritance and `--unset-routes`
+clears the saved list. `--route-ip` and `--route-domain` remain one-shot
+connection options.
 
 ## Credential storage
 

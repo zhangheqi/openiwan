@@ -36,6 +36,8 @@ and public managed APIs.
   resolver relay, reconnect-aware generations, and platform DNS leases.
 - Controller-driven `all`, `ipfilter`, and `custom` TUN routing with
   transport-loop exclusions and rollback.
+- User-selectable `--routing-mode all|custom` overrides, persistent profile
+  routes, and connection-scoped `--block-ipv6` leak prevention.
 - Route-free forwarding for raw TCP and fixed-origin HTTP(S), available for
   both direct and managed authentication.
 - Typed managed keepalive request, response, and metric models with canonical
@@ -67,6 +69,8 @@ and public managed APIs.
 - Added the public `openiwan::dns` policy/runtime API and session lifecycle
   hooks on `PacketDevice`; direct and managed TUN connections now share DNS
   enforcement.
+- Added `DnsRuntime::with_physical_ipv6` so a TUN policy can prevent the
+  physical DNS relay from bypassing an IPv6 block.
 - Aligned the wire profile with the analyzed 2.3.0 client behavior: Java
   US-ASCII credentials, canonical OPEN TLV order, optional-but-validated
   AUTH_VERIFY, eight-byte XOR repetition, 20-byte little-endian heartbeat,

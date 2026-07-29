@@ -87,6 +87,12 @@ Open a tunnel with explicit routes:
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8 --route 2001:db8::/32
 ```
 
+Open an all-IPv4 tunnel and block IPv6 bypass while it is active:
+
+```console
+sudo openiwan connect --server 192.0.2.10:6001 --username alice --routing-mode all --block-ipv6
+```
+
 `--server` may be replaced by `--config FILE`. Command-line connection
 options override values loaded from TOML where both are supported.
 
@@ -97,6 +103,9 @@ The route options are:
 | `--route CIDR` | Add a network prefix |
 | `--route-ip IP` | Add a host route |
 | `--route-domain DOMAIN` | Resolve once, then add host routes for the result |
+| `--routing-mode all|custom` | Select all-IPv4 or custom routing |
+| `--block-ipv6` | Capture and drop IPv6 for this connection |
+| `--allow-ipv6` | Override a saved IPv6 block |
 
 Default routes and routes containing the active iWAN endpoint are rejected.
 See [Configuration](CONFIGURATION.md) for route and DNS policy details.
@@ -194,7 +203,13 @@ Profile updates are partial:
 openiwan profile set work --line sr:3
 openiwan profile set work --unset-username
 openiwan profile set work --reset-dns
+openiwan profile set work --routing-mode custom --route 10.0.0.0/8 --block-ipv6
 ```
+
+Profile `--route` values replace the saved CIDR list. Use
+`--unset-routing-mode`, `--unset-routes`, or `--allow-ipv6` to clear the
+corresponding saved behavior. A connect-time routing mode or IPv6 flag wins
+over the profile; one-shot route targets remain additive.
 
 Line preferences use stable controller identifiers:
 

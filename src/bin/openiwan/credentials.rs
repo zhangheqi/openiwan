@@ -166,39 +166,32 @@ fn load_from<S: SecretStore>(store: &S, account: &str) -> Result<Option<StoredCr
     };
     let manifest = decode_manifest(&manifest_bytes)?;
     let length = usize::try_from(manifest.current.length)
-        .map_err(|_| invalid_format("saved authentication length is too large"))?;
+        .map_err(|_| invalid_format("data length is too large"))?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(length));
     for index in 0..manifest.current.chunks {
         let chunk_account = chunk_account(account, &manifest.current.generation, index);
         let Some(chunk) = store.read(&chunk_account)? else {
-            return Err(invalid_format(format!(
-                "saved authentication chunk {index} is missing"
-            )));
+            return Err(invalid_format(format!("data chunk {index} is missing")));
         };
         if chunk.len() > SECRET_CHUNK_SIZE {
-            return Err(invalid_format(format!(
-                "saved authentication chunk {index} is too large"
-            )));
+            return Err(invalid_format(format!("data chunk {index} is too large")));
         }
         bytes.extend_from_slice(&chunk);
     }
     if bytes.len() != length {
         return Err(invalid_format(format!(
-            "saved authentication length is {}; expected {length}",
+            "data length is {}; expected {length}",
             bytes.len()
         )));
     }
     if Sha256::digest(bytes.as_slice()).as_slice() != manifest.current.sha256 {
-        return Err(invalid_format(
-            "saved authentication failed its integrity check",
-        ));
+        return Err(invalid_format("integrity check failed"));
     }
-    let envelope: CredentialEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
-        invalid_format(format!("saved authentication is not valid JSON: {error}"))
-    })?;
+    let envelope: CredentialEnvelope = serde_json::from_slice(&bytes)
+        .map_err(|error| invalid_format(format!("data is not valid JSON: {error}")))?;
     if envelope.version != CREDENTIAL_VERSION {
         return Err(invalid_format(format!(
-            "unsupported saved authentication version {}; expected {CREDENTIAL_VERSION}",
+            "unsupported credential version {}; expected {CREDENTIAL_VERSION}",
             envelope.version
         )));
     }
@@ -216,7 +209,7 @@ fn save_to<S: SecretStore>(store: &S, account: &str, credential: StoredCredentia
     };
     if obsolete.len() > MAX_OBSOLETE_CHUNK_SETS {
         return Err(Error::CredentialStore(
-            "too many stale saved-authentication entries could not be removed".into(),
+            "too many stale credential entries could not be removed".into(),
         ));
     }
 
@@ -224,16 +217,16 @@ fn save_to<S: SecretStore>(store: &S, account: &str, credential: StoredCredentia
         version: CREDENTIAL_VERSION,
         credential,
     };
-    let bytes =
-        Zeroizing::new(serde_json::to_vec(&envelope).map_err(|error| {
-            Error::CredentialStore(format!("serialize authentication: {error}"))
-        })?);
+    let bytes = Zeroizing::new(
+        serde_json::to_vec(&envelope)
+            .map_err(|error| Error::CredentialStore(format!("serialize credentials: {error}")))?,
+    );
     let chunk_count = bytes.len().div_ceil(SECRET_CHUNK_SIZE);
     let chunks = u32::try_from(chunk_count)
-        .map_err(|_| Error::CredentialStore("saved authentication is too large to store".into()))?;
+        .map_err(|_| Error::CredentialStore("credentials are too large to store".into()))?;
     if chunks == 0 || chunks > MAX_CREDENTIAL_CHUNKS {
         return Err(Error::CredentialStore(
-            "saved authentication is too large to store".into(),
+            "credentials are too large to store".into(),
         ));
     }
 
@@ -241,9 +234,8 @@ fn save_to<S: SecretStore>(store: &S, account: &str, credential: StoredCredentia
     let current = CurrentChunkSet {
         generation,
         chunks,
-        length: u64::try_from(bytes.len()).map_err(|_| {
-            Error::CredentialStore("saved authentication is too large to store".into())
-        })?,
+        length: u64::try_from(bytes.len())
+            .map_err(|_| Error::CredentialStore("credentials are too large to store".into()))?,
         sha256: Sha256::digest(bytes.as_slice()).into(),
     };
     let mut manifest = CredentialManifest {
@@ -294,7 +286,7 @@ fn delete_from<S: SecretStore>(store: &S, account: &str) -> Result<bool> {
     let remaining = cleanup_chunk_sets(store, account, &sets);
     if !remaining.is_empty() {
         return Err(Error::CredentialStore(
-            "delete saved-authentication chunks from the operating-system credential store".into(),
+            "delete credential data from the operating-system credential store".into(),
         ));
     }
     store.delete(account)?;
@@ -314,22 +306,19 @@ fn replacement_manifest<S: SecretStore>(
 
 fn encode_manifest(manifest: &CredentialManifest) -> Result<Zeroizing<Vec<u8>>> {
     let bytes = Zeroizing::new(serde_json::to_vec(manifest).map_err(|error| {
-        Error::CredentialStore(format!("serialize authentication metadata: {error}"))
+        Error::CredentialStore(format!("serialize credential metadata: {error}"))
     })?);
     if bytes.len() > SECRET_CHUNK_SIZE {
         return Err(Error::CredentialStore(
-            "saved-authentication metadata is too large to store".into(),
+            "credential metadata is too large to store".into(),
         ));
     }
     Ok(bytes)
 }
 
 fn decode_manifest(bytes: &[u8]) -> Result<CredentialManifest> {
-    let manifest: CredentialManifest = serde_json::from_slice(bytes).map_err(|error| {
-        invalid_format(format!(
-            "saved authentication metadata is not valid JSON: {error}"
-        ))
-    })?;
+    let manifest: CredentialManifest = serde_json::from_slice(bytes)
+        .map_err(|error| invalid_format(format!("metadata is not valid JSON: {error}")))?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -337,22 +326,18 @@ fn decode_manifest(bytes: &[u8]) -> Result<CredentialManifest> {
 fn validate_manifest(manifest: &CredentialManifest) -> Result<()> {
     if manifest.version != STORAGE_VERSION {
         return Err(invalid_format(format!(
-            "unsupported saved-authentication storage version {}; expected {STORAGE_VERSION}",
+            "unsupported storage version {}; expected {STORAGE_VERSION}",
             manifest.version
         )));
     }
     validate_chunk_set(&manifest.current.generation, manifest.current.chunks)?;
     let length = usize::try_from(manifest.current.length)
-        .map_err(|_| invalid_format("saved authentication length is too large"))?;
+        .map_err(|_| invalid_format("data length is too large"))?;
     if length == 0 || length.div_ceil(SECRET_CHUNK_SIZE) != manifest.current.chunks as usize {
-        return Err(invalid_format(
-            "saved authentication metadata has an inconsistent length",
-        ));
+        return Err(invalid_format("metadata has an inconsistent length"));
     }
     if manifest.obsolete.len() > MAX_OBSOLETE_CHUNK_SETS {
-        return Err(invalid_format(
-            "saved authentication metadata contains too many stale entries",
-        ));
+        return Err(invalid_format("metadata contains too many stale entries"));
     }
     for (index, set) in manifest.obsolete.iter().enumerate() {
         validate_chunk_set(&set.generation, set.chunks)?;
@@ -361,9 +346,7 @@ fn validate_manifest(manifest: &CredentialManifest) -> Result<()> {
                 .iter()
                 .any(|other| other.generation == set.generation)
         {
-            return Err(invalid_format(
-                "saved authentication metadata contains duplicate generations",
-            ));
+            return Err(invalid_format("metadata contains duplicate generations"));
         }
     }
     Ok(())
@@ -375,14 +358,10 @@ fn validate_chunk_set(generation: &str, chunks: u32) -> Result<()> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(invalid_format(
-            "saved authentication metadata has an invalid generation",
-        ));
+        return Err(invalid_format("metadata has an invalid generation"));
     }
     if chunks == 0 || chunks > MAX_CREDENTIAL_CHUNKS {
-        return Err(invalid_format(
-            "saved authentication metadata has an invalid chunk count",
-        ));
+        return Err(invalid_format("metadata has an invalid chunk count"));
     }
     Ok(())
 }
@@ -447,10 +426,7 @@ fn entry(account: &str) -> Result<Entry> {
 }
 
 fn invalid_format(message: impl Into<String>) -> Error {
-    Error::CredentialStore(format!(
-        "saved authentication has an invalid format: {}",
-        message.into()
-    ))
+    Error::CredentialStore(format!("invalid saved credentials: {}", message.into()))
 }
 
 fn store_error(operation: &str, error: KeyringError) -> Error {

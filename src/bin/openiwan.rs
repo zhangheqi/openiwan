@@ -48,9 +48,9 @@ use tracing_subscriber::EnvFilter;
 use zeroize::Zeroize;
 
 #[derive(Debug, Parser)]
-#[command(name = "openiwan", version, about = "Connect to iWAN networks")]
+#[command(name = "openiwan", version, about = "iWAN command-line client")]
 struct Cli {
-    /// Increase logging output. Repeat for more detail.
+    /// Increase verbosity (-vv for more).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
@@ -62,28 +62,28 @@ struct Cli {
 enum Command {
     /// Probe an iWAN server.
     Ping(PingArgs),
-    /// Authenticate without opening a tunnel.
+    /// Authenticate and exit.
     Auth(ConnectionArgs),
     /// Open an iWAN tunnel.
     Connect(ConnectArgs),
-    /// Forward TCP or HTTP(S) through iWAN.
+    /// Forward TCP or HTTP traffic through iWAN.
     #[cfg(feature = "forward")]
     Forward(ForwardArgs),
     /// Decode an iWAN packet.
     Decode(DecodeArgs),
-    /// Use controller-managed iWAN services.
+    /// Manage controller-based connections.
     #[cfg(feature = "managed")]
     Managed(ManagedArgs),
-    /// Manage connection profiles.
+    /// Manage profiles.
     #[cfg(feature = "managed")]
     Profile(ProfileArgs),
 }
 
 #[derive(Debug, Args)]
 struct PingArgs {
-    /// iWAN server in HOST:PORT form.
+    /// iWAN server (HOST:PORT).
     server: String,
-    /// Wait at most DURATION for a reply.
+    /// Set the reply timeout.
     #[arg(
         long,
         value_name = "DURATION",
@@ -95,25 +95,25 @@ struct PingArgs {
 
 #[derive(Debug, Clone, Args)]
 struct ConnectionArgs {
-    /// Load connection settings from a TOML file.
+    /// Read settings from FILE.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
-    /// Connect to the iWAN server at HOST:PORT.
+    /// Connect to HOST:PORT.
     #[arg(long, value_name = "HOST:PORT")]
     server: Option<String>,
-    /// Authenticate as USER.
+    /// Log in as USER.
     #[arg(long, value_name = "USER")]
     username: String,
-    /// Read the password from ENV before prompting.
+    /// Read the password from ENV.
     #[arg(long, value_name = "ENV", default_value = "OPENIWAN_PASSWORD")]
     password_env: String,
     /// Read the password from the first line of FILE.
     #[arg(long, value_name = "FILE")]
     password_file: Option<PathBuf>,
-    /// Set the packet MTU.
+    /// Set the packet MTU to BYTES.
     #[arg(long, value_name = "BYTES")]
     mtu: Option<u16>,
-    /// Set the session cipher.
+    /// Use CIPHER for the session.
     #[arg(long, value_name = "CIPHER")]
     encryption: Option<EncryptionMethod>,
 }
@@ -122,7 +122,7 @@ struct ConnectionArgs {
 struct ConnectArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
-    /// Name the TUN interface.
+    /// Use NAME for the TUN interface.
     #[arg(long, value_name = "NAME")]
     tun: Option<String>,
     #[command(flatten)]
@@ -143,20 +143,20 @@ struct ForwardArgs {
 #[cfg(feature = "forward")]
 #[derive(Debug, Clone, Args)]
 struct ForwardOptions {
-    /// Forward to a tcp://, http://, or https:// URI.
+    /// Forward to URI (tcp://, http://, or https://).
     #[arg(long, value_name = "URI", value_parser = forward::parse_target_argument)]
     target: String,
-    /// Resolve the target using auto, tunnel, or system DNS.
+    /// Resolve the target with MODE.
     #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
     resolve: ResolveViaArg,
-    /// Query a DNS server through iWAN. Repeat to add servers.
+    /// Query HOST[:PORT] through iWAN. May be repeated.
     #[arg(
         long = "dns-server",
         value_name = "HOST[:PORT]",
         value_parser = parse_resolver
     )]
     dns_servers: Vec<SocketAddr>,
-    /// Wait at most DURATION for each DNS server.
+    /// Set the timeout for each DNS server.
     #[arg(
         long,
         value_name = "DURATION",
@@ -164,13 +164,13 @@ struct ForwardOptions {
         value_parser = parse_duration
     )]
     dns_timeout: Duration,
-    /// Listen on a loopback address.
+    /// Listen on loopback HOST:PORT.
     #[arg(long, value_name = "HOST:PORT", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
-    /// Trust an additional PEM CA certificate. Repeat to add files.
+    /// Trust the PEM certificate in FILE. May be repeated.
     #[arg(long = "ca-cert", value_name = "FILE")]
     ca_certificates: Vec<PathBuf>,
-    /// Complete DNS, TCP, and TLS setup within DURATION.
+    /// Set the DNS, TCP, and TLS setup timeout.
     #[arg(
         long,
         value_name = "DURATION",
@@ -233,22 +233,22 @@ fn parse_duration(value: &str) -> std::result::Result<Duration, String> {
 
 #[derive(Debug, Clone, Default, Args)]
 struct DnsOverrideArgs {
-    /// Select the DNS server source.
+    /// Select the DNS source.
     #[arg(long, value_name = "MODE", value_enum)]
     dns_mode: Option<DnsServerModeArg>,
-    /// Use a custom IPv4 DNS server. Repeat to add a server.
+    /// Use IP as a DNS server. May be repeated.
     #[arg(long = "dns-server", value_name = "IP")]
     dns_servers: Vec<Ipv4Addr>,
-    /// Set split DNS behavior.
+    /// Set the split DNS mode.
     #[arg(long, value_name = "MODE", value_enum)]
     split_dns_mode: Option<SplitDnsModeArg>,
-    /// Add an iWAN domain rule. Repeat to add rules.
+    /// Add split DNS rule RULE. May be repeated.
     #[arg(long = "split-dns-domain", value_name = "RULE")]
     split_dns_domains: Vec<DomainRule>,
-    /// Set encrypted DNS handling.
+    /// Set the encrypted DNS mode.
     #[arg(long, value_name = "MODE", value_enum)]
     encrypted_dns: Option<EncryptedDnsModeArg>,
-    /// Block an exact `DoH` hostname. Repeat to add hosts.
+    /// Block DNS-over-HTTPS host HOST. May be repeated.
     #[arg(long = "doh-host", value_name = "HOST")]
     doh_hosts: Vec<String>,
 }
@@ -396,13 +396,13 @@ impl std::fmt::Display for UserRoutingMode {
 
 #[derive(Debug, Clone, Default, Args)]
 struct RoutingOverrideArgs {
-    /// Select all-IPv4 or custom routing.
+    /// Set the routing mode.
     #[arg(long, value_name = "MODE", value_enum)]
     routing_mode: Option<UserRoutingMode>,
-    /// Capture and drop IPv6 traffic while a tunnel is active.
+    /// Block IPv6 outside the tunnel.
     #[arg(long, conflicts_with = "allow_ipv6")]
     block_ipv6: bool,
-    /// Allow IPv6 outside the tunnel, overriding a lower-precedence block.
+    /// Allow IPv6 outside the tunnel.
     #[arg(long, conflicts_with = "block_ipv6")]
     allow_ipv6: bool,
 }
@@ -423,20 +423,20 @@ impl RoutingOverrideArgs {
 struct RouteArgs {
     #[command(flatten)]
     policy: RoutingOverrideArgs,
-    /// Route a CIDR through iWAN. Repeat to add routes.
+    /// Route CIDR through iWAN. May be repeated.
     #[arg(long = "route", value_name = "CIDR", value_delimiter = ',')]
     routes: Vec<String>,
-    /// Route an IP address through iWAN. Repeat to add addresses.
+    /// Route IP through iWAN. May be repeated.
     #[arg(long = "route-ip", value_name = "IP", value_delimiter = ',')]
     route_ips: Vec<String>,
-    /// Resolve a domain and route its addresses through iWAN.
+    /// Route addresses resolved for DOMAIN. May be repeated.
     #[arg(long = "route-domain", value_name = "DOMAIN", value_delimiter = ',')]
     route_domains: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 struct DecodeArgs {
-    /// Packet bytes in hexadecimal. Whitespace, ':' and '-' are ignored.
+    /// Hexadecimal packet. Whitespace, ':' and '-' are ignored.
     hex: String,
 }
 
@@ -450,26 +450,26 @@ struct ManagedArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Subcommand)]
 enum ManagedCommand {
-    /// Show domain and authentication details.
+    /// Show discovered domain settings.
     Discover(ManagedDiscoverArgs),
-    /// Authenticate, test the selected line, and save authentication.
+    /// Log in and save credentials.
     Login(ManagedLoginArgs),
-    /// Open a managed iWAN tunnel.
+    /// Open a managed tunnel.
     Connect(ManagedConnectArgs),
-    /// Forward TCP or HTTP(S) through a managed connection.
+    /// Forward traffic through a managed connection.
     #[cfg(feature = "forward")]
     Forward(ManagedForwardArgs),
-    /// List available lines and their latency.
+    /// List available lines.
     Lines(ManagedLinesArgs),
 }
 
 #[cfg(feature = "managed")]
 #[derive(Debug, Clone, Default, Args)]
 struct ManagedTargetArgs {
-    /// Use a connection profile.
+    /// Use profile NAME.
     #[arg(long, value_name = "NAME", conflicts_with = "domain")]
     profile: Option<String>,
-    /// Use a customer domain without a profile.
+    /// Use DOMAIN without a profile.
     #[arg(long, value_name = "DOMAIN", conflicts_with = "profile")]
     domain: Option<String>,
 }
@@ -477,7 +477,7 @@ struct ManagedTargetArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Clone, Default, Args)]
 struct ManagedProfileTargetArgs {
-    /// Use a connection profile. Defaults to the default profile.
+    /// Use profile NAME. Uses the default if omitted.
     #[arg(long, value_name = "NAME")]
     profile: Option<String>,
 }
@@ -485,16 +485,16 @@ struct ManagedProfileTargetArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Clone, Default, Args)]
 struct ManagedAuthArgs {
-    /// Authenticate as USER for a credential domain.
+    /// Log in as USER.
     #[arg(long, value_name = "USER")]
     username: Option<String>,
     /// Read the password from the first line of FILE.
     #[arg(long, value_name = "FILE")]
     password_file: Option<PathBuf>,
-    /// Read posture check results from a JSON file.
+    /// Read posture results from FILE.
     #[arg(long, value_name = "FILE")]
     posture_results: Option<PathBuf>,
-    /// Fail instead of prompting or opening an OIDC login.
+    /// Disable interactive authentication.
     #[arg(long)]
     non_interactive: bool,
 }
@@ -518,7 +518,7 @@ struct ManagedLoginArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Clone, Default, Args)]
 struct ManagedConnectionOverrideArgs {
-    /// Use auto, iwan:ID, or sr:ID for this command only.
+    /// Use LINE for this command (auto, iwan:ID, or sr:ID).
     #[arg(long, value_name = "LINE")]
     line: Option<LinePreference>,
 }
@@ -532,7 +532,7 @@ struct ManagedConnectArgs {
     auth: ManagedAuthArgs,
     #[command(flatten)]
     connection: ManagedConnectionOverrideArgs,
-    /// Name the TUN interface.
+    /// Use NAME for the TUN interface.
     #[arg(long, value_name = "NAME")]
     tun: Option<String>,
     #[command(flatten)]
@@ -561,7 +561,7 @@ struct ManagedLinesArgs {
     target: ManagedTargetArgs,
     #[command(flatten)]
     auth: ManagedAuthArgs,
-    /// Print machine-readable JSON.
+    /// Output JSON.
     #[arg(long)]
     json: bool,
 }
@@ -578,21 +578,21 @@ struct ProfileArgs {
 enum ProfileCommand {
     /// List profiles.
     List {
-        /// Print machine-readable JSON.
+        /// Output JSON.
         #[arg(long)]
         json: bool,
     },
     /// Show a profile.
     Show {
-        /// Profile name. Defaults to the default profile.
+        /// Profile name. Uses the default if omitted.
         name: Option<String>,
-        /// Print machine-readable JSON.
+        /// Output JSON.
         #[arg(long)]
         json: bool,
     },
     /// Create or update a profile.
     Set(Box<ProfileSetArgs>),
-    /// Select the default profile.
+    /// Set the default profile.
     Use {
         /// Profile name.
         name: String,
@@ -602,9 +602,9 @@ enum ProfileCommand {
         /// Profile name.
         name: String,
     },
-    /// Delete saved authentication for a profile.
+    /// Delete saved credentials.
     Logout {
-        /// Profile name. Defaults to the default profile.
+        /// Profile name. Uses the default if omitted.
         name: Option<String>,
     },
 }
@@ -614,10 +614,10 @@ enum ProfileCommand {
 struct ProfileRoutingArgs {
     #[command(flatten)]
     overrides: RoutingOverrideArgs,
-    /// Remove the saved routing-mode override.
+    /// Clear the saved routing mode.
     #[arg(long, conflicts_with = "routing_mode")]
     unset_routing_mode: bool,
-    /// Replace the saved custom CIDR list. Repeat to add routes.
+    /// Replace saved routes. May be repeated.
     #[arg(
         long = "route",
         value_name = "CIDR",
@@ -625,7 +625,7 @@ struct ProfileRoutingArgs {
         conflicts_with = "unset_routes"
     )]
     routes: Vec<String>,
-    /// Remove all saved custom CIDRs.
+    /// Clear saved routes.
     #[arg(long)]
     unset_routes: bool,
 }
@@ -635,16 +635,16 @@ struct ProfileRoutingArgs {
 struct ProfileSetArgs {
     /// Profile name.
     name: String,
-    /// Set the customer domain.
+    /// Set the domain.
     #[arg(long, value_name = "DOMAIN")]
     domain: Option<String>,
-    /// Override the installation Device ID.
+    /// Set the device ID.
     #[arg(long, value_name = "ID")]
     device_id: Option<String>,
-    /// Set the saved username.
+    /// Set the username.
     #[arg(long, value_name = "USER", conflicts_with = "unset_username")]
     username: Option<String>,
-    /// Remove the saved username.
+    /// Clear the saved username.
     #[arg(long)]
     unset_username: bool,
     /// Set the preferred line.
@@ -654,10 +654,10 @@ struct ProfileSetArgs {
     routing: ProfileRoutingArgs,
     #[command(flatten)]
     dns: DnsOverrideArgs,
-    /// Remove all saved DNS settings.
+    /// Clear saved DNS settings.
     #[arg(long)]
     reset_dns: bool,
-    /// Remove a saved DNS list. Repeat to remove more lists.
+    /// Clear saved DNS list FIELD. May be repeated.
     #[arg(long, value_name = "FIELD", value_enum)]
     unset_dns: Vec<ProfileDnsListArg>,
 }
@@ -672,7 +672,11 @@ enum ProfileDnsListArg {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("error: {error}");
+        if let Error::InvalidConfig(message) = &error {
+            eprintln!("openiwan: {message}");
+        } else {
+            eprintln!("openiwan: {error}");
+        }
         std::process::exit(1);
     }
 }
@@ -869,27 +873,27 @@ fn run_client(
     let dns_device = Arc::new(DnsPacketDevice::new(Arc::clone(&device), runtime));
     let packet_device = Arc::new(Ipv6BlockingDevice::new(dns_device, block_ipv6));
     for route in &routes {
-        println!("route {route} -> {}", device.name());
+        tracing::debug!(%route, interface = device.name(), "installed route");
     }
     println!(
-        "routing policy: mode={routing_mode}, IPv6={}",
+        "routing: mode={routing_mode}, ipv6={}",
         if block_ipv6 { "blocked" } else { "allowed" }
     );
     print_dns_policy(&policy);
-    println!("TUN {} is active; press Ctrl-C to stop", device.name());
+    println!("interface: {}", device.name());
+    println!("connected; press Ctrl-C to disconnect");
 
     let shutdown = install_shutdown_handler()?;
     let end = client.run_reconnecting_from(session, packet_device, shutdown)?;
-    println!("session ended: {end:?}");
+    println!("disconnected: {}", session_end_label(end));
     Ok(())
 }
 
 fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&shutdown);
-    ctrlc::set_handler(move || signal.store(true, Ordering::Release)).map_err(|error| {
-        Error::InvalidConfig(format!("failed to install signal handler: {error}"))
-    })?;
+    ctrlc::set_handler(move || signal.store(true, Ordering::Release))
+        .map_err(|error| Error::InvalidConfig(format!("install signal handler: {error}")))?;
     Ok(shutdown)
 }
 
@@ -904,7 +908,7 @@ fn run_forward(
     print_session(session.info());
     let shutdown = install_shutdown_handler()?;
     let end = forward::run(client, session, config, shutdown)?;
-    println!("session ended: {end:?}");
+    println!("disconnected: {}", session_end_label(end));
     Ok(())
 }
 
@@ -962,9 +966,41 @@ fn print_dns_policy(policy: &EffectiveDnsPolicy) {
             .join(", ")
     };
     println!(
-        "DNS policy: mode={:?}, servers={servers}, split={:?}, encrypted={}",
-        policy.server_mode, policy.split_mode, policy.block_encrypted_dns
+        "dns: mode={}, servers={servers}, split={}, encrypted={}",
+        dns_server_mode_label(policy.server_mode),
+        split_dns_mode_label(policy.split_mode),
+        if policy.block_encrypted_dns {
+            "blocked"
+        } else {
+            "allowed"
+        }
     );
+}
+
+const fn dns_server_mode_label(mode: DnsServerMode) -> &'static str {
+    match mode {
+        DnsServerMode::Server => "server",
+        DnsServerMode::Custom => "custom",
+        DnsServerMode::Disabled => "disabled",
+    }
+}
+
+const fn split_dns_mode_label(mode: SplitDnsMode) -> &'static str {
+    match mode {
+        SplitDnsMode::Off => "off",
+        SplitDnsMode::TunnelAll => "tunnel-all",
+        SplitDnsMode::Managed => "managed",
+        SplitDnsMode::Custom => "custom",
+    }
+}
+
+const fn session_end_label(end: openiwan::SessionEnd) -> &'static str {
+    match end {
+        openiwan::SessionEnd::LocalShutdown => "local shutdown",
+        openiwan::SessionEnd::ServerClose => "server closed the session",
+        openiwan::SessionEnd::HeartbeatTimeout => "heartbeat timeout",
+        openiwan::SessionEnd::TransportFailure => "transport failure",
+    }
 }
 
 #[cfg(feature = "managed")]
@@ -1101,6 +1137,11 @@ fn load_managed_domain(
 }
 
 #[cfg(feature = "managed")]
+fn profile_not_found(name: &str) -> Error {
+    Error::InvalidConfig(format!("profile not found: {name}"))
+}
+
+#[cfg(feature = "managed")]
 fn resolve_managed_context(
     target: &ManagedTargetArgs,
     store: &state::StateStore,
@@ -1123,13 +1164,13 @@ fn resolve_managed_context(
                 .profiles
                 .get(name)
                 .cloned()
-                .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))
+                .ok_or_else(|| profile_not_found(name))
         })
         .transpose()?;
 
     if profile_required && profile.is_none() {
         return Err(Error::InvalidConfig(
-            "managed login requires --profile or a default profile".into(),
+            "no profile specified and no default profile is set".into(),
         ));
     }
     let domain = target
@@ -1137,7 +1178,7 @@ fn resolve_managed_context(
         .clone()
         .or_else(|| profile.as_ref().map(|profile| profile.domain.clone()))
         .ok_or_else(|| {
-            Error::InvalidConfig("--domain is required when no default profile exists".into())
+            Error::InvalidConfig("no domain specified and no default profile is set".into())
         })?;
     let device_id = profile
         .as_ref()
@@ -1145,7 +1186,7 @@ fn resolve_managed_context(
         .map_or_else(|| store.device_id(), Ok)?;
     openiwan::managed::validate_domain(&domain)?;
     if device_id.trim().is_empty() {
-        return Err(Error::InvalidConfig("device ID must not be empty".into()));
+        return Err(Error::InvalidConfig("device ID is empty".into()));
     }
     Ok(ManagedContext {
         profile_name,
@@ -1184,12 +1225,14 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
             let name = name
                 .or_else(|| persisted.default_profile.clone())
                 .ok_or_else(|| {
-                    Error::InvalidConfig("profile name is required when no default exists".into())
+                    Error::InvalidConfig(
+                        "no profile specified and no default profile is set".into(),
+                    )
                 })?;
             let profile = persisted
                 .profiles
                 .get(&name)
-                .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
+                .ok_or_else(|| profile_not_found(&name))?;
             print_profile(&name, profile, persisted.default_profile.as_deref(), json)?;
         }
         ProfileCommand::Set(arguments) => set_profile(*arguments, store)?,
@@ -1197,9 +1240,7 @@ fn profile(arguments: ProfileArgs, store: &state::StateStore) -> Result<()> {
             state::validate_profile_name(&name)?;
             store.update(|persisted| {
                 if !persisted.profiles.contains_key(&name) {
-                    return Err(Error::InvalidConfig(format!(
-                        "profile {name:?} does not exist"
-                    )));
+                    return Err(profile_not_found(&name));
                 }
                 persisted.default_profile = Some(name.clone());
                 Ok(())
@@ -1251,7 +1292,7 @@ fn set_profile(arguments: ProfileSetArgs, store: &state::StateStore) -> Result<(
             profile.clone()
         } else {
             let domain = arguments.domain.clone().ok_or_else(|| {
-                Error::InvalidConfig("--domain is required for a new profile".into())
+                Error::InvalidConfig("--domain is required to create a profile".into())
             })?;
             let device_id = arguments
                 .device_id
@@ -1338,22 +1379,20 @@ fn remove_profile(store: &state::StateStore, name: &str) -> Result<()> {
     let profile = persisted
         .profiles
         .get(name)
-        .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
+        .ok_or_else(|| profile_not_found(name))?;
     if !profile.credential_id.is_empty() {
         credentials::CredentialStore::delete(&profile.credential_id)?;
     }
     store.update(|persisted| {
         if persisted.profiles.remove(name).is_none() {
-            return Err(Error::InvalidConfig(format!(
-                "profile {name:?} does not exist"
-            )));
+            return Err(profile_not_found(name));
         }
         if persisted.default_profile.as_deref() == Some(name) {
             persisted.default_profile = None;
         }
         Ok(())
     })?;
-    println!("removed profile {name}");
+    println!("removed: {name}");
     Ok(())
 }
 
@@ -1363,13 +1402,13 @@ fn logout_profile(store: &state::StateStore, name: Option<String>) -> Result<()>
     let name = name
         .or_else(|| persisted.default_profile.clone())
         .ok_or_else(|| {
-            Error::InvalidConfig("profile name is required when no default exists".into())
+            Error::InvalidConfig("no profile specified and no default profile is set".into())
         })?;
     state::validate_profile_name(&name)?;
     let profile = persisted
         .profiles
         .get(&name)
-        .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
+        .ok_or_else(|| profile_not_found(&name))?;
     let credential_id = profile.credential_id.clone();
     let removed = if credential_id.is_empty() {
         false
@@ -1381,15 +1420,15 @@ fn logout_profile(store: &state::StateStore, name: Option<String>) -> Result<()>
             let profile = persisted
                 .profiles
                 .get_mut(&name)
-                .ok_or_else(|| Error::InvalidConfig(format!("profile {name:?} does not exist")))?;
+                .ok_or_else(|| profile_not_found(&name))?;
             profile.credential_id.clear();
             Ok(())
         })?;
     }
     if removed {
-        println!("removed saved authentication for profile {name}");
+        println!("credentials removed: {name}");
     } else {
-        println!("profile {name} has no saved authentication");
+        println!("no saved credentials: {name}");
     }
     Ok(())
 }
@@ -1413,7 +1452,7 @@ fn print_profiles(persisted: &state::CliState, json: bool) -> Result<()> {
         return Ok(());
     }
     if persisted.profiles.is_empty() {
-        println!("no profiles configured");
+        println!("no profiles");
         return Ok(());
     }
     for (name, profile) in &persisted.profiles {
@@ -1425,7 +1464,7 @@ fn print_profiles(persisted: &state::CliState, json: bool) -> Result<()> {
         println!(
             "{marker} {name}: domain={} user={} line={}",
             profile.domain,
-            profile.username.as_deref().unwrap_or("<prompt>"),
+            profile.username.as_deref().unwrap_or("-"),
             profile.line
         );
     }
@@ -1449,16 +1488,20 @@ fn print_profile(
         return Ok(());
     }
     println!("profile: {name}");
-    println!("  default: {}", default_profile == Some(name));
-    println!("  domain: {}", profile.domain);
-    println!("  device ID: {}", profile.device_id);
     println!(
-        "  username: {}",
-        profile.username.as_deref().unwrap_or("<prompt>")
+        "  default: {}",
+        if default_profile == Some(name) {
+            "yes"
+        } else {
+            "no"
+        }
     );
+    println!("  domain: {}", profile.domain);
+    println!("  device-id: {}", profile.device_id);
+    println!("  username: {}", profile.username.as_deref().unwrap_or("-"));
     println!("  line: {}", profile.line);
     println!(
-        "  DNS overrides: {}",
+        "  dns: {}",
         if profile.dns == DnsOverrides::default() {
             "inherit".into()
         } else {
@@ -1468,7 +1511,7 @@ fn print_profile(
         }
     );
     println!(
-        "  routing overrides: {}",
+        "  routing: {}",
         if profile.routing == state::RoutingOverrides::default() {
             "inherit".into()
         } else {
@@ -1767,7 +1810,7 @@ fn run_managed_client(
     let dns_device = Arc::new(DnsPacketDevice::new(Arc::clone(&device), runtime));
     let packet_device = Arc::new(Ipv6BlockingDevice::new(dns_device, block_ipv6));
     for route in &routes {
-        println!("route {route} -> {}", device.name());
+        tracing::debug!(%route, interface = device.name(), "installed route");
     }
     let mode_label = match mode {
         RoutingMode::All => "all",
@@ -1775,15 +1818,16 @@ fn run_managed_client(
         RoutingMode::Custom => "custom",
     };
     println!(
-        "routing policy: mode={mode_label}, IPv6={}",
+        "routing: mode={mode_label}, ipv6={}",
         if block_ipv6 { "blocked" } else { "allowed" }
     );
     print_dns_policy(&policy);
-    println!("TUN {} is active; press Ctrl-C to stop", device.name());
+    println!("interface: {}", device.name());
+    println!("connected; press Ctrl-C to disconnect");
 
     let shutdown = install_shutdown_handler()?;
     let end = client.run_reconnecting_from(session, packet_device, shutdown)?;
-    println!("session ended: {end:?}");
+    println!("disconnected: {}", session_end_label(end));
     Ok(())
 }
 
@@ -1816,7 +1860,7 @@ fn run_managed_forward(
     let config = build_forward_config_with_route(arguments, &dns_servers, auto_tunnel)?;
     let shutdown = install_shutdown_handler()?;
     let end = forward::run(client, session, config, shutdown)?;
-    println!("session ended: {end:?}");
+    println!("disconnected: {}", session_end_label(end));
     Ok(())
 }
 
@@ -1902,7 +1946,7 @@ fn prepare_managed(
         AuthMethod::Oidc => {
             if arguments.username.is_some() || arguments.password_file.is_some() {
                 return Err(Error::InvalidConfig(
-                    "--username and --password-file are only valid for credential domains".into(),
+                    "--username and --password-file require password authentication".into(),
                 ));
             }
             prepare_managed_oidc(client, discovered, store, context, arguments, line, intent)
@@ -1932,7 +1976,7 @@ fn prepare_managed_password(
         Some(credentials::StoredCredential::Oidc { .. })
     ) {
         return Err(Error::CredentialStore(
-            "saved authentication does not match this credential domain; run \
+            "saved credentials use a different authentication method; run \
              `openiwan managed login`"
                 .into(),
         ));
@@ -1948,7 +1992,7 @@ fn prepare_managed_password(
             _ => None,
         })
         .ok_or_else(|| {
-            Error::InvalidConfig("--username is required for this credential domain".into())
+            Error::InvalidConfig("--username is required for password authentication".into())
         })?;
     let password = if let Some(password) = explicit_password {
         zeroize::Zeroizing::new(password)
@@ -1961,7 +2005,7 @@ fn prepare_managed_password(
         zeroize::Zeroizing::new(password.clone())
     } else if arguments.non_interactive {
         return Err(Error::CredentialStore(
-            "no explicit or saved password matches this profile; run \
+            "no password available; run \
              `openiwan managed login` or set OPENIWAN_PASSWORD"
                 .into(),
         ));
@@ -1984,7 +2028,7 @@ fn prepare_managed_password(
         line,
     );
     let prepared = if used_saved_password {
-        prepared.map_err(saved_authentication_failed)?
+        prepared.map_err(saved_credentials_rejected)?
     } else {
         prepared?
     };
@@ -2022,7 +2066,7 @@ fn prepare_managed_oidc(
         Some(credentials::StoredCredential::Password { .. })
     ) {
         return Err(Error::CredentialStore(
-            "saved authentication does not match this OIDC domain; run \
+            "saved credentials use a different authentication method; run \
              `openiwan managed login`"
                 .into(),
         ));
@@ -2044,10 +2088,10 @@ fn prepare_managed_oidc(
             user_id,
             username,
         )
-        .map_err(saved_authentication_failed)?,
+        .map_err(saved_credentials_rejected)?,
         _ if arguments.non_interactive => {
             return Err(Error::CredentialStore(
-                "no reusable OIDC session is available; run `openiwan managed login`".into(),
+                "no saved OIDC session; run `openiwan managed login`".into(),
             ));
         }
         _ => interactive_oidc(client, discovered, MANAGED_OIDC_REDIRECT_URI)?,
@@ -2065,7 +2109,7 @@ fn prepare_managed_oidc(
         },
     );
     let prepared = if used_saved_identity {
-        prepared.map_err(saved_authentication_failed)?
+        prepared.map_err(saved_credentials_rejected)?
     } else {
         prepared?
     };
@@ -2106,10 +2150,10 @@ fn interactive_oidc(
 ) -> Result<openiwan::managed::OidcIdentity> {
     let pending = client.begin_oidc(discovered, redirect_uri)?;
     println!(
-        "Open this URL in a browser and complete authentication:\n\n{}\n",
+        "Open this URL in a browser:\n\n{}\n",
         pending.authorization_url()
     );
-    let redirect = prompt_line("Paste the complete callback URL: ")?;
+    let redirect = prompt_line("Callback URL: ")?;
     client.complete_oidc(&pending, &redirect)
 }
 
@@ -2163,12 +2207,13 @@ fn ensure_credential_id(store: &state::StateStore, context: &mut ManagedContext)
         return Ok(identifier.clone());
     }
     let profile_name = context.profile_name.as_deref().ok_or_else(|| {
-        Error::InvalidConfig("managed login requires --profile or a default profile".into())
+        Error::InvalidConfig("no profile specified and no default profile is set".into())
     })?;
     let identifier = store.update(|persisted| {
-        let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
-            Error::InvalidConfig(format!("profile {profile_name:?} does not exist"))
-        })?;
+        let profile = persisted
+            .profiles
+            .get_mut(profile_name)
+            .ok_or_else(|| profile_not_found(profile_name))?;
         Ok(profile.ensure_credential_id()?.to_owned())
     })?;
     context.credential_id = Some(identifier.clone());
@@ -2182,12 +2227,13 @@ fn sync_profile_username(
     username: &str,
 ) -> Result<()> {
     let profile_name = context.profile_name.as_deref().ok_or_else(|| {
-        Error::InvalidConfig("managed login requires --profile or a default profile".into())
+        Error::InvalidConfig("no profile specified and no default profile is set".into())
     })?;
     store.update(|persisted| {
-        let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
-            Error::InvalidConfig(format!("profile {profile_name:?} does not exist"))
-        })?;
+        let profile = persisted
+            .profiles
+            .get_mut(profile_name)
+            .ok_or_else(|| profile_not_found(profile_name))?;
         profile.username = Some(username.to_owned());
         Ok(())
     })?;
@@ -2203,26 +2249,26 @@ fn load_stored_credential(
 }
 
 #[cfg(feature = "managed")]
-fn saved_authentication_failed(error: Error) -> Error {
+fn saved_credentials_rejected(error: Error) -> Error {
     Error::CredentialStore(format!(
-        "saved authentication failed: {error}; run `openiwan managed login`"
+        "saved credentials rejected: {error}; run `openiwan managed login`"
     ))
 }
 
 #[cfg(feature = "managed")]
 fn print_discovery(discovered: &DiscoveredDomain, device_id: &str) {
     println!("domain: {}", discovered.active_domain());
-    println!("device ID: {device_id}");
-    println!("lookup type: {}", discovered.lookup.service_type.as_str());
+    println!("device-id: {device_id}");
+    println!("service: {}", discovered.lookup.service_type.as_str());
     println!(
-        "lookup source: {}",
+        "source: {}",
         match discovered.lookup.source {
             openiwan::managed::LookupSource::Network => "network",
             openiwan::managed::LookupSource::Cache => "cache",
         }
     );
     println!(
-        "authentication: {}",
+        "auth: {}",
         match discovered.auth.method {
             AuthMethod::Credential => "credential",
             AuthMethod::Oidc => "oidc",
@@ -2232,11 +2278,11 @@ fn print_discovery(discovered: &DiscoveredDomain, device_id: &str) {
 
 #[cfg(feature = "managed")]
 fn print_prepared(prepared: &PreparedConnection) {
-    println!("login ready for domain {}", prepared.domain);
-    println!("selected line: {}", prepared.ingress.line_preference());
+    println!("domain: {}", prepared.domain);
+    println!("line: {}", prepared.ingress.line_preference());
     match &prepared.ingress {
         SelectedIngress::Iwan { server, latency } => println!(
-            "best server: {} ({}, {:.3} ms)",
+            "server: {} endpoint={} latency={:.3} ms",
             server.name,
             server.endpoint(),
             latency.as_secs_f64() * 1_000.0
@@ -2246,7 +2292,7 @@ fn print_prepared(prepared: &PreparedConnection) {
             entry,
             latency,
         } => println!(
-            "best SR group: {group_id}, ingress {}:{} ({:.3} ms)",
+            "sr-group: {group_id}, ingress={}:{} latency={:.3} ms",
             entry.ingress.server_name,
             entry.ingress.server_port,
             latency.as_secs_f64() * 1_000.0
@@ -2283,9 +2329,10 @@ fn read_posture_results(path: Option<&Path>) -> Result<Vec<serde_json::Value>> {
     };
     let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)
         .map_err(|error| Error::InvalidConfig(format!("{}: {error}", path.display())))?;
-    value.as_array().cloned().ok_or_else(|| {
-        Error::InvalidConfig(format!("{} must contain a JSON array", path.display()))
-    })
+    value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| Error::InvalidConfig(format!("{}: expected a JSON array", path.display())))
 }
 
 #[cfg(feature = "managed")]
@@ -2296,7 +2343,7 @@ fn prompt_line(prompt: &str) -> Result<String> {
     std::io::stdin().read_line(&mut value)?;
     let value = value.trim().to_owned();
     if value.is_empty() {
-        return Err(Error::InvalidConfig("input must not be empty".into()));
+        return Err(Error::InvalidConfig("callback URL is empty".into()));
     }
     Ok(value)
 }
@@ -2311,7 +2358,7 @@ fn build_client(arguments: &ConnectionArgs) -> Result<Client> {
             arguments
                 .server
                 .clone()
-                .ok_or_else(|| Error::InvalidConfig("--server or --config is required".into()))?,
+                .ok_or_else(|| Error::InvalidConfig("specify --server or --config".into()))?,
         )
     };
     if let Some(server) = &arguments.server {
@@ -2354,7 +2401,7 @@ fn validate_secret_file(path: &Path) -> Result<()> {
     let mode = fs::metadata(path)?.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(Error::InvalidConfig(format!(
-            "{} must not be accessible by group or other users",
+            "{}: permissions allow access by group or other users",
             path.display()
         )));
     }
@@ -2469,28 +2516,25 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn print_session(session: &openiwan::SessionInfo) {
-    println!("authenticated");
-    println!("  peer: {}", session.peer);
-    println!("  session: {:#06x}", session.session_id);
-    println!("  token: {:#010x}", session.token);
-    println!("  encryption: {}", session.encryption);
-    println!("  MTU: {}", session.mtu);
-    println!("  segment routing: {}", session.segment_routing);
-    println!(
-        "  address: {}",
-        session
-            .address
-            .map_or_else(|| "<none>".into(), |value| value.to_string())
+    println!("authenticated: {}", session.peer);
+    tracing::debug!(
+        peer = %session.peer,
+        session_id = session.session_id,
+        token = session.token,
+        encryption = %session.encryption,
+        mtu = session.mtu,
+        segment_routing = session.segment_routing,
+        "session parameters"
     );
-    println!(
-        "  gateway: {}",
-        session
-            .gateway
-            .map_or_else(|| "<none>".into(), |value| value.to_string())
-    );
+    if let Some(address) = session.address {
+        println!("address: {address}");
+    }
+    if let Some(gateway) = session.gateway {
+        println!("gateway: {gateway}");
+    }
     if !session.dns_servers.is_empty() {
         println!(
-            "  DNS: {}",
+            "dns: {}",
             session
                 .dns_servers
                 .iter()
@@ -2963,8 +3007,8 @@ mod tests {
 
     #[cfg(feature = "managed")]
     #[test]
-    fn saved_authentication_errors_direct_users_to_managed_login() {
-        let error = saved_authentication_failed(Error::AuthenticationRejected {
+    fn saved_credential_errors_direct_users_to_managed_login() {
+        let error = saved_credentials_rejected(Error::AuthenticationRejected {
             code: 1,
             message: "invalid password".into(),
         });

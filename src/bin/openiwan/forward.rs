@@ -591,20 +591,16 @@ impl AsyncWrite for RelayTcpStream {
 fn announce_forward(listen_address: SocketAddr, target: &Target) {
     if target.is_http() {
         println!(
-            "HTTP forward listening on http://{listen_address} -> {}",
+            "forwarding: http://{listen_address} -> {}",
             target.display()
         );
         if !target.uses_tls() {
-            println!("warning: upstream HTTP traffic is not protected by TLS");
+            eprintln!("openiwan: warning: upstream connection uses unencrypted HTTP");
         }
     } else {
-        println!(
-            "TCP forward listening on tcp://{listen_address} -> {}",
-            target.display()
-        );
-        println!("TCP bytes, including TLS, are relayed unchanged");
+        println!("forwarding: tcp://{listen_address} -> {}", target.display());
     }
-    println!("no TUN interface or host route was created; press Ctrl-C to stop");
+    println!("press Ctrl-C to stop");
 }
 
 fn effective_dns_servers(configured: &[SocketAddr], session: &SessionInfo) -> Vec<SocketAddr> {

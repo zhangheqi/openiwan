@@ -55,7 +55,7 @@ impl CliState {
             && !self.profiles.contains_key(name)
         {
             return Err(Error::InvalidConfig(format!(
-                "default profile {name:?} does not exist"
+                "default profile not found: {name}"
             )));
         }
         for (name, profile) in &self.profiles {
@@ -118,7 +118,7 @@ impl ManagedProfile {
             .is_some_and(|username| username.trim().is_empty() || username.len() > 256)
         {
             return Err(Error::InvalidConfig(
-                "profile username must contain 1..=256 characters".into(),
+                "profile username must contain 1 to 256 characters".into(),
             ));
         }
         if !self.credential_id.is_empty()
@@ -313,7 +313,7 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
         return Err(Error::InvalidConfig(
-            "profile name must contain 1..=64 ASCII letters, digits, '.', '_', or '-'".into(),
+            "profile name must contain 1 to 64 ASCII letters, digits, '.', '_', or '-'".into(),
         ));
     }
     Ok(())
@@ -361,7 +361,7 @@ fn new_device_id() -> Result<String> {
 fn validate_device_id(device_id: &str, label: &str) -> Result<()> {
     if device_id.trim().is_empty() || device_id.len() > 256 {
         return Err(Error::InvalidConfig(format!(
-            "{label} must contain 1..=256 characters"
+            "{label} must contain 1 to 256 characters"
         )));
     }
     Ok(())
@@ -378,7 +378,7 @@ fn default_state_directory() -> Result<PathBuf> {
             .map(|path| path.join("OpeniWAN"))
             .ok_or_else(|| {
                 Error::InvalidConfig(
-                    "LOCALAPPDATA or APPDATA is required for CLI state; use --state-dir".into(),
+                    "LOCALAPPDATA and APPDATA are unset; set OPENIWAN_STATE_DIR".into(),
                 )
             })
     }
@@ -386,9 +386,7 @@ fn default_state_directory() -> Result<PathBuf> {
     {
         environment_path("HOME")
             .map(|path| path.join("Library/Application Support/openiwan"))
-            .ok_or_else(|| {
-                Error::InvalidConfig("HOME is required for CLI state; use --state-dir".into())
-            })
+            .ok_or_else(|| Error::InvalidConfig("HOME is unset; set OPENIWAN_STATE_DIR".into()))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -399,7 +397,7 @@ fn default_state_directory() -> Result<PathBuf> {
             .map(|path| path.join(".local/state/openiwan"))
             .ok_or_else(|| {
                 Error::InvalidConfig(
-                    "XDG_STATE_HOME or HOME is required for CLI state; use --state-dir".into(),
+                    "XDG_STATE_HOME and HOME are unset; set OPENIWAN_STATE_DIR".into(),
                 )
             })
     }
@@ -417,7 +415,7 @@ fn secure_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(Error::InvalidConfig(format!(
-            "{} must be a real directory, not a symlink",
+            "{}: expected a directory, not a symlink",
             path.display()
         )));
     }
@@ -430,7 +428,7 @@ fn secure_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(Error::InvalidConfig(format!(
-            "{} must be a real directory, not a symlink",
+            "{}: expected a directory, not a symlink",
             path.display()
         )));
     }
@@ -472,14 +470,14 @@ fn secure_file(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::InvalidConfig(format!(
-            "{} must be a regular file",
+            "{}: expected a regular file",
             path.display()
         )));
     }
     let mode = metadata.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(Error::InvalidConfig(format!(
-            "{} must not be accessible by group or other users",
+            "{}: permissions allow access by group or other users",
             path.display()
         )));
     }
@@ -491,7 +489,7 @@ fn secure_file(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::InvalidConfig(format!(
-            "{} must be a regular file",
+            "{}: expected a regular file",
             path.display()
         )));
     }

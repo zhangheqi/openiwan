@@ -29,7 +29,7 @@ openiwan <command> --help
 | `forward` | Forward one TCP or HTTP(S) target without TUN | No |
 | `decode` | Decode a hexadecimal iWAN datagram offline | No |
 | `managed discover` | Inspect domain discovery and authentication type | No |
-| `managed login` | Authenticate, evaluate gates, and test a line | No |
+| `managed login` | Authenticate, test a line, and save authentication | No |
 | `managed connect` | Open a controller-managed TUN tunnel | Yes |
 | `managed forward` | Forward one target through a managed connection | No |
 | `managed lines` | Probe and list controller lines | No |
@@ -42,7 +42,7 @@ packet decoding, and route-free forwarding do not require elevation.
 
 ## Credentials
 
-Direct and managed credential login resolve passwords in this order:
+Direct credential commands resolve passwords in this order:
 
 1. the first line of `--password-file FILE`;
 2. the environment variable named by `--password-env` (default:
@@ -53,19 +53,26 @@ Password files must not be group- or world-accessible on Unix. Passwords are
 not accepted as argument values because process listings and shell history
 are not secret stores.
 
-Managed commands can use saved authentication:
+Managed credential commands use the first available source:
 
-- `--save` stores a verified password or OIDC refresh token in the operating
-  system credential store; it requires an explicit or default profile.
-- `--reauth` ignores saved authentication and performs a fresh login.
+- the first line of `--password-file FILE`;
+- `OPENIWAN_PASSWORD`;
+- authentication saved for the selected profile;
+- a no-echo interactive prompt.
+
+`managed login` deliberately skips saved authentication, performs a fresh
+login, and stores the verified password or OIDC refresh token for its profile.
+Other managed commands never save an interactive fallback:
+
 - `--non-interactive` fails instead of prompting or starting an interactive
   OIDC flow.
 - `profile logout [NAME]` deletes saved authentication without removing the
   profile.
 
 The profile and saved authentication must be accessed by the same operating
-system account. Passing `--state-dir` through `sudo` can preserve the profile
-path, but it cannot cross the system credential-store account boundary.
+system account. Preserving `OPENIWAN_STATE_DIR` through `sudo` can preserve
+the profile path, but it cannot cross the system credential-store account
+boundary.
 
 ## Direct endpoint commands
 
@@ -145,42 +152,50 @@ DNS, TCP, and TLS setup.
 
 ## Managed lifecycle
 
-Managed commands start with either `--domain DOMAIN` or a profile. When
-neither is passed, the default profile is used.
+Managed selectors belong to each subcommand. Use `--profile NAME` or
+`--domain DOMAIN`; they are mutually exclusive, and the default profile is
+used when neither is passed. `--domain` is for one-shot operations and is not
+accepted by `managed login`.
 
 Inspect discovery:
 
 ```console
-openiwan managed --domain iwan.example discover
+openiwan managed discover --domain iwan.example
 ```
 
-Authenticate and test the selected line without opening TUN:
+Authenticate, test the profile's selected line, and save authentication:
 
 ```console
-openiwan managed --domain iwan.example login --username alice
+openiwan managed login --profile work --username alice
 ```
 
 Open a managed tunnel:
 
 ```console
-sudo openiwan managed --domain iwan.example connect --username alice
+sudo openiwan managed connect --domain iwan.example --username alice
 ```
 
 Forward one target through a managed connection:
 
 ```console
-openiwan managed --domain iwan.example forward --username alice --target https://api.internal.example --listen 127.0.0.1:8080
+openiwan managed forward --domain iwan.example --username alice --target https://api.internal.example --listen 127.0.0.1:8080
 ```
 
-The first use generates an installation-wide Device ID. `--device-id ID`
-exists for deployments that must preserve an existing enrollment. The
-seven-day domain lookup cache normally lives below the state directory;
-`--cache-dir DIR` overrides it.
+The first use generates an installation-wide Device ID. One-shot domain
+operations use that ID; a deployment that must preserve an existing
+enrollment can set a profile's ID with `profile set --device-id ID`. The
+seven-day domain lookup cache always lives in the state directory's `cache`
+child.
 
 OIDC domains print the authorization URL and accept the complete callback URL
-at the prompt. `--redirect-uri URI`, `--posture-results FILE`, and
-`--posture-version VERSION` are advanced integration options described in
+at the prompt. The CLI uses its compatible redirect URI and reads the posture
+version from the controller. `--posture-results FILE` supplies externally
+evaluated local posture results as described in
 [Managed Connections](MANAGED_CONNECTIONS.md).
+
+Line probes use a fixed two-second timeout. `--line LINE` is a one-shot
+override on `connect` and `forward`; `login` uses the profile preference and
+`lines` always probes every current line.
 
 ## Profiles
 
@@ -222,11 +237,11 @@ List and probe all lines:
 ```console
 openiwan managed lines
 openiwan managed lines --json
-openiwan managed lines --set iwan:7
+openiwan profile set work --line iwan:7
 ```
 
-`--set LINE` validates and saves the selected profile's preference. `--line
-LINE` is a one-shot override for the current managed command.
+Use the ID printed by `managed lines` with `profile set --line`. `--line LINE`
+is a one-shot override for `managed connect` or `managed forward`.
 
 ## Automation
 
@@ -253,6 +268,7 @@ status.
 | `OPENIWAN_STATE_DIR` | Override profile and cache state location |
 | `RUST_LOG` | Override the tracing filter |
 
-The password variable name can be changed per command with `--password-env
-ENV`. See [Configuration](CONFIGURATION.md) for platform state locations and
+Direct commands can change the password variable name with `--password-env
+ENV`; managed commands always use `OPENIWAN_PASSWORD`. See
+[Configuration](CONFIGURATION.md) for platform state locations and
 credential-storage boundaries.

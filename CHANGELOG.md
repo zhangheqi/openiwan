@@ -29,8 +29,8 @@ and public managed APIs.
   and JSON output for profiles and line probes.
 - Saved password and OIDC refresh-token authentication through macOS Keychain,
   Windows Credential Manager, and the Unix Secret Service, including refresh
-  rotation, `--save`, `--reauth`, `--non-interactive`, explicit logout, and
-  chunked Windows storage.
+  rotation, fresh-and-persistent `managed login`, non-interactive reuse,
+  explicit logout, and chunked Windows storage.
 - A shared DNS subsystem with typed policy layers, split-DNS rules,
   encrypted-DNS handling, packet-level enforcement, a protected physical
   resolver relay, reconnect-aware generations, and platform DNS leases.
@@ -57,6 +57,10 @@ and public managed APIs.
   `managed`, and `profile` command groups. Endpoint probing now takes a
   positional server, duration values require `ms`, `s`, or `m`, and current
   option names follow the built-in help without compatibility aliases.
+- Made managed selectors subcommand-local and profile-first. `managed login`
+  now always performs fresh authentication and saves it, while connect,
+  forwarding, and line listing reuse saved authentication or perform an
+  unsaved interactive fallback.
 - Renamed the default route-free Cargo feature to `forward` and extended its
   fixed target from HTTP(S) origins to `tcp://`, `http://`, and `https://`
   URIs.
@@ -91,6 +95,10 @@ and public managed APIs.
 - Provider TOML configuration, bundled deployment profiles, serialized
   managed controller state, and the provider-based `managed fetch`, `list`,
   `all`, and `serve` workflows.
+- Managed CLI tuning and redundant authentication options: `--state-dir`,
+  `--device-id`, `--cache-dir`, `--probe-timeout`, `--password-env`,
+  `--redirect-uri`, `--posture-version`, `--save`, `--reauth`, and
+  `managed lines --set`.
 - The `serve` command, `http-proxy` Cargo feature, `--upstream-ip` override,
   and HTTP-origin-only forwarding interface.
 - Configurable authentication/heartbeat timing, `require_auth_verify_echo`,

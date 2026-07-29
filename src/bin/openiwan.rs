@@ -254,22 +254,39 @@ struct DnsOverrideArgs {
 }
 
 impl DnsOverrideArgs {
-    fn as_overrides(&self) -> DnsOverrides {
-        DnsOverrides {
-            server_mode: self
-                .dns_mode
-                .and_then(DnsServerModeArg::into_policy)
-                .or_else(|| (!self.dns_servers.is_empty()).then_some(DnsServerMode::Custom)),
-            servers: (!self.dns_servers.is_empty()).then(|| self.dns_servers.clone()),
-            split_mode: self
-                .split_dns_mode
-                .and_then(SplitDnsModeArg::into_policy)
-                .or_else(|| (!self.split_dns_domains.is_empty()).then_some(SplitDnsMode::Custom)),
-            split_domains: (!self.split_dns_domains.is_empty())
-                .then(|| self.split_dns_domains.clone()),
-            encrypted_dns: self.encrypted_dns.map(EncryptedDnsModeArg::into_policy),
-            doh_hosts: (!self.doh_hosts.is_empty()).then(|| self.doh_hosts.clone()),
+    fn applied_to(&self, lower: &DnsOverrides) -> DnsOverrides {
+        let mut target = lower.clone();
+        if let Some(mode) = self.dns_mode {
+            target.server_mode = mode.into_policy();
+            if matches!(mode, DnsServerModeArg::Inherit) {
+                target.servers = None;
+            }
         }
+        if !self.dns_servers.is_empty() {
+            target.servers = Some(self.dns_servers.clone());
+            if self.dns_mode.is_none() {
+                target.server_mode = Some(DnsServerMode::Custom);
+            }
+        }
+        if let Some(mode) = self.split_dns_mode {
+            target.split_mode = mode.into_policy();
+            if matches!(mode, SplitDnsModeArg::Inherit) {
+                target.split_domains = None;
+            }
+        }
+        if !self.split_dns_domains.is_empty() {
+            target.split_domains = Some(self.split_dns_domains.clone());
+            if self.split_dns_mode.is_none() {
+                target.split_mode = Some(SplitDnsMode::Custom);
+            }
+        }
+        if let Some(mode) = self.encrypted_dns {
+            target.encrypted_dns = Some(mode.into_policy());
+        }
+        if !self.doh_hosts.is_empty() {
+            target.doh_hosts = Some(self.doh_hosts.clone());
+        }
+        target
     }
 
     #[cfg(feature = "managed")]
@@ -426,29 +443,6 @@ struct DecodeArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ManagedArgs {
-    /// Override the state directory (env: `OPENIWAN_STATE_DIR`).
-    #[arg(long, global = true, value_name = "DIR")]
-    state_dir: Option<PathBuf>,
-    /// Use a connection profile.
-    #[arg(long, value_name = "NAME")]
-    profile: Option<String>,
-    /// Use a customer domain without a profile.
-    #[arg(long, value_name = "DOMAIN")]
-    domain: Option<String>,
-    /// Override the installation Device ID.
-    #[arg(long, value_name = "ID")]
-    device_id: Option<String>,
-    /// Store domain lookup data in DIR.
-    #[arg(long, value_name = "DIR")]
-    cache_dir: Option<PathBuf>,
-    /// Wait at most DURATION for each line probe.
-    #[arg(
-        long,
-        value_name = "DURATION",
-        default_value = "2s",
-        value_parser = parse_duration
-    )]
-    probe_timeout: Duration,
     #[command(subcommand)]
     action: ManagedCommand,
 }
@@ -457,8 +451,8 @@ struct ManagedArgs {
 #[derive(Debug, Subcommand)]
 enum ManagedCommand {
     /// Show domain and authentication details.
-    Discover,
-    /// Authenticate and test the selected line.
+    Discover(ManagedDiscoverArgs),
+    /// Authenticate, test the selected line, and save authentication.
     Login(ManagedLoginArgs),
     /// Open a managed iWAN tunnel.
     Connect(ManagedConnectArgs),
@@ -470,39 +464,60 @@ enum ManagedCommand {
 }
 
 #[cfg(feature = "managed")]
-#[derive(Debug, Clone, Args)]
-struct ManagedLoginArgs {
-    /// Authenticate as USER. Ignored for OIDC domains.
+#[derive(Debug, Clone, Default, Args)]
+struct ManagedTargetArgs {
+    /// Use a connection profile.
+    #[arg(long, value_name = "NAME", conflicts_with = "domain")]
+    profile: Option<String>,
+    /// Use a customer domain without a profile.
+    #[arg(long, value_name = "DOMAIN", conflicts_with = "profile")]
+    domain: Option<String>,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Default, Args)]
+struct ManagedProfileTargetArgs {
+    /// Use a connection profile. Defaults to the default profile.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Default, Args)]
+struct ManagedAuthArgs {
+    /// Authenticate as USER for a credential domain.
     #[arg(long, value_name = "USER")]
     username: Option<String>,
-    /// Read the password from ENV before prompting.
-    #[arg(long, value_name = "ENV", default_value = "OPENIWAN_PASSWORD")]
-    password_env: String,
     /// Read the password from the first line of FILE.
     #[arg(long, value_name = "FILE")]
     password_file: Option<PathBuf>,
-    /// Use URI for the OIDC callback.
-    #[arg(
-        long,
-        value_name = "URI",
-        default_value = "com.panabit.mobile://oauth2redirect"
-    )]
-    redirect_uri: String,
     /// Read posture check results from a JSON file.
     #[arg(long, value_name = "FILE")]
     posture_results: Option<PathBuf>,
-    /// Send a cached posture policy version.
-    #[arg(long, value_name = "VERSION")]
-    posture_version: Option<i64>,
-    /// Save verified authentication. Requires a profile.
-    #[arg(long)]
-    save: bool,
-    /// Ignore saved authentication and log in again.
-    #[arg(long)]
-    reauth: bool,
     /// Fail instead of prompting or opening an OIDC login.
     #[arg(long)]
     non_interactive: bool,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Args)]
+struct ManagedDiscoverArgs {
+    #[command(flatten)]
+    target: ManagedTargetArgs,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Args)]
+struct ManagedLoginArgs {
+    #[command(flatten)]
+    target: ManagedProfileTargetArgs,
+    #[command(flatten)]
+    auth: ManagedAuthArgs,
+}
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Default, Args)]
+struct ManagedConnectionOverrideArgs {
     /// Use auto, iwan:ID, or sr:ID for this command only.
     #[arg(long, value_name = "LINE")]
     line: Option<LinePreference>,
@@ -512,7 +527,11 @@ struct ManagedLoginArgs {
 #[derive(Debug, Args)]
 struct ManagedConnectArgs {
     #[command(flatten)]
-    login: ManagedLoginArgs,
+    target: ManagedTargetArgs,
+    #[command(flatten)]
+    auth: ManagedAuthArgs,
+    #[command(flatten)]
+    connection: ManagedConnectionOverrideArgs,
     /// Name the TUN interface.
     #[arg(long, value_name = "NAME")]
     tun: Option<String>,
@@ -526,7 +545,11 @@ struct ManagedConnectArgs {
 #[derive(Debug, Args)]
 struct ManagedForwardArgs {
     #[command(flatten)]
-    login: ManagedLoginArgs,
+    target: ManagedTargetArgs,
+    #[command(flatten)]
+    auth: ManagedAuthArgs,
+    #[command(flatten)]
+    connection: ManagedConnectionOverrideArgs,
     #[command(flatten)]
     forward: ForwardOptions,
 }
@@ -535,10 +558,9 @@ struct ManagedForwardArgs {
 #[derive(Debug, Args)]
 struct ManagedLinesArgs {
     #[command(flatten)]
-    login: ManagedLoginArgs,
-    /// Set the selected profile's line preference. Requires a profile.
-    #[arg(long, value_name = "LINE")]
-    set: Option<LinePreference>,
+    target: ManagedTargetArgs,
+    #[command(flatten)]
+    auth: ManagedAuthArgs,
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -547,9 +569,6 @@ struct ManagedLinesArgs {
 #[cfg(feature = "managed")]
 #[derive(Debug, Args)]
 struct ProfileArgs {
-    /// Override the state directory (env: `OPENIWAN_STATE_DIR`).
-    #[arg(long, global = true, value_name = "DIR")]
-    state_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: ProfileCommand,
 }
@@ -682,12 +701,12 @@ fn run() -> Result<()> {
         Command::Decode(arguments) => decode(&arguments.hex)?,
         #[cfg(feature = "managed")]
         Command::Managed(arguments) => {
-            let store = state::StateStore::new(arguments.state_dir.clone())?;
+            let store = state::StateStore::new(None)?;
             managed(arguments, &store)?;
         }
         #[cfg(feature = "managed")]
         Command::Profile(arguments) => {
-            let store = state::StateStore::new(arguments.state_dir.clone())?;
+            let store = state::StateStore::new(None)?;
             profile(arguments, &store)?;
         }
     }
@@ -785,7 +804,7 @@ fn run_client(
         .routing_mode
         .unwrap_or(UserRoutingMode::Custom);
     let block_ipv6 = route_arguments.policy.ipv6_override().unwrap_or(false);
-    let overrides = dns_arguments.as_overrides();
+    let overrides = dns_arguments.applied_to(&DnsOverrides::default());
     if overrides.split_mode == Some(SplitDnsMode::Managed) {
         return Err(Error::InvalidConfig(
             "direct connect cannot use managed split DNS without controller domain rules".into(),
@@ -962,39 +981,60 @@ struct ManagedContext {
 }
 
 #[cfg(feature = "managed")]
+const MANAGED_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(feature = "managed")]
+const MANAGED_OIDC_REDIRECT_URI: &str = "com.panabit.mobile://oauth2redirect";
+#[cfg(feature = "managed")]
+const MANAGED_PASSWORD_ENV: &str = "OPENIWAN_PASSWORD";
+
+#[cfg(feature = "managed")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedAuthenticationIntent {
+    FreshAndPersist,
+    ReuseOrEphemeral,
+}
+
+#[cfg(feature = "managed")]
 fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
-    let mut context = resolve_managed_context(&arguments, store)?;
-    let cache_directory = arguments
-        .cache_dir
-        .clone()
-        .or_else(|| Some(store.cache_directory()));
-    let client = DomainClient::new(cache_directory);
-    let discovered = client.discover(&context.domain, &context.device_id)?;
     match arguments.action {
-        ManagedCommand::Discover => print_discovery(&discovered, &context.device_id),
+        ManagedCommand::Discover(discover) => {
+            let (context, _, discovered) = load_managed_domain(&discover.target, store, false)?;
+            print_discovery(&discovered, &context.device_id);
+        }
         ManagedCommand::Login(login) => {
+            let target = ManagedTargetArgs {
+                profile: login.target.profile,
+                domain: None,
+            };
+            let (mut context, client, discovered) = load_managed_domain(&target, store, true)?;
             let line = context.line.clone();
             let prepared = prepare_managed(
                 &client,
                 &discovered,
                 store,
                 &mut context,
-                &login,
+                &login.auth,
                 &line,
-                arguments.probe_timeout,
+                ManagedAuthenticationIntent::FreshAndPersist,
             )?;
             print_prepared(&prepared);
         }
         ManagedCommand::Connect(connect) => {
-            let line = context.line.clone();
+            let (mut context, client, discovered) =
+                load_managed_domain(&connect.target, store, false)?;
+            let line = connect
+                .connection
+                .line
+                .clone()
+                .unwrap_or_else(|| context.line.clone());
             let prepared = prepare_managed(
                 &client,
                 &discovered,
                 store,
                 &mut context,
-                &connect.login,
+                &connect.auth,
                 &line,
-                arguments.probe_timeout,
+                ManagedAuthenticationIntent::ReuseOrEphemeral,
             )?;
             print_prepared(&prepared);
             run_managed_client(
@@ -1008,20 +1048,28 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
         }
         #[cfg(feature = "forward")]
         ManagedCommand::Forward(forward) => {
-            let line = context.line.clone();
+            let (mut context, client, discovered) =
+                load_managed_domain(&forward.target, store, false)?;
+            let line = forward
+                .connection
+                .line
+                .clone()
+                .unwrap_or_else(|| context.line.clone());
             let prepared = prepare_managed(
                 &client,
                 &discovered,
                 store,
                 &mut context,
-                &forward.login,
+                &forward.auth,
                 &line,
-                arguments.probe_timeout,
+                ManagedAuthenticationIntent::ReuseOrEphemeral,
             )?;
             print_prepared(&prepared);
             run_managed_forward(&prepared, &forward.forward, &context.dns)?;
         }
         ManagedCommand::Lines(lines) => {
+            let (mut context, client, discovered) =
+                load_managed_domain(&lines.target, store, false)?;
             // A stale saved preference must not prevent the recovery command
             // from listing current controller lines.
             let prepared = prepare_managed(
@@ -1029,32 +1077,38 @@ fn managed(arguments: ManagedArgs, store: &state::StateStore) -> Result<()> {
                 &discovered,
                 store,
                 &mut context,
-                &lines.login,
+                &lines.auth,
                 &LinePreference::Auto,
-                arguments.probe_timeout,
+                ManagedAuthenticationIntent::ReuseOrEphemeral,
             )?;
-            let probes = prepared.probe_lines(arguments.probe_timeout)?;
+            let probes = prepared.probe_lines(MANAGED_PROBE_TIMEOUT)?;
             print_line_probes(&probes, lines.json)?;
-            if let Some(preference) = lines.set {
-                let profile_name = context.profile_name.as_deref().ok_or_else(|| {
-                    Error::InvalidConfig("--set requires --profile or a default profile".into())
-                })?;
-                save_profile_line(store, profile_name, &preference, &probes)?;
-                println!("profile {profile_name}: line set to {preference}");
-            }
         }
     }
     Ok(())
 }
 
 #[cfg(feature = "managed")]
-fn resolve_managed_context(
-    arguments: &ManagedArgs,
+fn load_managed_domain(
+    target: &ManagedTargetArgs,
     store: &state::StateStore,
+    profile_required: bool,
+) -> Result<(ManagedContext, DomainClient, DiscoveredDomain)> {
+    let context = resolve_managed_context(target, store, profile_required)?;
+    let client = DomainClient::new(Some(store.cache_directory()));
+    let discovered = client.discover(&context.domain, &context.device_id)?;
+    Ok((context, client, discovered))
+}
+
+#[cfg(feature = "managed")]
+fn resolve_managed_context(
+    target: &ManagedTargetArgs,
+    store: &state::StateStore,
+    profile_required: bool,
 ) -> Result<ManagedContext> {
     let persisted = store.load()?;
-    let explicit_domain = arguments.domain.is_some();
-    let profile_name = if let Some(name) = &arguments.profile {
+    let explicit_domain = target.domain.is_some();
+    let profile_name = if let Some(name) = &target.profile {
         state::validate_profile_name(name)?;
         Some(name.clone())
     } else if !explicit_domain {
@@ -1073,17 +1127,21 @@ fn resolve_managed_context(
         })
         .transpose()?;
 
-    let domain = arguments
+    if profile_required && profile.is_none() {
+        return Err(Error::InvalidConfig(
+            "managed login requires --profile or a default profile".into(),
+        ));
+    }
+    let domain = target
         .domain
         .clone()
         .or_else(|| profile.as_ref().map(|profile| profile.domain.clone()))
         .ok_or_else(|| {
             Error::InvalidConfig("--domain is required when no default profile exists".into())
         })?;
-    let device_id = arguments
-        .device_id
-        .clone()
-        .or_else(|| profile.as_ref().map(|profile| profile.device_id.clone()))
+    let device_id = profile
+        .as_ref()
+        .map(|profile| profile.device_id.clone())
         .map_or_else(|| store.device_id(), Ok)?;
     openiwan::managed::validate_domain(&domain)?;
     if device_id.trim().is_empty() {
@@ -1536,32 +1594,6 @@ fn format_line_probes(probes: &[LineProbe]) -> String {
 }
 
 #[cfg(feature = "managed")]
-fn save_profile_line(
-    store: &state::StateStore,
-    profile_name: &str,
-    preference: &LinePreference,
-    probes: &[LineProbe],
-) -> Result<()> {
-    if !matches!(preference, LinePreference::Auto)
-        && !probes.iter().any(|probe| &probe.preference == preference)
-    {
-        return Err(Error::LineNotFound(preference.to_string()));
-    }
-    if let Some(probe) = probes.iter().find(|probe| &probe.preference == preference)
-        && !probe.reachable()
-    {
-        tracing::warn!(line = %preference, "saving a currently unreachable managed line");
-    }
-    store.update(|persisted| {
-        let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
-            Error::InvalidConfig(format!("profile {profile_name:?} does not exist"))
-        })?;
-        profile.line = preference.clone();
-        Ok(())
-    })
-}
-
-#[cfg(feature = "managed")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ManagedRoutingSelection {
     mode: RoutingMode,
@@ -1659,8 +1691,7 @@ fn run_managed_client(
     let defaults = prepared
         .configuration
         .dns_defaults(prepared.service_type() == ServiceType::Controller)?;
-    let cli_dns = dns_arguments.as_overrides();
-    let overrides = DnsOverrides::layered(profile_dns, &cli_dns);
+    let overrides = dns_arguments.applied_to(profile_dns);
     let policy = DnsPolicyResolver::resolve(&defaults, &overrides, &session.info().dns_servers)?;
     let physical = discover_physical_resolvers()?;
 
@@ -1855,18 +1886,26 @@ fn prepare_managed(
     discovered: &DiscoveredDomain,
     store: &state::StateStore,
     context: &mut ManagedContext,
-    arguments: &ManagedLoginArgs,
-    profile_line: &LinePreference,
-    ping_timeout: Duration,
+    arguments: &ManagedAuthArgs,
+    line: &LinePreference,
+    intent: ManagedAuthenticationIntent,
 ) -> Result<PreparedConnection> {
-    ensure_credential_id(store, context, arguments.save)?;
-    let line = arguments.line.as_ref().unwrap_or(profile_line);
     match discovered.auth.method {
         AuthMethod::Credential => {
-            prepare_managed_password(client, discovered, context, arguments, line, ping_timeout)
+            if arguments.posture_results.is_some() {
+                return Err(Error::InvalidConfig(
+                    "--posture-results is only valid for OIDC domains".into(),
+                ));
+            }
+            prepare_managed_password(client, discovered, store, context, arguments, line, intent)
         }
         AuthMethod::Oidc => {
-            prepare_managed_oidc(client, discovered, context, arguments, line, ping_timeout)
+            if arguments.username.is_some() || arguments.password_file.is_some() {
+                return Err(Error::InvalidConfig(
+                    "--username and --password-file are only valid for credential domains".into(),
+                ));
+            }
+            prepare_managed_oidc(client, discovered, store, context, arguments, line, intent)
         }
     }
 }
@@ -1875,24 +1914,26 @@ fn prepare_managed(
 fn prepare_managed_password(
     client: &DomainClient,
     discovered: &DiscoveredDomain,
-    context: &ManagedContext,
-    arguments: &ManagedLoginArgs,
+    store: &state::StateStore,
+    context: &mut ManagedContext,
+    arguments: &ManagedAuthArgs,
     line: &LinePreference,
-    ping_timeout: Duration,
+    intent: ManagedAuthenticationIntent,
 ) -> Result<PreparedConnection> {
     let explicit_password = read_explicit_managed_secret(arguments)?;
-    let stored = if explicit_password.is_none() && !arguments.reauth {
-        load_stored_credential(context.credential_id.as_deref())?
-    } else {
-        None
-    };
+    let stored =
+        if explicit_password.is_none() && intent == ManagedAuthenticationIntent::ReuseOrEphemeral {
+            load_stored_credential(context.credential_id.as_deref())?
+        } else {
+            None
+        };
     if matches!(
         stored.as_ref(),
         Some(credentials::StoredCredential::Oidc { .. })
     ) {
         return Err(Error::CredentialStore(
-            "saved authentication does not match this credential domain; use \
-             --reauth --save"
+            "saved authentication does not match this credential domain; run \
+             `openiwan managed login`"
                 .into(),
         ));
     }
@@ -1920,26 +1961,40 @@ fn prepare_managed_password(
         zeroize::Zeroizing::new(password.clone())
     } else if arguments.non_interactive {
         return Err(Error::CredentialStore(
-            "no saved password matches this profile; authenticate once with \
-             --reauth --save"
+            "no explicit or saved password matches this profile; run \
+             `openiwan managed login` or set OPENIWAN_PASSWORD"
                 .into(),
         ));
     } else {
         zeroize::Zeroizing::new(prompt_password("iWAN password: ")?)
     };
+    let used_saved_password = matches!(
+        stored.as_ref(),
+        Some(credentials::StoredCredential::Password {
+            username: stored_username,
+            ..
+        }) if stored_username == &username
+    );
     let prepared = client.password_login_with_line(
         discovered,
         &context.device_id,
         &username,
         password.as_str(),
-        ping_timeout,
+        MANAGED_PROBE_TIMEOUT,
         line,
-    )?;
-    if arguments.save {
-        credentials::CredentialStore::save(
-            context.credential_id.as_deref().expect("ensured above"),
+    );
+    let prepared = if used_saved_password {
+        prepared.map_err(saved_authentication_failed)?
+    } else {
+        prepared?
+    };
+    if intent == ManagedAuthenticationIntent::FreshAndPersist {
+        persist_managed_credential(
+            store,
+            context,
+            &username,
             credentials::StoredCredential::Password {
-                username,
+                username: username.clone(),
                 password: password.to_string(),
             },
         )?;
@@ -1951,23 +2006,24 @@ fn prepare_managed_password(
 fn prepare_managed_oidc(
     client: &DomainClient,
     discovered: &DiscoveredDomain,
-    context: &ManagedContext,
-    arguments: &ManagedLoginArgs,
+    store: &state::StateStore,
+    context: &mut ManagedContext,
+    arguments: &ManagedAuthArgs,
     line: &LinePreference,
-    ping_timeout: Duration,
+    intent: ManagedAuthenticationIntent,
 ) -> Result<PreparedConnection> {
-    let stored = if arguments.reauth {
-        None
-    } else {
+    let stored = if intent == ManagedAuthenticationIntent::ReuseOrEphemeral {
         load_stored_credential(context.credential_id.as_deref())?
+    } else {
+        None
     };
     if matches!(
         stored.as_ref(),
         Some(credentials::StoredCredential::Password { .. })
     ) {
         return Err(Error::CredentialStore(
-            "saved authentication does not match this OIDC domain; use \
-             --reauth --save"
+            "saved authentication does not match this OIDC domain; run \
+             `openiwan managed login`"
                 .into(),
         ));
     }
@@ -1984,17 +2040,17 @@ fn prepare_managed_oidc(
             client,
             discovered,
             context,
-            arguments,
             refresh_token,
             user_id,
             username,
-        )?,
+        )
+        .map_err(saved_authentication_failed)?,
         _ if arguments.non_interactive => {
             return Err(Error::CredentialStore(
-                "no saved OIDC session is available; authenticate once with --save".into(),
+                "no reusable OIDC session is available; run `openiwan managed login`".into(),
             ));
         }
-        _ => interactive_oidc(client, discovered, &arguments.redirect_uri)?,
+        _ => interactive_oidc(client, discovered, MANAGED_OIDC_REDIRECT_URI)?,
     };
     let posture_results = read_posture_results(arguments.posture_results.as_deref())?;
     let prepared = client.oidc_login_with_options(
@@ -2003,16 +2059,18 @@ fn prepare_managed_oidc(
         &identity,
         OidcLoginOptions {
             posture_check_results: &posture_results,
-            posture_version: arguments.posture_version,
-            ping_timeout,
+            posture_version: None,
+            ping_timeout: MANAGED_PROBE_TIMEOUT,
             line,
         },
-    )?;
-    if arguments.save && !used_saved_identity {
-        save_oidc_identity(
-            context.credential_id.as_deref().expect("ensured above"),
-            &identity,
-        )?;
+    );
+    let prepared = if used_saved_identity {
+        prepared.map_err(saved_authentication_failed)?
+    } else {
+        prepared?
+    };
+    if intent == ManagedAuthenticationIntent::FreshAndPersist {
+        persist_oidc_identity(store, context, &identity)?;
     }
     Ok(prepared)
 }
@@ -2022,14 +2080,13 @@ fn refresh_saved_oidc(
     client: &DomainClient,
     discovered: &DiscoveredDomain,
     context: &ManagedContext,
-    arguments: &ManagedLoginArgs,
     refresh_token: &str,
     user_id: &str,
     username: &str,
 ) -> Result<openiwan::managed::OidcIdentity> {
     let identity = client.refresh_oidc(
         discovered,
-        &arguments.redirect_uri,
+        MANAGED_OIDC_REDIRECT_URI,
         refresh_token,
         user_id,
         username,
@@ -2078,16 +2135,35 @@ fn save_oidc_identity(
 }
 
 #[cfg(feature = "managed")]
-fn ensure_credential_id(
+fn persist_oidc_identity(
     store: &state::StateStore,
     context: &mut ManagedContext,
-    required: bool,
+    identity: &openiwan::managed::OidcIdentity,
 ) -> Result<()> {
-    if !required || context.credential_id.is_some() {
-        return Ok(());
+    let credential_id = ensure_credential_id(store, context)?;
+    save_oidc_identity(&credential_id, identity)?;
+    sync_profile_username(store, context, &identity.username)
+}
+
+#[cfg(feature = "managed")]
+fn persist_managed_credential(
+    store: &state::StateStore,
+    context: &mut ManagedContext,
+    username: &str,
+    credential: credentials::StoredCredential,
+) -> Result<()> {
+    let credential_id = ensure_credential_id(store, context)?;
+    credentials::CredentialStore::save(&credential_id, credential)?;
+    sync_profile_username(store, context, username)
+}
+
+#[cfg(feature = "managed")]
+fn ensure_credential_id(store: &state::StateStore, context: &mut ManagedContext) -> Result<String> {
+    if let Some(identifier) = &context.credential_id {
+        return Ok(identifier.clone());
     }
     let profile_name = context.profile_name.as_deref().ok_or_else(|| {
-        Error::InvalidConfig("--save requires --profile or a default profile".into())
+        Error::InvalidConfig("managed login requires --profile or a default profile".into())
     })?;
     let identifier = store.update(|persisted| {
         let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
@@ -2095,7 +2171,27 @@ fn ensure_credential_id(
         })?;
         Ok(profile.ensure_credential_id()?.to_owned())
     })?;
-    context.credential_id = Some(identifier);
+    context.credential_id = Some(identifier.clone());
+    Ok(identifier)
+}
+
+#[cfg(feature = "managed")]
+fn sync_profile_username(
+    store: &state::StateStore,
+    context: &mut ManagedContext,
+    username: &str,
+) -> Result<()> {
+    let profile_name = context.profile_name.as_deref().ok_or_else(|| {
+        Error::InvalidConfig("managed login requires --profile or a default profile".into())
+    })?;
+    store.update(|persisted| {
+        let profile = persisted.profiles.get_mut(profile_name).ok_or_else(|| {
+            Error::InvalidConfig(format!("profile {profile_name:?} does not exist"))
+        })?;
+        profile.username = Some(username.to_owned());
+        Ok(())
+    })?;
+    context.username = Some(username.to_owned());
     Ok(())
 }
 
@@ -2104,6 +2200,13 @@ fn load_stored_credential(
     credential_id: Option<&str>,
 ) -> Result<Option<credentials::StoredCredential>> {
     credential_id.map_or(Ok(None), credentials::CredentialStore::load)
+}
+
+#[cfg(feature = "managed")]
+fn saved_authentication_failed(error: Error) -> Error {
+    Error::CredentialStore(format!(
+        "saved authentication failed: {error}; run `openiwan managed login`"
+    ))
 }
 
 #[cfg(feature = "managed")]
@@ -2152,7 +2255,7 @@ fn print_prepared(prepared: &PreparedConnection) {
 }
 
 #[cfg(feature = "managed")]
-fn read_explicit_managed_secret(arguments: &ManagedLoginArgs) -> Result<Option<String>> {
+fn read_explicit_managed_secret(arguments: &ManagedAuthArgs) -> Result<Option<String>> {
     if let Some(path) = &arguments.password_file {
         validate_secret_file(path)?;
         let mut contents = fs::read_to_string(path)?;
@@ -2165,7 +2268,7 @@ fn read_explicit_managed_secret(arguments: &ManagedLoginArgs) -> Result<Option<S
         contents.zeroize();
         return password.map(Some);
     }
-    if let Ok(password) = std::env::var(&arguments.password_env)
+    if let Ok(password) = std::env::var(MANAGED_PASSWORD_ENV)
         && !password.is_empty()
     {
         return Ok(Some(password));
@@ -2508,7 +2611,7 @@ mod tests {
         let Command::Connect(arguments) = parsed.command else {
             panic!("expected connect");
         };
-        let overrides = arguments.dns.as_overrides();
+        let overrides = arguments.dns.applied_to(&DnsOverrides::default());
         assert_eq!(overrides.server_mode, Some(DnsServerMode::Custom));
         assert_eq!(overrides.servers, Some(vec![Ipv4Addr::new(192, 0, 2, 53)]));
         assert_eq!(overrides.split_mode, Some(SplitDnsMode::Custom));
@@ -2517,6 +2620,32 @@ mod tests {
             Some(vec!["@corp.example".parse().unwrap()])
         );
         assert_eq!(overrides.encrypted_dns, Some(EncryptedDnsMode::Block));
+    }
+
+    #[test]
+    fn explicit_dns_inherit_clears_lower_precedence_profile_values() {
+        let lower = DnsOverrides {
+            server_mode: Some(DnsServerMode::Custom),
+            servers: Some(vec![Ipv4Addr::new(192, 0, 2, 53)]),
+            split_mode: Some(SplitDnsMode::Custom),
+            split_domains: Some(vec!["@corp.example".parse().unwrap()]),
+            encrypted_dns: Some(EncryptedDnsMode::Block),
+            doh_hosts: Some(vec!["dns.example".into()]),
+        };
+        let arguments = DnsOverrideArgs {
+            dns_mode: Some(DnsServerModeArg::Inherit),
+            split_dns_mode: Some(SplitDnsModeArg::Inherit),
+            encrypted_dns: Some(EncryptedDnsModeArg::Inherit),
+            ..DnsOverrideArgs::default()
+        };
+
+        let overrides = arguments.applied_to(&lower);
+        assert_eq!(overrides.server_mode, None);
+        assert_eq!(overrides.servers, None);
+        assert_eq!(overrides.split_mode, None);
+        assert_eq!(overrides.split_domains, None);
+        assert_eq!(overrides.encrypted_dns, Some(EncryptedDnsMode::Inherit));
+        assert_eq!(overrides.doh_hosts, lower.doh_hosts);
     }
 
     #[test]
@@ -2593,9 +2722,9 @@ mod tests {
             let parsed = Cli::try_parse_from([
                 "openiwan",
                 "managed",
+                "connect",
                 "--domain",
                 "iwan.example",
-                "connect",
                 "--routing-mode",
                 "custom",
                 "--allow-ipv6",
@@ -2745,43 +2874,103 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "managed",
-            "--domain",
-            "iwan.ustc",
-            "--device-id",
-            "device-1",
-            "--probe-timeout",
-            "750ms",
             "login",
+            "--profile",
+            "work",
             "--username",
             "alice",
-            "--posture-version",
-            "2",
-            "--save",
-            "--reauth",
             "--non-interactive",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Command::Managed(ManagedArgs {
-                domain,
-                device_id,
-                probe_timeout,
                 action: ManagedCommand::Login(ManagedLoginArgs {
-                    posture_version: Some(version),
-                    username: Some(username),
-                    save: true,
-                    reauth: true,
-                    non_interactive: true,
-                    ..
+                    target: ManagedProfileTargetArgs {
+                        profile: Some(profile),
+                    },
+                    auth: ManagedAuthArgs {
+                        username: Some(username),
+                        non_interactive: true,
+                        ..
+                    }
                 }),
-                ..
-            }) if domain.as_deref() == Some("iwan.ustc")
-                && device_id.as_deref() == Some("device-1")
-                && probe_timeout == Duration::from_millis(750)
-                && username == "alice"
-                && version == 2
+            }) if profile == "work" && username == "alice"
         ));
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn managed_cli_rejects_removed_and_misplaced_options() {
+        for arguments in [
+            vec![
+                "openiwan",
+                "managed",
+                "--domain",
+                "iwan.example",
+                "discover",
+            ],
+            vec![
+                "openiwan",
+                "managed",
+                "discover",
+                "--state-dir",
+                "/tmp/state",
+            ],
+            vec!["openiwan", "managed", "discover", "--device-id", "device-1"],
+            vec![
+                "openiwan",
+                "managed",
+                "discover",
+                "--cache-dir",
+                "/tmp/cache",
+            ],
+            vec!["openiwan", "managed", "lines", "--probe-timeout", "3s"],
+            vec!["openiwan", "managed", "login", "--password-env", "PASSWORD"],
+            vec![
+                "openiwan",
+                "managed",
+                "login",
+                "--redirect-uri",
+                "app://callback",
+            ],
+            vec!["openiwan", "managed", "login", "--posture-version", "1"],
+            vec!["openiwan", "managed", "login", "--save"],
+            vec!["openiwan", "managed", "login", "--reauth"],
+            vec!["openiwan", "managed", "login", "--line", "auto"],
+            vec!["openiwan", "managed", "login", "--domain", "iwan.example"],
+            vec!["openiwan", "profile", "--state-dir", "/tmp/state", "list"],
+        ] {
+            assert!(
+                Cli::try_parse_from(arguments.clone()).is_err(),
+                "{arguments:?} should be rejected"
+            );
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "managed",
+                "connect",
+                "--profile",
+                "work",
+                "--domain",
+                "iwan.example",
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn saved_authentication_errors_direct_users_to_managed_login() {
+        let error = saved_authentication_failed(Error::AuthenticationRejected {
+            code: 1,
+            message: "invalid password".into(),
+        });
+        let message = error.to_string();
+        assert!(message.contains("invalid password"));
+        assert!(message.contains("openiwan managed login"));
     }
 
     #[cfg(all(feature = "managed", feature = "forward"))]
@@ -2790,11 +2979,13 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "managed",
+            "forward",
             "--domain",
             "iwan.ustc",
-            "forward",
             "--username",
             "alice",
+            "--line",
+            "iwan:7",
             "--target",
             "tcp://db.internal.example:5432",
             "--listen",
@@ -2804,18 +2995,23 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Command::Managed(ManagedArgs {
-                domain,
-                device_id: None,
                 action: ManagedCommand::Forward(ManagedForwardArgs {
-                    login: ManagedLoginArgs {
+                    target: ManagedTargetArgs {
+                        domain: Some(domain),
+                        ..
+                    },
+                    auth: ManagedAuthArgs {
                         username: Some(username),
                         ..
                     },
+                    connection: ManagedConnectionOverrideArgs {
+                        line: Some(LinePreference::Iwan { server_id }),
+                    },
                     forward: ForwardOptions { target, listen, .. },
                 }),
-                ..
-            }) if domain.as_deref() == Some("iwan.ustc")
+            }) if domain == "iwan.ustc"
                 && username == "alice"
+                && server_id == "7"
                 && target == "tcp://db.internal.example:5432"
                 && listen == "127.0.0.1:9543".parse().unwrap()
         ));
@@ -2825,18 +3021,13 @@ mod tests {
     #[test]
     fn managed_context_generates_and_reuses_device_id() {
         let store = test_state_store("context-device-id");
-        let arguments = ManagedArgs {
-            state_dir: None,
+        let target = ManagedTargetArgs {
             profile: None,
             domain: Some("iwan.example".into()),
-            device_id: None,
-            cache_dir: None,
-            probe_timeout: Duration::from_secs(2),
-            action: ManagedCommand::Discover,
         };
 
-        let first = resolve_managed_context(&arguments, &store).unwrap();
-        let second = resolve_managed_context(&arguments, &store).unwrap();
+        let first = resolve_managed_context(&target, &store, false).unwrap();
+        let second = resolve_managed_context(&target, &store, false).unwrap();
         assert_eq!(first.device_id, second.device_id);
         assert_eq!(first.device_id, store.load().unwrap().device_id);
 
@@ -2868,6 +3059,42 @@ mod tests {
         assert!(!state.device_id.is_empty());
         assert_eq!(state.profiles["work"].device_id, state.device_id);
 
+        fs::remove_dir_all(store.directory()).unwrap();
+    }
+
+    #[cfg(feature = "managed")]
+    #[test]
+    fn successful_managed_login_can_synchronize_the_profile_username() {
+        let store = test_state_store("profile-login-username");
+        set_profile(
+            ProfileSetArgs {
+                name: "work".into(),
+                domain: Some("iwan.example".into()),
+                device_id: None,
+                username: Some("old-user".into()),
+                unset_username: false,
+                line: None,
+                routing: ProfileRoutingArgs::default(),
+                dns: DnsOverrideArgs::default(),
+                reset_dns: false,
+                unset_dns: Vec::new(),
+            },
+            &store,
+        )
+        .unwrap();
+        let target = ManagedTargetArgs {
+            profile: Some("work".into()),
+            domain: None,
+        };
+        let mut context = resolve_managed_context(&target, &store, true).unwrap();
+
+        sync_profile_username(&store, &mut context, "alice").unwrap();
+
+        assert_eq!(context.username.as_deref(), Some("alice"));
+        assert_eq!(
+            store.load().unwrap().profiles["work"].username.as_deref(),
+            Some("alice")
+        );
         fs::remove_dir_all(store.directory()).unwrap();
     }
 
@@ -2909,26 +3136,37 @@ mod tests {
         let parsed = Cli::try_parse_from([
             "openiwan",
             "managed",
+            "lines",
             "--profile",
             "work",
-            "lines",
-            "--set",
-            "sr:3",
             "--json",
         ])
         .unwrap();
         assert!(matches!(
             parsed.command,
             Command::Managed(ManagedArgs {
-                profile: Some(name),
                 action: ManagedCommand::Lines(ManagedLinesArgs {
-                    set: Some(LinePreference::SegmentRouting { group_id: 3 }),
+                    target: ManagedTargetArgs {
+                        profile: Some(name),
+                        ..
+                    },
                     json: true,
                     ..
                 }),
-                ..
             }) if name == "work"
         ));
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "managed",
+                "lines",
+                "--profile",
+                "work",
+                "--set",
+                "sr:3",
+            ])
+            .is_err()
+        );
 
         let parsed = Cli::try_parse_from(["openiwan", "profile", "logout", "work"]).unwrap();
         assert!(matches!(

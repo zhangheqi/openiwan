@@ -104,12 +104,12 @@ openiwan profile set work --domain iwan.example --username alice --routing-mode 
 
 ```console
 openiwan managed discover
-openiwan managed login --save
+openiwan managed login
 sudo openiwan managed connect
 ```
 
-首个 profile 会自动成为默认项。OIDC 域会输出授权 URL 并要求粘贴完整回调 URL；
-密码域从配置的受保护来源读取密码。
+首个 profile 会自动成为默认项。`managed login` 总是执行新认证并保存到该 profile。
+OIDC 域会输出授权 URL 并要求粘贴完整回调 URL；密码域从配置的受保护来源读取密码。
 
 ### 不改路由的转发
 

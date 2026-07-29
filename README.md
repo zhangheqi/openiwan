@@ -112,13 +112,14 @@ credential store, and connect:
 
 ```console
 openiwan managed discover
-openiwan managed login --save
+openiwan managed login
 sudo openiwan managed connect
 ```
 
-The first profile becomes the default. OIDC domains print an authorization
-URL and ask for the complete callback URL; credential domains read the
-password from the configured protected source.
+The first profile becomes the default. `managed login` always performs fresh
+authentication and saves it for that profile. OIDC domains print an
+authorization URL and ask for the complete callback URL; credential domains
+read the password from the configured protected source.
 
 ### Route-free forwarding
 

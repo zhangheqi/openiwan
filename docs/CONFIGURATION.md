@@ -114,7 +114,7 @@ one-shot CLI > profile > controller policy > OPEN_ACK and service defaults
 
 | Mode | Behavior |
 |---|---|
-| `inherit` | Remove a profile scalar override |
+| `inherit` | Use controller/default DNS for this command; remove the scalar in `profile set` |
 | `server` | Use controller/server-list DNS, then OPEN_ACK DNS |
 | `custom` | Require one or two repeatable `--dns-server IP` values |
 | `disabled` | Install no VPN DNS |
@@ -129,7 +129,7 @@ documented in [Managed Connections](MANAGED_CONNECTIONS.md).
 
 | Mode | Behavior |
 |---|---|
-| `inherit` | Remove a profile scalar override |
+| `inherit` | Use controller/default split DNS for this command; remove the scalar in `profile set` |
 | `off` | Do not split by domain |
 | `tunnel-all` | Send every DNS query through iWAN |
 | `managed` | Use controller include/exclude rules |
@@ -201,8 +201,8 @@ Default state locations:
 | macOS | `~/Library/Application Support/openiwan` |
 | Other Unix | `$XDG_STATE_HOME/openiwan` or `~/.local/state/openiwan` |
 
-`--state-dir DIR` or `OPENIWAN_STATE_DIR` overrides the location. Domain lookup
-cache data is stored in its `cache` child unless `--cache-dir` is passed.
+`OPENIWAN_STATE_DIR` overrides the location. Domain lookup cache data is
+always stored in its `cache` child.
 
 Changing a profile's domain, Device ID, or username invalidates its associated
 saved authentication. Removing a profile deletes that authentication.
@@ -221,7 +221,7 @@ connection options.
 
 ## Credential storage
 
-`managed login --save` writes verified authentication to:
+`managed login` writes verified authentication to:
 
 | Platform | Store |
 |---|---|

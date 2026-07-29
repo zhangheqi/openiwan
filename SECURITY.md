@@ -118,11 +118,11 @@ directories use mode `0700`, files use `0600`, and symlinked state paths are
 rejected. The optional seven-day lookup cache contains controller addresses
 and customer-domain metadata; keep its directory private.
 
-`managed login --save` stores verified passwords or OIDC refresh tokens in
-macOS Keychain, Windows Credential Manager, or the Unix Secret Service.
+`managed login` stores verified passwords or OIDC refresh tokens in macOS
+Keychain, Windows Credential Manager, or the Unix Secret Service.
 Operating-system credential stores are scoped to a security principal.
-Passing `--state-dir` through `sudo` does not make another account's saved
-credential available.
+Preserving `OPENIWAN_STATE_DIR` through `sudo` does not make another account's
+saved credential available.
 
 Use `--non-interactive` for services so unavailable, locked, revoked, or
 mismatched authentication fails instead of waiting on input.

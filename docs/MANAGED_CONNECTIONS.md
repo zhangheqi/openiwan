@@ -317,7 +317,8 @@ cache and does not call `/posture/evaluate` in this case.
 The CLI accepts already evaluated local results using
 `--posture-results FILE`. The file must contain the exact JSON array sent as
 `check_results`; collecting platform posture data remains the calling
-application's responsibility.
+application's responsibility. The CLI does not accept a cached posture
+version and always obtains the effective version from the controller.
 
 ## CLI state and saved authentication
 
@@ -325,8 +326,10 @@ The CLI generates one installation Device ID and persists non-secret profiles.
 A profile stores domain, Device ID, optional username, stable line preference,
 DNS overrides, and an opaque credential reference.
 
-Passwords and OIDC refresh tokens can be saved only through the operating
-system credential service. Access tokens, controller responses, generated
+`managed login` always performs fresh authentication and saves passwords or
+OIDC refresh tokens through the operating-system credential service. Other
+managed commands reuse saved authentication when available but do not persist
+an interactive fallback. Access tokens, controller responses, generated
 credentials, and SR keys remain in memory.
 
 On a later OIDC process, the client sends

@@ -132,7 +132,7 @@ pub struct LookupCache {
 impl LookupCache {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
-            directory: directory.into(),
+            directory: directory.into().join("lookup"),
         }
     }
 
@@ -168,7 +168,7 @@ impl LookupCache {
     }
 
     fn path(&self, domain: &str) -> PathBuf {
-        self.directory.join(format!("lookup_cache_{domain}.json"))
+        self.directory.join(format!("{domain}.json"))
     }
 }
 
@@ -665,6 +665,10 @@ mod tests {
     #[test]
     fn cache_paths_do_not_alias_allowed_domain_characters() {
         let cache = LookupCache::new("/tmp/openiwan-lookup-cache-path-test");
+        assert_eq!(
+            cache.path("iwan.ustc"),
+            PathBuf::from("/tmp/openiwan-lookup-cache-path-test/lookup/iwan.ustc.json")
+        );
         assert_ne!(cache.path("a@b"), cache.path("a#b"));
         assert_ne!(cache.path("a#b"), cache.path("a$b"));
     }

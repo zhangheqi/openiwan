@@ -34,8 +34,9 @@ Lookup sends a JSON `POST /lookup` request to:
 
 Each endpoint is attempted twice. A successful fuzzy result may supply
 `completeDomain`, which becomes the active domain. Failed live lookup falls
-back to a local `lookup_cache_<domain>.json` entry for seven days. Cache
-failures never turn a successful network lookup into an error.
+back to a local `lookup/<domain>.json` entry below the cache directory for
+seven days. Cache failures never turn a successful network lookup into an
+error.
 
 Every attempt carries the platform `X-Auth-AppId`,
 `X-Auth-Timestamp`, `X-Auth-Nonce`, and `X-Auth-Sign` headers. The signature is

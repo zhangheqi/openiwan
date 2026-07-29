@@ -29,6 +29,8 @@ pub struct TunDevice {
     #[cfg(windows)]
     luid: u64,
     #[cfg(windows)]
+    gateway: Option<IpAddr>,
+    #[cfg(windows)]
     runtime: tokio::runtime::Runtime,
 }
 
@@ -38,6 +40,8 @@ impl fmt::Debug for TunDevice {
         debug.field("name", &self.name);
         #[cfg(windows)]
         debug.field("luid", &self.luid);
+        #[cfg(windows)]
+        debug.field("gateway", &self.gateway);
         debug.finish_non_exhaustive()
     }
 }
@@ -47,6 +51,7 @@ struct InterfaceSettings {
     name: Option<String>,
     address: IpAddr,
     netmask: IpAddr,
+    gateway: Option<IpAddr>,
     mtu: u16,
 }
 
@@ -63,6 +68,11 @@ impl TunDevice {
     #[cfg(windows)]
     const fn luid(&self) -> u64 {
         self.luid
+    }
+
+    #[cfg(windows)]
+    const fn gateway(&self) -> Option<IpAddr> {
+        self.gateway
     }
 
     pub fn dns_platform_target(&self) -> DnsPlatformTarget {
@@ -87,12 +97,27 @@ fn interface_settings(
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::BROADCAST),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::from(u128::MAX)),
     };
+    let gateway = session
+        .gateway
+        .filter(|gateway| usable_gateway(*gateway, address));
     Ok(InterfaceSettings {
         name,
         address,
         netmask,
+        gateway,
         mtu: session.mtu,
     })
+}
+
+fn usable_gateway(gateway: IpAddr, address: IpAddr) -> bool {
+    gateway.is_ipv4() == address.is_ipv4() && gateway != address && usable_gateway_address(gateway)
+}
+
+fn usable_gateway_address(gateway: IpAddr) -> bool {
+    !gateway.is_unspecified()
+        && !gateway.is_loopback()
+        && !gateway.is_multicast()
+        && gateway != IpAddr::V4(Ipv4Addr::BROADCAST)
 }
 
 fn platform_tun_name(requested_name: Option<&str>) -> Result<Option<String>> {
@@ -255,6 +280,7 @@ fn open_device(settings: &InterfaceSettings) -> Result<TunDevice> {
         reader: std::sync::Mutex::new(reader),
         writer: std::sync::Mutex::new(writer),
         luid,
+        gateway: settings.gateway,
         runtime,
     })
 }
@@ -763,7 +789,7 @@ fn configure_routes(device: &TunDevice, routes: &[Route]) -> Result<PlatformRout
 
 #[cfg(windows)]
 fn configure_routes(device: &TunDevice, routes: &[Route]) -> Result<PlatformRoutes> {
-    windows_routes::WindowsRoutes::configure(device.luid(), routes)
+    windows_routes::WindowsRoutes::configure(device.luid(), device.gateway(), routes)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -837,10 +863,63 @@ fn run_command(program: &str, arguments: &[&str]) -> Result<()> {
 }
 
 #[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RouteRequest {
+    route: Route,
+    next_hop: Option<IpAddr>,
+}
+
+#[cfg(any(windows, test))]
+impl RouteRequest {
+    const fn on_link(route: Route) -> Self {
+        Self {
+            route,
+            next_hop: None,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_route_requests(routes: &[Route], gateway: Option<IpAddr>) -> Vec<RouteRequest> {
+    let gateway = gateway.filter(|gateway| usable_gateway_address(*gateway));
+    let Some(gateway) = gateway else {
+        return routes.iter().cloned().map(RouteRequest::on_link).collect();
+    };
+    let gateway_route = Route {
+        network: gateway,
+        prefix: if gateway.is_ipv4() { 32 } else { 128 },
+    };
+    let uses_gateway = routes
+        .iter()
+        .any(|route| route.network.is_ipv4() == gateway.is_ipv4());
+    if !uses_gateway {
+        return routes.iter().cloned().map(RouteRequest::on_link).collect();
+    }
+
+    // An unspecified next hop makes Windows treat a prefix as on-link. For
+    // remote prefixes that can synthesize `Protocol=Local` host routes for
+    // their highest addresses. Keep only the gateway itself on-link, then
+    // route every matching-family data prefix through that gateway.
+    let mut requests = Vec::with_capacity(routes.len() + 1);
+    requests.push(RouteRequest::on_link(gateway_route.clone()));
+    requests.extend(
+        routes
+            .iter()
+            .filter(|route| *route != &gateway_route)
+            .cloned()
+            .map(|route| RouteRequest {
+                next_hop: (route.network.is_ipv4() == gateway.is_ipv4()).then_some(gateway),
+                route,
+            }),
+    );
+    requests
+}
+
+#[cfg(any(windows, test))]
 trait RouteBackend {
     type Row: Clone;
 
-    fn desired(&self, route: &Route) -> std::io::Result<Self::Row>;
+    fn desired(&self, request: &RouteRequest) -> std::io::Result<Self::Row>;
     fn get(&self, desired: &Self::Row) -> std::io::Result<Option<Self::Row>>;
     fn equivalent(&self, existing: &Self::Row, desired: &Self::Row) -> bool;
     fn create(&self, desired: &Self::Row) -> std::io::Result<()>;
@@ -857,12 +936,12 @@ enum RouteChange<Row> {
 #[cfg(any(windows, test))]
 fn apply_route_transaction<B: RouteBackend>(
     backend: &B,
-    routes: &[Route],
+    requests: &[RouteRequest],
 ) -> std::io::Result<Vec<RouteChange<B::Row>>> {
     let mut changes = Vec::new();
-    for route in routes {
+    for request in requests {
         let result = (|| {
-            let desired = backend.desired(route)?;
+            let desired = backend.desired(request)?;
             match backend.get(&desired)? {
                 None => {
                     backend.create(&desired)?;
@@ -904,8 +983,8 @@ fn rollback_route_transaction<B: RouteBackend>(
 #[cfg(windows)]
 mod windows_routes {
     use super::{
-        Error, Result, Route, RouteBackend, RouteChange, apply_route_transaction,
-        rollback_route_transaction,
+        Error, Result, Route, RouteBackend, RouteChange, RouteRequest, apply_route_transaction,
+        rollback_route_transaction, windows_route_requests,
     };
     use std::io;
     use std::net::IpAddr;
@@ -925,9 +1004,14 @@ mod windows_routes {
     }
 
     impl WindowsRoutes {
-        pub(super) fn configure(luid: u64, routes: &[Route]) -> Result<Self> {
+        pub(super) fn configure(
+            luid: u64,
+            gateway: Option<IpAddr>,
+            routes: &[Route],
+        ) -> Result<Self> {
             let backend = WindowsRouteBackend { luid };
-            let changes = apply_route_transaction(&backend, routes).map_err(|error| {
+            let requests = windows_route_requests(routes, gateway);
+            let changes = apply_route_transaction(&backend, &requests).map_err(|error| {
                 Error::Tun(format!(
                     "configure Windows routes through Wintun: {error}; \
                      run openiwan from an elevated terminal"
@@ -948,7 +1032,8 @@ mod windows_routes {
     impl RouteBackend for WindowsRouteBackend {
         type Row = MIB_IPFORWARD_ROW2;
 
-        fn desired(&self, route: &Route) -> io::Result<Self::Row> {
+        fn desired(&self, request: &RouteRequest) -> io::Result<Self::Row> {
+            let route = &request.route;
             let mut row = MIB_IPFORWARD_ROW2::default();
             // SAFETY: `row` is a writable MIB_IPFORWARD_ROW2 and the Windows
             // API only initializes that structure.
@@ -956,7 +1041,9 @@ mod windows_routes {
             row.InterfaceLuid = NET_LUID_LH { Value: self.luid };
             row.DestinationPrefix.Prefix = socket_address(route.network);
             row.DestinationPrefix.PrefixLength = route.prefix;
-            row.NextHop = unspecified_address(route.network);
+            row.NextHop = request
+                .next_hop
+                .map_or_else(|| unspecified_address(route.network), socket_address);
             row.SitePrefixLength = route.prefix;
             row.Metric = 0;
             row.Protocol = MIB_IPPROTO_NETMGMT;
@@ -1049,7 +1136,10 @@ mod windows_routes {
         fn builds_ipv4_and_ipv6_rows_for_the_wintun_luid() {
             let backend = WindowsRouteBackend { luid: 42 };
             let ipv4 = backend
-                .desired(&Route::parse("10.1.2.3/8").unwrap())
+                .desired(&RouteRequest {
+                    route: Route::parse("10.1.2.3/8").unwrap(),
+                    next_hop: Some("100.100.1.3".parse().unwrap()),
+                })
                 .unwrap();
             // SAFETY: desired selected the IPv4 and Value union members.
             assert_eq!(unsafe { ipv4.InterfaceLuid.Value }, 42);
@@ -1059,9 +1149,15 @@ mod windows_routes {
                 unsafe { ipv4.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr },
                 u32::from_ne_bytes([10, 0, 0, 0])
             );
+            assert_eq!(
+                unsafe { ipv4.NextHop.Ipv4.sin_addr.S_un.S_addr },
+                u32::from_ne_bytes([100, 100, 1, 3])
+            );
 
             let ipv6 = backend
-                .desired(&Route::parse("2001:db8:1::/32").unwrap())
+                .desired(&RouteRequest::on_link(
+                    Route::parse("2001:db8:1::/32").unwrap(),
+                ))
                 .unwrap();
             // SAFETY: desired selected the IPv6 union member.
             assert_eq!(unsafe { ipv6.DestinationPrefix.Prefix.si_family }, AF_INET6);
@@ -1094,6 +1190,12 @@ mod tests {
         }
     }
 
+    fn session_with_gateway(address: &str, gateway: &str) -> SessionInfo {
+        let mut session = session(Some(address.parse().unwrap()));
+        session.gateway = Some(gateway.parse().unwrap());
+        session
+    }
+
     #[test]
     fn derives_ipv4_and_ipv6_interface_settings() {
         let v4 = interface_settings(None, &session(Some("10.0.0.8".parse().unwrap()))).unwrap();
@@ -1103,6 +1205,25 @@ mod tests {
         let v6 = interface_settings(None, &session(Some("2001:db8::8".parse().unwrap()))).unwrap();
         assert_eq!(v6.netmask, IpAddr::V6(Ipv6Addr::from(u128::MAX)));
         assert!(interface_settings(None, &session(None)).is_err());
+    }
+
+    #[test]
+    fn keeps_only_usable_same_family_gateways() {
+        let v4 =
+            interface_settings(None, &session_with_gateway("198.18.3.233", "100.100.1.3")).unwrap();
+        assert_eq!(v4.gateway, Some("100.100.1.3".parse().unwrap()));
+
+        let mismatched =
+            interface_settings(None, &session_with_gateway("198.18.3.233", "2001:db8::1")).unwrap();
+        assert_eq!(mismatched.gateway, None);
+
+        let unspecified =
+            interface_settings(None, &session_with_gateway("198.18.3.233", "0.0.0.0")).unwrap();
+        assert_eq!(unspecified.gateway, None);
+
+        let loopback =
+            interface_settings(None, &session_with_gateway("198.18.3.233", "127.0.0.1")).unwrap();
+        assert_eq!(loopback.gateway, None);
     }
 
     #[test]
@@ -1232,6 +1353,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn windows_route_plan_bootstraps_and_uses_the_session_gateway() {
+        let gateway: IpAddr = "100.100.1.3".parse().unwrap();
+        let routes = [
+            Route::parse("96.0.0.0/4").unwrap(),
+            Route::parse("218.104.71.172/31").unwrap(),
+            Route::parse("100.100.1.3/32").unwrap(),
+            Route::parse("2001:db8::/32").unwrap(),
+        ];
+        let requests = windows_route_requests(&routes, Some(gateway));
+
+        assert_eq!(
+            requests,
+            [
+                RouteRequest::on_link(Route::parse("100.100.1.3/32").unwrap()),
+                RouteRequest {
+                    route: Route::parse("96.0.0.0/4").unwrap(),
+                    next_hop: Some(gateway),
+                },
+                RouteRequest {
+                    route: Route::parse("218.104.71.172/31").unwrap(),
+                    next_hop: Some(gateway),
+                },
+                RouteRequest::on_link(Route::parse("2001:db8::/32").unwrap()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_route_plan_preserves_on_link_fallback_without_a_gateway() {
+        let routes = [
+            Route::parse("10.0.0.0/8").unwrap(),
+            Route::parse("2001:db8::/32").unwrap(),
+        ];
+        assert_eq!(
+            windows_route_requests(&routes, None),
+            routes
+                .into_iter()
+                .map(RouteRequest::on_link)
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[derive(Default)]
     struct MockBackend {
         rows: Mutex<HashMap<String, u8>>,
@@ -1242,8 +1406,8 @@ mod tests {
     impl RouteBackend for MockBackend {
         type Row = (String, u8);
 
-        fn desired(&self, route: &Route) -> std::io::Result<Self::Row> {
-            Ok((route.to_string(), 0))
+        fn desired(&self, request: &RouteRequest) -> std::io::Result<Self::Row> {
+            Ok((request.route.to_string(), 0))
         }
 
         fn get(&self, desired: &Self::Row) -> std::io::Result<Option<Self::Row>> {
@@ -1301,12 +1465,13 @@ mod tests {
             Route::parse("192.0.2.0/24").unwrap(),
             Route::parse("2001:db8::/32").unwrap(),
         ];
+        let requests = routes.clone().map(RouteRequest::on_link);
         backend
             .fail_create
             .lock()
             .unwrap()
             .insert(routes[2].to_string());
-        assert!(apply_route_transaction(&backend, &routes).is_err());
+        assert!(apply_route_transaction(&backend, &requests).is_err());
         assert!(backend.rows.lock().unwrap().is_empty());
         assert_eq!(
             *backend.events.lock().unwrap(),
@@ -1323,8 +1488,8 @@ mod tests {
     fn route_transaction_restores_replaced_rows() {
         let backend = MockBackend::default();
         backend.rows.lock().unwrap().insert("10.0.0.0/8".into(), 42);
-        let routes = [Route::parse("10.0.0.0/8").unwrap()];
-        let mut changes = apply_route_transaction(&backend, &routes).unwrap();
+        let requests = [RouteRequest::on_link(Route::parse("10.0.0.0/8").unwrap())];
+        let mut changes = apply_route_transaction(&backend, &requests).unwrap();
         assert_eq!(backend.rows.lock().unwrap()["10.0.0.0/8"], 0);
         rollback_route_transaction(&backend, &mut changes);
         assert_eq!(backend.rows.lock().unwrap()["10.0.0.0/8"], 42);

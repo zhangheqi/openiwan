@@ -98,6 +98,9 @@ and public managed APIs.
 
 - Read the discovered service type from `data.type` while retaining
   `serviceType: "fgb"` in the signed lookup request.
+- Route Windows TUN prefixes through the authenticated session gateway, with
+  a transactional on-link gateway host route, so Windows does not synthesize
+  unusable `Local` routes for the highest address of remote prefixes.
 - Ignore an unusable `0.0.0.0` OPEN_ACK DNS address and use managed controller
   fallback resolvers when no usable configured server exists.
 - Store credentials larger than the Windows Credential Manager per-entry

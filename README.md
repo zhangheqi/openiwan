@@ -6,14 +6,13 @@
 [![MSRV](https://img.shields.io/crates/msrv/openiwan.svg)](https://crates.io/crates/openiwan)
 [![License](https://img.shields.io/crates/l/openiwan.svg)](LICENSE)
 
-An open-source iWAN client and Rust protocol library.
+Open-source iWAN client and Rust protocol library.
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-OpeniWAN can authenticate directly to an iWAN UDP endpoint, establish a
-native TUN tunnel, forward one TCP or HTTP(S) target without changing host
-routes, or discover and connect through a controller-managed customer domain.
-The library exposes the traditional and Segment Routing wire formats, client
+OpeniWAN supports direct iWAN authentication, native TUN tunnels,
+route-free TCP and HTTP(S) forwarding, and controller-managed connections.
+The crate also exposes the traditional and Segment Routing wire formats,
 session runtime, DNS policy engine, and managed-controller models.
 
 > [!IMPORTANT]
@@ -21,38 +20,28 @@ session runtime, DNS policy engine, and managed-controller models.
 > with or endorsed by Panabit or any network operator. Use it only with
 > systems and networks you are authorized to access.
 
-## Project status
+## Features
 
-The `main` branch may contain breaking changes from the latest published
-release. Documentation on this branch describes the unreleased interface; use
-the matching Git tag when working with a published version.
+- Traditional iWAN and Segment Routing transports
+- Direct and controller-managed authentication
+- Native TUN and route management on Linux, macOS, and Windows
+- Split-DNS policy and encrypted-DNS controls
+- Route-free forwarding to a fixed TCP or HTTP(S) target
+- Rust APIs for protocol, client, managed, DNS, and TUN integration
 
-| Area | Status |
-|---|---|
-| Traditional iWAN authentication and tunneling | Implemented |
-| Segment Routing transport and monitoring | Implemented |
-| Controller-managed credential and OIDC login | Implemented |
-| Linux, macOS, and Windows TUN integration | Implemented |
-| Route-free TCP and HTTP(S) forwarding | Implemented |
-| Vendor certification | Not provided |
+The iWAN protocol has security limitations that an implementation cannot
+remove. Review the [security model](SECURITY.md) before using OpeniWAN in a
+production network.
 
-OpeniWAN has defensive parsing, bounded resource use, cleanup transactions,
-tests, and cross-platform CI. It does not add cryptographic properties absent
-from the iWAN protocol, and interoperability can vary by deployment. Review
-the [security model](SECURITY.md) and validate against an authorized endpoint
-before production use.
+## Install
 
-## Installation
-
-OpeniWAN requires Rust 1.91 or newer.
-
-Install the latest published release:
+Install the latest published release from crates.io:
 
 ```console
 cargo install openiwan --locked
 ```
 
-Build the unreleased interface documented on `main`:
+To build from source:
 
 ```console
 git clone https://github.com/zhangheqi/openiwan.git
@@ -60,12 +49,8 @@ cd openiwan
 cargo build --release --locked
 ```
 
-The executable is written to `target/release/openiwan` (`openiwan.exe` on
-Windows). To install that checkout into Cargo's binary directory:
-
-```console
-cargo install --path . --locked
-```
+The required Rust version is declared in [Cargo.toml](Cargo.toml). The binary
+is written to `target/release/openiwan` (`openiwan.exe` on Windows).
 
 ## Quick start
 
@@ -87,58 +72,40 @@ Open a tunnel for one route:
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8
 ```
 
-Use all-IPv4 routing and prevent ordinary IPv6 traffic from bypassing the
-tunnel:
+Windows users should run tunnel commands from an elevated terminal and omit
+`sudo`. If `OPENIWAN_PASSWORD` is unset, the CLI prompts without echoing the
+password. A protected `--password-file` is also supported.
 
-```console
-sudo openiwan connect --server 192.0.2.10:6001 --username alice --routing-mode all --block-ipv6
-```
+### Managed connections
 
-Windows users run tunnel commands from an elevated terminal without `sudo`.
-If `OPENIWAN_PASSWORD` is unset, the CLI prompts without echoing the password.
-A protected `--password-file` is also supported; passwords are never accepted
-as command-line values.
-
-### Managed connection
-
-Creating TUN and changing routes normally requires elevation. On Unix, keep
-profile state, saved authentication, and the connection under the same
-operating-system account by using one elevated shell:
+Managed connections use a customer domain and can save authentication in the
+operating-system credential store. On Unix, create the profile, authenticate,
+and connect as the same elevated account:
 
 ```console
 sudo -H -s
-openiwan profile set work --domain iwan.example --username alice --routing-mode all --block-ipv6
-openiwan managed discover
-openiwan managed login
-openiwan managed connect
+openiwan profile set work --domain iwan.example --username alice
+openiwan managed login --profile work
+openiwan managed connect --profile work
 exit
 ```
 
-The first profile becomes the default. All commands that use a profile and its
-saved authentication must run as the same operating-system account.
-`managed login` always performs fresh authentication and saves it for that
-profile. OIDC domains print an authorization URL and ask for the complete
-callback URL; credential domains read the password from the configured
-protected source.
+See the [CLI guide](docs/CLI.md) for profile selection, OIDC login, routing,
+DNS, and non-interactive operation.
 
 ### Route-free forwarding
 
-Expose one fixed target on a loopback listener without creating TUN or
-modifying host routes:
+Forward a fixed target through iWAN without creating a TUN interface or
+changing host routes:
 
 ```console
 openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
 ```
 
 Targets may use `tcp://`, `http://`, or `https://`. HTTPS verifies the
-upstream certificate and can use repeatable `--ca-cert` files for additional
-trust anchors.
+upstream certificate; repeat `--ca-cert FILE` to add private trust anchors.
 
-See the [CLI guide](docs/CLI.md) for the complete command hierarchy,
-privilege requirements, profile lifecycle, automation output, duration
-syntax, and environment variables.
-
-## Library
+## Use as a library
 
 Add the crate with its default managed and forwarding features:
 
@@ -146,14 +113,11 @@ Add the crate with its default managed and forwarding features:
 cargo add openiwan
 ```
 
-For the protocol and direct client without optional managed or forwarding
-dependencies:
+Disable the optional managed and forwarding features:
 
 ```console
 cargo add openiwan --no-default-features
 ```
-
-Credentials are supplied separately from serializable configuration:
 
 ```rust
 use openiwan::{Client, ClientConfig, EncryptionMethod, Result};
@@ -165,57 +129,45 @@ fn client(password: String) -> Result<Client> {
 }
 ```
 
-Applications can provide their own `PacketDevice`, use a native `TunDevice`,
-or integrate the DNS and protocol modules independently. Public API
-documentation is published on [docs.rs](https://docs.rs/openiwan).
-
-### Cargo features
+API documentation is available on [docs.rs](https://docs.rs/openiwan).
 
 | Feature | Default | Provides |
 |---|:---:|---|
-| `managed` | Yes | Domain discovery, credential/OIDC authentication, controller policy, profiles, and keepalive models |
-| `forward` | Yes | Route-free TCP and HTTP(S) forwarding through a userspace IP stack |
-
-Core packet, crypto, Segment Routing, DNS policy, client, and TUN APIs are
-available without optional features.
+| `managed` | Yes | Domain discovery, controller authentication and policy, profiles, and keepalive models |
+| `forward` | Yes | Route-free TCP and HTTP(S) forwarding through a userspace network stack |
 
 ## Platform support
 
 | Platform | TUN and routes | Notes |
 |---|:---:|---|
-| Linux | Yes | Normally requires root or equivalent network capabilities |
-| macOS | Yes | Uses an automatically allocated `utunN` by default |
-| Windows 10/11 x86_64 | Yes | Requires an elevated terminal |
-| Windows 10/11 ARM64 | Yes | Requires an elevated terminal |
+| Linux | Yes | Requires root or equivalent network capabilities |
+| macOS | Yes | Uses an automatically allocated `utun` interface by default |
+| Windows x86_64 | Yes | Requires an elevated terminal |
+| Windows ARM64 | Yes | Requires an elevated terminal |
 
-The signed Wintun 0.14.1 binaries for Windows x86_64 and ARM64 are embedded in
-the executable. OpeniWAN validates the extracted library before loading it.
+Signed Wintun binaries for the supported Windows architectures are included
+in the crate and verified before loading.
 
 ## Documentation
 
-| Document | Purpose |
-|---|---|
-| [CLI guide](docs/CLI.md) | Commands, credentials, profiles, forwarding, privileges, and automation |
-| [Configuration guide](docs/CONFIGURATION.md) | TOML, routes, DNS policy, state, and precedence |
-| [Managed connections](docs/MANAGED_CONNECTIONS.md) | Domain lookup, authentication, controller policy, posture, and keepalive |
-| [Architecture](docs/ARCHITECTURE.md) | Components, lifecycle, trust boundaries, and cleanup |
-| [Protocol reference](docs/PROTOCOL.md) | Traditional, Segment Routing, and managed HTTP wire contracts |
-| [Protocol provenance](docs/PROTOCOL_PROVENANCE.md) | Evidence requirements and unresolved protocol areas |
-| [Security policy](SECURITY.md) | Vulnerability reporting and operational security boundaries |
-| [Changelog](CHANGELOG.md) | User-visible changes by release |
+- [Command-line guide](docs/CLI.md)
+- [Configuration](docs/CONFIGURATION.md)
+- [Managed connections](docs/MANAGED_CONNECTIONS.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Protocol reference](docs/PROTOCOL.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
-The [documentation index](docs/README.md) identifies the intended audience and
-authority of every guide.
+Documentation on the default branch may describe changes that have not been
+published yet. For a released build, use its built-in help, docs.rs page, and
+matching Git tag.
 
-## Contributing and support
+## Community
 
-Bug reports, feature proposals, documentation fixes, and reproducible
-interoperability evidence are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
-before making a substantial change. Use [SUPPORT.md](SUPPORT.md) to choose the
-right support channel, and report vulnerabilities privately as described in
-[SECURITY.md](SECURITY.md).
-
-All contributors must follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+Use [SUPPORT.md](SUPPORT.md) to report bugs or request help. Security issues
+must be reported privately as described in [SECURITY.md](SECURITY.md). All
+participants must follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

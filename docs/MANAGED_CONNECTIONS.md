@@ -1,361 +1,270 @@
 # Managed Connections
 
-The `managed` feature implements domain discovery, authentication, controller
-policy, ingress selection, and persistent tunnel setup on the current `main`
-branch.
+The `managed` feature turns a customer domain and user authentication into a
+validated `PreparedConnection`. It covers domain lookup, controller
+authentication and policy, posture and device gates, ingress selection, and
+credential preparation.
 
-This is an integration reference. Command examples and local state operations
-belong in the [CLI guide](CLI.md) and
-[Configuration guide](CONFIGURATION.md).
+This document is the integration contract. Exact HTTP and UDP wire forms are
+defined in the [Protocol Reference](PROTOCOL.md); CLI workflows and persistent
+state are covered by the [CLI guide](CLI.md) and
+[Configuration](CONFIGURATION.md).
 
 ```text
 customer domain
     -> lookup and canonical domain
     -> credential or OIDC authentication
-    -> controller/server-list configuration
+    -> server-list or controller configuration
     -> posture and device-binding gates
-    -> ingress probing and stable line selection
-    -> credential mode: temporary authentication OPEN and header-only CLOSE
-       OIDC mode: no temporary OPEN
-    -> persistent connection OPEN
+    -> line normalization, probing, and selection
+    -> PreparedConnection
+    -> fresh Client and persistent OPEN
 ```
 
-## Domain discovery
+## Public boundary
 
-Domains:
+| Type | Responsibility |
+|---|---|
+| `DomainClient` | Owns the HTTP transport, optional lookup cache, and managed operations |
+| `DiscoveredDomain` | Holds the validated lookup result, active domain, and authentication choice |
+| `PendingDomainAuthorization` | Owns one in-progress OIDC authorization, including state, nonce, and PKCE verifier |
+| `OidcIdentity` | Owns access and refresh tokens plus the subject, username, and expiry |
+| `ControllerConfiguration` | Exposes typed policy while retaining deployment-specific JSON through `raw()` |
+| `PreparedConnection` | Holds the selected ingress, normalized configuration, and ephemeral connection credentials |
 
-- must not be empty;
-- must contain at most 128 characters;
-- may contain only `A-Z`, `a-z`, `0-9`, `.`, `-`, `@`, `#`, `$`, and `_`.
+Applications normally keep one `DomainClient`, complete lookup and login, then
+call `PreparedConnection::client()` for each direct connection attempt. The
+prepared value is also the policy handoff point for routing and DNS setup.
 
-Lookup sends a JSON `POST /lookup` request to:
+## Domain lookup
 
-1. `https://lookup.gsase.com/lookup`;
-2. `https://lookupbak.hypersase.com/lookup`.
+Input domains are non-empty, contain at most 128 characters, and use letters,
+digits, `.`, `-`, `@`, `#`, `$`, or `_`. The Device ID must be non-empty.
 
-Each endpoint is attempted twice. A successful fuzzy result may supply
-`completeDomain`, which becomes the active domain. Failed live lookup falls
-back to a local `lookup/<domain>.json` entry below the cache directory for
-seven days. Cache failures never turn a successful network lookup into an
-error.
-
-Every attempt carries the platform `X-Auth-AppId`,
-`X-Auth-Timestamp`, `X-Auth-Nonce`, and `X-Auth-Sign` headers. The signature is
-HMAC-SHA256 over the HTTP method, decoded path, canonical query, exact body
-hash, timestamp, and nonce. Timestamp, nonce, and signature are regenerated
-for every retry.
-
-The request body uses `serviceType: "fgb"`. A successful response wraps the
-resolved service type in `data.type`; these names are intentionally different
-and are both retained exactly.
-
-The only accepted service types are:
+Lookup sends `POST /lookup` to the primary service and then the fallback
+service, with two attempts per endpoint. Every attempt receives a new
+timestamp, nonce, and HMAC signature. The request uses `serviceType: "fgb"`;
+the response selects one of these service types:
 
 - `serverlist`;
 - `saas`;
 - `controller`.
 
-## Authentication selection
+A fuzzy match may return `completeDomain`. That value becomes the active
+domain; otherwise the domain supplied by the caller remains active. All later
+controller requests and generated-credential decoding use the active domain.
 
-`serverlist` and `saas` select credential authentication. A controller result
-uses the exact `controller_info.url.auth` endpoint returned by lookup. The
-active domain is carried in the JSON body; the client does not append it to
-the endpoint path:
+When a cache directory is configured, a successful response is stored under
+`lookup/<domain>.json`. After live lookup fails, an entry no older than seven
+days may satisfy the request. Cache write failures do not change a successful
+network result, and malformed or expired entries do not mask the live error.
 
-```text
-POST <controller_info.url.auth>
-Content-Type: application/json
-X-Mobile-Api-Version: 4
-X-Auth-AppId: <controller_info.app_id>
-X-Auth-Timestamp: <Unix seconds>
-X-Auth-Nonce: <random 16-byte lowercase hex>
-X-Auth-Sign: <HMAC-SHA256>
-```
+The endpoint order, request members, and signing algorithm are specified in
+[Managed HTTP](PROTOCOL.md#managed-http).
 
-The signed request body is:
+## Authentication choice
 
-```json
-{
-  "domain": "active-domain",
-  "type": "android|ios|macos|windows",
-  "oem_name": "panabit",
-  "device_id": "device-id"
-}
-```
+`serverlist` and `saas` select credential authentication. For `controller`,
+`DomainClient::discover` posts to the exact HTTPS auth URL supplied by lookup;
+the active domain is a request-body member rather than a path suffix.
 
-Controller authentication uses the same six-line canonical request as lookup
-and keepalive. Its HMAC secret is selected from the controller `app_id`: the
-two defined SaaS IDs use the fallback entry, IDs containing `panabit` use the
-Panabit entry, and all other IDs derive a 24-character secret from
-HMAC-SHA256 of the `app_id` using the SaaS salt.
+The controller auth request has three total attempts. HTTP 4xx responses stop
+retrying, while transport errors, HTTP 5xx responses, and invalid response
+bodies may be retried. A valid response selects `credential` or `oidc`.
+Unavailable or invalid controller auth selects credential mode; a valid OIDC
+selection remains authoritative for the login.
 
-The request has one initial attempt and up to two retries. HTTP 4xx responses
-are terminal; transport failures, HTTP 5xx responses, and invalid response
-bodies remain retryable. Only `credential` and `oidc` are accepted. `oidc`
-requires a valid `oidc` object containing at least:
-
-- `authorization_endpoint`;
-- `token_endpoint`;
-- `client_id`.
-
-The response keeps authentication beneath an `auth` object. `version` and the
-optional `keepalive` configuration are siblings of that object.
-
-An unavailable or invalid auth response falls back to credential mode. A valid
-explicit OIDC response is never downgraded; trying the password path for it
-returns an error.
+An OIDC selection requires HTTPS authorization and token endpoints plus a
+non-empty client ID.
 
 ## Credential login
 
-The client downloads the server list, probes each UDP ingress, and selects the
-lowest-latency responder. A controller domain in credential mode uses
-`controller_info.url.serverlist`; `/config` is reserved for OIDC mode. It then
-sends a one-shot OPEN using the global username and password. On OPEN_ACK, the
-session sends an eight-byte header-only `CLOSE` and closes immediately. This
-temporary authentication probe is not the VPN tunnel.
+Credential mode fetches the lookup-resolved server-list URL. For a controller
+domain this is `controller_info.url.serverlist`; the controller configuration
+endpoint belongs to the OIDC path. Lookup-backed array responses and nested
+controller server lists are normalized to one internal representation.
 
-`PreparedConnection::client()` creates a fresh client. Its subsequent
-`authenticate()` sends the second OPEN used by the persistent connection.
+Login then:
+
+1. validates the server entries and probes eligible UDP ingresses;
+2. selects the requested line or the automatic lowest-latency candidate;
+3. constructs a direct client with the supplied username and password;
+4. authenticates one temporary OPEN;
+5. sends the eight-byte probe CLOSE and releases that socket.
+
+This temporary session verifies the selected credentials. The returned
+`PreparedConnection` retains enough information to construct a fresh client,
+whose `authenticate()` performs the OPEN for the persistent tunnel.
 
 ## OIDC login
 
-Controller-supplied authorization and token endpoints are used with OAuth 2.0
-Authorization Code and PKCE S256. The controller-supplied whitespace-separated
-scope is preserved. A typical scope is:
+OIDC uses the HTTPS authorization and token endpoints returned by the
+controller. Authorization Code with PKCE S256 binds the browser flow to the
+client. The authorization request also carries random state and nonce values,
+the controller's whitespace-separated scopes, and supported string parameters
+such as `kc_idp_hint`. The default scope is `openid profile email`.
 
-```text
-openid profile email offline_access
-```
+Completion requires the callback's scheme, authority, and path to match the
+configured redirect URI. The returned state must match, the code is redeemed
+with the PKCE verifier, and the ID-token nonce must match the pending login.
+The accepted response supplies:
 
-The authorization request includes a random verifier/challenge, nonce, state,
-and controller `parameters` such as `kc_idp_hint`. The controller-supplied
-authorization and token endpoints are used directly. The ID token payload is
-parsed and its nonce is checked. The session contains:
+- an access token and optional refresh token;
+- a non-empty subject and username;
+- an expiry from the token response or token claims.
 
-- access token;
-- optional refresh token;
-- subject/user ID;
-- username;
-- expiry.
+These values are held by redacting, zeroizing owners. The identity trust
+boundary is the controller-provided HTTPS authorization and token service;
+the [Security Policy](../SECURITY.md#managed-authentication) describes its
+security properties.
 
-Secrets use zeroizing owners and are redacted from debug output.
+Refresh uses the current controller-provided token endpoint and the saved
+subject and username. A returned refresh token replaces the previous token;
+otherwise the previous token remains active. Credential-store persistence is
+owned by the CLI layer.
 
-OpeniWAN does not perform mandatory OIDC discovery or JWKS signature
-verification. Authentication therefore depends on the HTTPS controller
-configuration and token endpoint. See [Security Policy](../SECURITY.md).
+## Configuration acquisition
 
-## Controller configuration
+OIDC controller login posts to the exact HTTPS configuration URL supplied by
+lookup. The request is signed with the controller `app_id`, then receives the
+OIDC bearer token. Its body carries the active domain, compatibility platform,
+OEM identifier, compatibility `app_version`, Device ID, optional username,
+and optional posture version.
 
-OIDC mode fetches:
+The [Protocol Reference](PROTOCOL.md#managed-http) is authoritative for the
+exact request fields and compatibility literals. The platform field uses the
+controller schema's Android, iOS, macOS, or Windows value; Linux and other
+desktop Unix targets use the Android compatibility value.
 
-```text
-POST /config
-Content-Type: application/json
-X-Mobile-Api-Version: 4
-Authorization: Bearer <access-token>
-X-Auth-AppId: <controller_info.app_id>
-X-Auth-Timestamp: <Unix seconds>
-X-Auth-Nonce: <random 16-byte lowercase hex>
-X-Auth-Sign: <HMAC-SHA256>
-```
+The response has two supported line shapes:
 
-The shared mobile-API signer covers the final URL and exact JSON body before
-the OIDC Bearer token is added. Controller `app_id` secret selection is
-identical to the auth request.
+| Shape | Location | Credential source |
+|---|---|---|
+| Traditional iWAN | `serverlist.serverlist` | `userName` and `passWord`, associated by server ID |
+| Segment Routing | top-level `sites` groups | credentials inside each selected entry's `ingress` |
 
-The request body contains:
+A response containing both shapes is rejected. Generated passwords are
+decoded only with the controller app-ID and active-domain context captured by
+the lookup flow. Traditional credentials are chosen after line selection by
+`server_id`; SR credentials follow the selected ingress. The authenticated
+decryption format is defined in the
+[Protocol Reference](PROTOCOL.md#managed-http).
 
-```json
-{
-  "domain": "active-domain",
-  "type": "macos",
-  "oem_name": "panabit",
-  "app_version": "2.3.0",
-  "device_id": "device-id",
-  "userName": "oidc-user",
-  "posture_version": 7
-}
-```
+The typed configuration surface includes server and SR identity, routing and
+IP-filter policy, DNS defaults, posture, keepalive, device binding, domain
+filtering, and branding. Deployment-specific nested members remain available
+through `ControllerConfiguration::raw()`.
 
-`type` is the controller compatibility platform, not the lookup service type.
-Android, iOS, macOS, and Windows use their corresponding values. Linux and
-other desktop Unix targets use `android` because the controller schema has no
-Linux value.
+## Segment Routing normalization
 
-The controller wraps traditional entries as `serverlist.serverlist`;
-lookup-backed lists are normalized to the same internal model. Each controller
-entry can contain `userName` and `passWord`, keyed by the entry `id`. SR groups
-come from `sites`. A payload containing both is rejected.
+Controller SR groups are normalized before probing:
 
-The generated `passWord` uses:
+- at most five entries are retained per group;
+- an out-of-range primary index selects the first retained entry;
+- entries with invalid ingress, credentials, path length, link IDs, or
+  metadata IP are removed;
+- ingress MTU outside `576..=1500` becomes 1392;
+- unsupported or under-keyed outer encryption becomes `none`;
+- monitor keepalive is enabled only for a six-link path;
+- duplicate or zero serialized entry IDs receive distinct runtime-only SR IDs.
 
-```text
-secret = controller secret selected from controller_info.app_id
-key = SHA256(UTF8(secret + "|" + active_domain + "|" + userName))
-aad = UTF8(active_domain + "|" + userName)
+The group remains the stable selection unit. Its normalized primary is swapped
+into the first probe position; subsequent failovers follow that normalized
+entry order.
 
-payload = StandardBase64Decode(passWord)
-nonce = payload[0..12]
-ciphertext = payload[12..len-16]
-tag = payload[len-16..]
-password = AES-256-GCM-Decrypt(key, nonce, ciphertext, tag, aad)
-```
+## Posture and device gates
 
-The implementation accepts only standard Base64, requires the exact 12-byte
-nonce and 16-byte tag, authenticates the AAD, and zeroizes intermediate secret
-material.
+OIDC configuration may provide a posture policy. A positive integer or decimal
+string selects the version to evaluate; a missing value or `0` selects the
+empty-policy path. When the configuration response omits posture after a
+cached positive version was sent, that cached version still drives evaluation.
 
-Typed members include:
+The caller supplies the `check_results` array. Evaluation posts the user ID,
+version, and those results to the posture endpoint derived from the
+configuration URL. It has a 40-second request timeout. Access requires both
+`local_gate: true` and a valid `posture_ack` decision other than `DENY`.
+HTTP 409 reports a version mismatch and HTTP 503 reports unavailable posture
+configuration.
 
-- traditional server identity, host, port, auto flag, and optional IP;
-- `server_credentials` keyed by `server_id`;
-- SR group `id`, names, `primary_index`, and `sr` entries;
-- effective DNS defaults parsed into `DnsDefaults`;
-- posture, keepalive, device-binding, routing, IP-filter, domain-filter, and
-  branding outer blocks.
+Recognized device-binding states block preparation and are checked again by
+`PreparedConnection::client()`:
 
-Deployment-specific nested policy fields remain accessible through
-`ControllerConfiguration::raw()`.
+| State | Code |
+|---|---:|
+| `pending` | `8000` |
+| `rejected` | `8001` |
+| `revoked` | `8002` |
+| `limitExceeded` | `8003` |
+| `checkFailed` | `-1` |
 
-For a traditional OIDC connection, credentials are selected only after the
-server is chosen, using that server's `server_id`. SR uses the credentials
-inside the selected entry's `ingress`.
+Unknown state values remain visible in `raw()` and carry no defined blocking
+meaning.
 
-SR groups are sanitized before probing: at most five entries are retained, an
-invalid primary falls back to index zero, malformed entries are dropped,
-invalid ingress MTU falls back to 1392, unsupported or under-keyed outer
-encryption falls back to none, and keepalive is disabled below six path hops.
-Duplicate or zero serialized SR IDs receive a distinct runtime-only local
-SRID.
+## Line selection
 
-The defined device-binding states `pending` (8000), `rejected` (8001),
-`revoked` (8002), `limitExceeded` (8003), and `checkFailed` (-1) block both
-login completion and construction of the persistent connection. Unknown
-values remain available through `raw()` and do not block access.
+Stable preferences use `auto`, `iwan:<server-id>`, or `sr:<group-id>`.
+Traditional preferences identify one server. SR preferences identify a group
+and preserve its primary/failover order even when runtime SR IDs change.
 
-## Routing, DNS, and MTU
+Each ingress measurement launches three independent protocol pings and keeps
+the lowest successful round-trip time. Automatic selection compares every
+reachable traditional server with the first reachable entry from each SR
+group, then chooses the lowest latency. A specific preference fails when that
+server or group is absent or unreachable.
 
-Managed `connect` applies the controller routing settings:
+`PreparedConnection::probe_lines()` returns results in controller order and
+batches work at 16 workers.
 
-- `all` sends all IPv4 traffic through the tunnel;
-- `ipfilter` installs `inclusive` CIDRs and subtracts `exclusive` CIDRs,
-  falling back to `all` when no rules are available;
-- `custom` installs the IP-filter base when present, then the comma-separated
-  `custom_routes`.
+## Policy handoff
 
-Users can override the controller's visible routing choice with
-`--routing-mode all|custom`, either for one connection or in a profile. The
-precedence is command line, profile, then controller. A user-selected custom
-mode preserves the controller IP-filter base but replaces controller
-`custom_routes` with saved and one-shot routes. Controller `ipfilter` is not a
-user-selectable CLI value.
+The prepared configuration exposes typed routing, IP-filter, MTU, DNS, and
+domain-filter inputs. The CLI combines them with profile and one-shot
+overrides, excludes transport endpoints from TUN routes, and reapplies
+session-derived DNS after reconnect. The precedence rules and platform effects
+are defined in [Configuration](CONFIGURATION.md#routing) and
+[DNS policy](CONFIGURATION.md#dns-policy).
 
-The active UDP peer, all resolved ingress addresses, loopback, IPv4 multicast,
-and link-local IPv4 remain outside the tunnel. Full routing is represented as
-a CIDR difference instead of an unsafe default route that could feed the UDP
-transport back into its own TUN.
+Managed preparation itself changes no routes, interfaces, or platform DNS.
+Those resources are acquired only when the caller runs a session with the TUN
+packet device. Route-free forwarding consumes the same prepared connection
+without host-network changes.
 
-`--block-ipv6` adds connection-scoped IPv6 capture routes and drops IPv6 in
-both packet directions. Required IPv6 control endpoints stay outside those
-routes, while physical IPv6 DNS resolvers are disabled. `--allow-ipv6`
-overrides a saved block. The setting is a TUN-routing leak guard rather than a
-persistent system firewall.
+## Saved authentication
 
-`dns_mode=server` resolves serverlist custom/disabled/auto behavior and then
-OPEN_ACK DNS. Invalid serverlist custom entries fall through to OPEN_ACK;
-controller deployments with no usable server use `1.1.1.1` and
-`114.114.114.114`. `custom` requires one or two valid IPv4 servers, while
-`disabled` installs no VPN DNS and excludes captured physical resolvers from
-full-tunnel routes.
+The CLI persists non-secret profile metadata and opaque credential references.
+Verified passwords and OIDC refresh tokens are stored through the operating
+system credential service; access tokens, controller responses, generated
+credentials, and SR keys remain process state.
 
-Split DNS runs inside `DnsPacketDevice`. `tunnel_all` passes every query to the
-tunnel. `managed` applies controller inclusive/exclusive domain-filter rules.
-`custom` combines local rules with managed inclusions when applicable and
-retains managed exclusions; exclusions always win. Names are normalized and
-deduplicated, controller lists are capped at 100,000 entries, and `*`, `@`,
-`^`, and unprefixed rules retain official matching semantics.
+`managed login` authenticates before saving. A rotated refresh token replaces
+its stored predecessor immediately, while domain, Device ID, or username
+changes invalidate the reference. See
+[Profiles and local state](CONFIGURATION.md#profiles-and-local-state) for
+storage and permission details.
 
-When encrypted DNS blocking is effective, visible unfragmented IPv4 TCP/UDP
-853 is dropped and IPv4 UDP/53 lookups for configured DoH hosts or
-`use-application-dns.net` receive NXDOMAIN. These checks remain active even
-when split DNS or tunnel DNS routing is off. When packet DNS routing is active,
-other AAAA queries receive an empty NOERROR response. This is packet-level
-compatibility behavior, not TLS interception or general DoH/QUIC inspection.
+## Controller keepalive
 
-Profile and one-shot overrides layer above controller settings. The active
-OPEN_ACK is reapplied after reconnect, relay generations are reset, and the
-link-scoped platform DNS lease is restored on disconnect. A valid
-`mtu_mode=custom` value in `576..=9000` overrides the TUN MTU.
+Controller keepalive is an explicit `DomainClient::send_keepalive` operation,
+separate from the UDP session heartbeat. The calling application owns its
+telemetry loop and supplies the endpoint, credentials, and metrics graph.
 
-## Posture gate
+Each request uses mobile API version 3, a five-second transport timeout, and
+up to two attempts. HTTP 401 is terminal; a retry receives a fresh timestamp,
+nonce, and signature over the same serialized body. The canonical request and
+metrics schema are defined in the
+[Protocol Reference](PROTOCOL.md#managed-http).
 
-When `/config` contains a non-empty posture object, the client sends:
+## Failure and trust boundaries
 
-```text
-POST /posture/evaluate
-Content-Type: application/json
-X-Mobile-Api-Version: 4
-Authorization: Bearer <access-token>
-```
+Controller URLs, JSON, token responses, callbacks, generated credentials, and
+cache files are validated at their owning boundary. Stable outer fields are
+typed before selection or policy handoff, while unknown deployment policy is
+retained as JSON for explicit consumers. Secrets are redacted from debug
+output and zeroized by their owners.
 
-with:
-
-```json
-{
-  "user_id": "oidc-subject",
-  "version": 1,
-  "check_results": []
-}
-```
-
-Access is allowed only when `local_gate` is true and `posture_ack` is a valid
-string other than `DENY` (directly or through its `decision`/`status` field).
-HTTP 409 maps to a posture-version mismatch; HTTP 503 means posture
-configuration is unavailable. The gate timeout is 40 seconds. If
-`/config` omits posture because a cached version was supplied, that version is
-still used for evaluation; omission never bypasses the gate.
-
-A missing posture version or version `0` denotes an empty/disabled posture
-policy. Controller responses may encode the version as an integer or decimal
-string; the client normalizes it to an integer. It clears any stale posture
-cache and does not call `/posture/evaluate` in this case.
-
-The CLI accepts already evaluated local results using
-`--posture-results FILE`. The file must contain the exact JSON array sent as
-`check_results`; collecting platform posture data remains the calling
-application's responsibility. The CLI does not accept a cached posture
-version and always obtains the effective version from the controller.
-
-## CLI state and saved authentication
-
-The CLI generates one installation Device ID and persists non-secret profiles.
-A profile stores domain, Device ID, optional username, stable line preference,
-DNS overrides, and an opaque credential reference.
-
-`managed login` always performs fresh authentication and saves passwords or
-OIDC refresh tokens through the operating-system credential service. Other
-managed commands reuse saved authentication when available but do not persist
-an interactive fallback. Access tokens, controller responses, generated
-credentials, and SR keys remain in memory.
-
-On a later OIDC process, the client sends
-`grant_type=refresh_token` to the current controller-provided token endpoint.
-A rotated refresh token replaces the saved value immediately; the refreshed
-access token is not persisted.
-
-Stable line preferences are `auto`, `iwan:<server-id>`, and
-`sr:<group-id>`. An SR group remains the persisted selection unit while its
-entries retain controller primary/failover order. Line probing uses at most 16
-workers, and recovery listing ignores a stale saved selection so it can be
-replaced.
-
-See [Command-Line Guide](CLI.md) for commands and
-[Configuration](CONFIGURATION.md) for state layout, permissions, and
-credential-store boundaries.
-
-## HTTP keepalive
-
-The separate controller keepalive request uses API version 3, a bearer token,
-one retry except HTTP 401, a fresh nonce/timestamp per attempt, and the defined
-HMAC-SHA256 canonical request. `DomainClient::send_keepalive` exposes this
-operation for applications that own the connection telemetry loop.
+Lookup exhaustion may fall back only to a valid cache entry. Authentication,
+posture, device binding, credential decoding, and ingress selection must each
+succeed before a persistent client is constructed. Host-state rollback and
+the underlying protocol's cryptographic limits are covered by
+[Architecture](ARCHITECTURE.md#concurrency-and-cleanup) and the
+[Security Policy](../SECURITY.md).

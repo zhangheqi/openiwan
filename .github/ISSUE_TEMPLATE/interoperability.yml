@@ -13,7 +13,7 @@ body:
     attributes:
       label: Panabit iWAN client, server, or controller version
       description: Identify the official client, server, or controller where the behavior was observed.
-      placeholder: "For example: Android client 2.3.0, controller version, or Unknown"
+      placeholder: "For example: Android client <version>, controller <version>, or Unknown"
     validations:
       required: true
   - type: input

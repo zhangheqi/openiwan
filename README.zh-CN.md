@@ -10,44 +10,35 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-OpeniWAN 可以直接认证 iWAN UDP 端点并建立原生 TUN 隧道，也可以在不修改主机路由的
-情况下转发单个 TCP 或 HTTP(S) 目标，还能通过控制器托管的客户域完成发现、认证和
-连接。协议库提供传统与 Segment Routing 线格式、客户端会话运行时、DNS 策略引擎
-以及托管控制器模型。
+OpeniWAN 支持直接 iWAN 认证、原生 TUN 隧道、不改路由的 TCP 和 HTTP(S) 转发，
+以及控制器托管连接。crate 同时提供传统与 Segment Routing 线协议、会话运行时、
+DNS 策略引擎和托管控制器模型。
 
 > [!IMPORTANT]
 > OpeniWAN 是独立的互操作项目，与 Panabit 或任何网络运营方均无隶属或背书关系。
 > 只能将其用于你有权访问的系统和网络。
 
-## 项目状态
+## 功能
 
-`main` 分支可能包含相对于最新正式版本的破坏性变更。本分支文档描述尚未发布的
-接口；使用已发布版本时，请查阅对应的 Git tag。
+- 传统 iWAN 与 Segment Routing 传输
+- 直接认证与控制器托管认证
+- Linux、macOS 和 Windows 原生 TUN 与路由管理
+- Split DNS 策略与加密 DNS 控制
+- 面向固定 TCP 或 HTTP(S) 目标的不改路由转发
+- 协议、客户端、托管连接、DNS 和 TUN 的 Rust API
 
-| 范围 | 状态 |
-|---|---|
-| 传统 iWAN 认证与隧道 | 已实现 |
-| Segment Routing 传输与监控 | 已实现 |
-| 控制器托管的密码和 OIDC 登录 | 已实现 |
-| Linux、macOS、Windows TUN 集成 | 已实现 |
-| 不改路由的 TCP 与 HTTP(S) 转发 | 已实现 |
-| 厂商认证 | 不提供 |
-
-OpeniWAN 具有防御性解析、有界资源使用、清理事务、测试和跨平台 CI，但不会补充
-iWAN 协议本身缺少的密码学安全属性，不同部署的互操作情况也可能不同。投入生产前，
-请阅读[安全模型](SECURITY.md)，并在获得授权的端点上验证。
+iWAN 协议本身存在实现无法消除的安全限制。投入生产前，请先阅读
+[安全模型](SECURITY.md)。
 
 ## 安装
 
-OpeniWAN 需要 Rust 1.91 或更高版本。
-
-安装 crates.io 上的最新正式版本：
+从 crates.io 安装最新正式版本：
 
 ```console
 cargo install openiwan --locked
 ```
 
-构建 `main` 分支文档所描述的未发布接口：
+从源码构建：
 
 ```console
 git clone https://github.com/zhangheqi/openiwan.git
@@ -55,12 +46,8 @@ cd openiwan
 cargo build --release --locked
 ```
 
-可执行文件位于 `target/release/openiwan`，Windows 上为 `openiwan.exe`。将当前
-checkout 安装到 Cargo 的二进制目录：
-
-```console
-cargo install --path . --locked
-```
+所需 Rust 版本在 [Cargo.toml](Cargo.toml) 中声明。可执行文件位于
+`target/release/openiwan`，Windows 上为 `openiwan.exe`。
 
 ## 快速开始
 
@@ -76,69 +63,56 @@ openiwan ping 192.0.2.10:6001
 openiwan auth --server 192.0.2.10:6001 --username alice --encryption xor
 ```
 
-建立仅包含一条路由的隧道：
+建立包含一条路由的隧道：
 
 ```console
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8
 ```
 
-使用全 IPv4 路由，并阻止普通 IPv6 流量绕过隧道：
-
-```console
-sudo openiwan connect --server 192.0.2.10:6001 --username alice --routing-mode all --block-ipv6
-```
-
-Windows 用户应在管理员终端中执行隧道命令，不使用 `sudo`。如果未设置
+Windows 用户应在管理员终端中执行隧道命令，并省略 `sudo`。如果未设置
 `OPENIWAN_PASSWORD`，CLI 会无回显地提示输入密码；也可以使用权限受保护的
-`--password-file`。密码不能作为命令行值传入。
+`--password-file`。
 
 ### 托管连接
 
-创建 TUN 和修改路由通常需要提权。在 Unix 上，请在同一个提权 shell 中创建
-profile、保存认证并连接，确保这些操作属于同一个系统账户：
+托管连接使用客户域，并可将认证信息保存到操作系统凭据库。在 Unix 上，请用同一个
+提权账户创建 profile、认证并连接：
 
 ```console
 sudo -H -s
-openiwan profile set work --domain iwan.example --username alice --routing-mode all --block-ipv6
-openiwan managed discover
-openiwan managed login
-openiwan managed connect
+openiwan profile set work --domain iwan.example --username alice
+openiwan managed login --profile work
+openiwan managed connect --profile work
 exit
 ```
 
-首个 profile 会自动成为默认项。使用该 profile 及其已保存认证的命令必须由同一个
-系统账户运行。`managed login` 总是执行新认证并保存到该 profile。OIDC 域会输出
-授权 URL 并要求粘贴完整回调 URL；密码域从配置的受保护来源读取密码。
+Profile 选择、OIDC 登录、路由、DNS 和非交互运行方式见
+[CLI 指南](docs/CLI.md)。
 
 ### 不改路由的转发
 
-将单个固定目标暴露到 loopback 监听地址，不创建 TUN、不修改主机路由：
+通过 iWAN 转发一个固定目标，不创建 TUN 接口，也不修改主机路由：
 
 ```console
 openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.internal.example:3306 --listen 127.0.0.1:3307
 ```
 
-目标可以使用 `tcp://`、`http://` 或 `https://`。HTTPS 会验证上游证书，也可以
-重复传入 `--ca-cert` 来增加信任根。
+目标可以使用 `tcp://`、`http://` 或 `https://`。HTTPS 会验证上游证书；可重复
+传入 `--ca-cert FILE` 添加私有信任根。
 
-完整命令树、权限要求、profile 生命周期、自动化输出、时长格式和环境变量见
-[CLI 指南](docs/CLI.md)。
+## 作为 Rust 库使用
 
-## Rust 库
-
-添加包含托管和转发功能的默认依赖：
+添加包含托管与转发功能的默认依赖：
 
 ```console
 cargo add openiwan
 ```
 
-只使用协议与直接客户端，关闭可选的托管和转发依赖：
+关闭可选的托管与转发功能：
 
 ```console
 cargo add openiwan --no-default-features
 ```
-
-凭据与可序列化配置相互独立：
 
 ```rust
 use openiwan::{Client, ClientConfig, EncryptionMethod, Result};
@@ -150,53 +124,43 @@ fn client(password: String) -> Result<Client> {
 }
 ```
 
-应用可以实现自己的 `PacketDevice`，使用原生 `TunDevice`，或单独集成 DNS 和协议
-模块。公开 API 文档发布在 [docs.rs](https://docs.rs/openiwan)。
-
-### Cargo features
+API 文档发布在 [docs.rs](https://docs.rs/openiwan)。
 
 | Feature | 默认 | 内容 |
 |---|:---:|---|
-| `managed` | 是 | 域发现、密码/OIDC 认证、控制器策略、profile 和 keepalive 模型 |
-| `forward` | 是 | 通过用户态 IP 栈进行不改路由的 TCP 与 HTTP(S) 转发 |
-
-核心包、密码、Segment Routing、DNS 策略、客户端和 TUN API 不依赖可选 feature。
+| `managed` | 是 | 域发现、控制器认证与策略、profile 和 keepalive 模型 |
+| `forward` | 是 | 通过用户态网络栈进行不改路由的 TCP 与 HTTP(S) 转发 |
 
 ## 平台支持
 
 | 平台 | TUN 与路由 | 说明 |
 |---|:---:|---|
-| Linux | 支持 | 通常需要 root 或等效网络 capability |
-| macOS | 支持 | 默认自动分配 `utunN` |
-| Windows 10/11 x86_64 | 支持 | 需要管理员终端 |
-| Windows 10/11 ARM64 | 支持 | 需要管理员终端 |
+| Linux | 支持 | 需要 root 或等效网络 capability |
+| macOS | 支持 | 默认自动分配 `utun` 接口 |
+| Windows x86_64 | 支持 | 需要管理员终端 |
+| Windows ARM64 | 支持 | 需要管理员终端 |
 
-Windows x86_64 和 ARM64 使用的已签名 Wintun 0.14.1 二进制嵌入可执行文件。
-OpeniWAN 会验证释放出的动态库后再加载。
+crate 内含受支持 Windows 架构的已签名 Wintun 二进制，并会在加载前验证。
 
 ## 文档
 
-| 文档 | 用途 |
-|---|---|
-| [CLI 指南](docs/CLI.md) | 命令、凭据、profile、转发、权限与自动化 |
-| [配置指南](docs/CONFIGURATION.md) | TOML、路由、DNS 策略、状态和优先级 |
-| [托管连接](docs/MANAGED_CONNECTIONS.md) | 域发现、认证、控制器策略、posture 和 keepalive |
-| [架构](docs/ARCHITECTURE.md) | 组件、生命周期、信任边界和清理 |
-| [协议参考](docs/PROTOCOL.md) | 传统、Segment Routing 和托管 HTTP 线协议 |
-| [协议证据](docs/PROTOCOL_PROVENANCE.md) | 证据要求和未解决协议范围 |
-| [安全策略](SECURITY.md) | 漏洞报告和运行安全边界 |
-| [变更日志](CHANGELOG.md) | 按版本整理的用户可见变更 |
+- [命令行指南](docs/CLI.md)
+- [配置](docs/CONFIGURATION.md)
+- [托管连接](docs/MANAGED_CONNECTIONS.md)
+- [架构](docs/ARCHITECTURE.md)
+- [协议参考](docs/PROTOCOL.md)
+- [安全策略](SECURITY.md)
+- [贡献指南](CONTRIBUTING.md)
+- [变更日志](CHANGELOG.md)
 
-[文档索引](docs/README.md)标明了每篇英文指南的目标读者和权威性。技术文档以英文为
-准，中文 README 是项目入口的同步翻译。
+默认分支上的文档可能包含尚未发布的改动。使用正式版本时，请以该版本的内置帮助、
+docs.rs 页面和对应 Git tag 为准。
 
-## 贡献与支持
+## 社区
 
-欢迎提交 bug、功能建议、文档修复和可复现的互操作证据。重大修改前请阅读
-[贡献指南](CONTRIBUTING.md)。通过 [SUPPORT.md](SUPPORT.md) 选择正确的支持渠道；
-漏洞必须按照 [SECURITY.md](SECURITY.md) 私下报告。
-
-所有参与者都必须遵守[行为准则](CODE_OF_CONDUCT.md)。
+报告问题或寻求帮助请参阅 [SUPPORT.md](SUPPORT.md)。安全问题必须按照
+[SECURITY.md](SECURITY.md) 私下报告。所有参与者均须遵守
+[行为准则](CODE_OF_CONDUCT.md)。
 
 ## 许可证
 

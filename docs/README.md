@@ -1,24 +1,23 @@
 # Documentation
 
-OpeniWAN documentation is organized by task and authority. The root README is
-the project landing page; built-in CLI help and Rust API documentation are the
-authoritative interface references.
+The root README is the project landing page. Built-in CLI help and generated
+Rust API documentation are the authoritative interface references.
 
-Unless a document says otherwise, files on `main` describe the unreleased
-interface. Use the matching Git tag for a published version.
+Documentation on `main` describes unreleased code; use the corresponding Git
+tag when working with a published release.
 
 ## Start here
 
-| Document | Audience | Contents |
+| Document | For | Contents |
 |---|---|---|
 | [Project README](../README.md) | Everyone | Scope, status, installation, quick start, and support |
-| [Command-Line Guide](CLI.md) | CLI users and operators | Commands, credentials, privileges, profiles, forwarding, and automation |
+| [Command-Line Guide](CLI.md) | CLI users and operators | Commands, privileges, profiles, credentials, forwarding, and automation |
 | [Configuration](CONFIGURATION.md) | Operators and integrators | TOML, routing, DNS policy, state, and credential storage |
 | [Rust API on docs.rs](https://docs.rs/openiwan) | Library users | Public types, functions, and examples |
 
-## Concepts and internals
+## Design and protocol
 
-| Document | Audience | Contents |
+| Document | For | Contents |
 |---|---|---|
 | [Managed Connections](MANAGED_CONNECTIONS.md) | Integrators | Lookup, authentication, controller policy, posture, line selection, and keepalive |
 | [Architecture](ARCHITECTURE.md) | Contributors | Components, session lifecycle, concurrency, cleanup, and trust boundaries |
@@ -29,37 +28,35 @@ interface. Use the matching Git tag for a published version.
 
 | Document | Purpose |
 |---|---|
-| [Security Policy](../SECURITY.md) | Private reporting, supported versions, and security boundaries |
-| [Contributing](../CONTRIBUTING.md) | Development setup, review requirements, tests, and documentation style |
-| [Support](../SUPPORT.md) | Where to ask questions or report bugs, interoperability issues, and vulnerabilities |
+| [Security Policy](../SECURITY.md) | Private reporting, supported releases, and security boundaries |
+| [Contributing](../CONTRIBUTING.md) | Setup, checks, tests, and pull-request expectations |
+| [Support](../SUPPORT.md) | Issue and security-reporting channels |
 | [Code of Conduct](../CODE_OF_CONDUCT.md) | Community behavior and enforcement |
 | [Release Process](RELEASES.md) | Changelog verification and maintainer release checklist |
-| [Changelog](../CHANGELOG.md) | Curated user-visible changes by version |
+| [Changelog](../CHANGELOG.md) | Verified user-visible changes between releases |
 
-## Documentation authority
+## Source of truth
 
-When sources disagree, use this order:
+- Use `openiwan --help` for the installed command-line interface.
+- Use generated API documentation for the installed crate's public Rust API.
+- Treat protocol and configuration references as the supported written
+  contract.
+- Treat tests as executable contract evidence.
 
-1. tests and implementation for actual behavior;
-2. built-in `--help` for the installed CLI;
-3. generated Rust API documentation for the installed crate version;
-4. protocol and configuration references from the matching Git tag;
-5. translated or overview material.
+If documentation, tests, and behavior disagree, open an issue rather than
+preserving the discrepancy as an undocumented compatibility promise.
 
-Open an issue when documentation and behavior disagree. Do not silently
-preserve obsolete behavior as a compatibility claim.
+## Writing documentation
 
-## Writing principles
-
-1. Document the supported contract, not implementation history.
-2. Separate tutorials, operational guidance, architecture, and wire
-   reference.
-3. Use reserved example addresses and placeholder domains.
-4. State privileges, secret handling, cleanup, and protocol limitations near
-   the affected workflow.
-5. Keep shell examples single-line when they must work unchanged in POSIX
-   shells and PowerShell; label shell-specific examples.
-6. Update English canonical documentation before translations.
-7. Verify every changelog entry against the previous release tag.
-8. Never publish credentials, tokens, private controller responses,
-   proprietary iWAN binaries, or unredacted captures.
+- Document current supported behavior, not implementation history.
+- Keep tutorials, operational guidance, architecture, and wire reference
+  separate.
+- State privileges, secret handling, cleanup, and protocol limitations near
+  the affected workflow.
+- Use reserved addresses, placeholder domains, neutral identifiers, and
+  synthetic data.
+- Keep portable commands on one line; label shell-specific examples.
+- Update canonical English documentation before translations.
+- Verify every changelog entry against the previous release.
+- Never publish credentials, tokens, private controller responses,
+  proprietary iWAN binaries, or unredacted captures.

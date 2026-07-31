@@ -33,12 +33,12 @@
 //!
 //! # Cargo features
 //!
-//! - `managed` enables controller-managed authentication, profiles, and saved
-//!   credentials.
-//! - `forward` enables TCP, HTTP, and HTTPS forwarding.
+//! - `managed` enables controller-managed APIs and the CLI's profile and saved
+//!   credential workflows.
+//! - `forward` enables the CLI's TCP, HTTP, and HTTPS forwarding commands.
 //!
-//! Both features are enabled by default. Disable default features for a
-//! protocol-only integration.
+//! Both features are enabled by default. Disable them when an application
+//! needs only the core client, protocol, DNS, and TUN APIs.
 
 pub mod client;
 pub mod config;

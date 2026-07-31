@@ -111,8 +111,7 @@ impl SegmentRoutingConfig {
 
 /// iWAN data-plane settings.
 ///
-/// Authentication and heartbeat timing are protocol constants rather than
-/// deployment knobs. Passwords are passed separately to [`crate::Client::new`].
+/// Passwords are passed separately to [`crate::Client::new`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {

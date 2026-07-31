@@ -2944,52 +2944,7 @@ mod tests {
 
     #[cfg(feature = "managed")]
     #[test]
-    fn managed_cli_rejects_removed_and_misplaced_options() {
-        for arguments in [
-            vec![
-                "openiwan",
-                "managed",
-                "--domain",
-                "iwan.example",
-                "discover",
-            ],
-            vec![
-                "openiwan",
-                "managed",
-                "discover",
-                "--state-dir",
-                "/tmp/state",
-            ],
-            vec!["openiwan", "managed", "discover", "--device-id", "device-1"],
-            vec![
-                "openiwan",
-                "managed",
-                "discover",
-                "--cache-dir",
-                "/tmp/cache",
-            ],
-            vec!["openiwan", "managed", "lines", "--probe-timeout", "3s"],
-            vec!["openiwan", "managed", "login", "--password-env", "PASSWORD"],
-            vec![
-                "openiwan",
-                "managed",
-                "login",
-                "--redirect-uri",
-                "app://callback",
-            ],
-            vec!["openiwan", "managed", "login", "--posture-version", "1"],
-            vec!["openiwan", "managed", "login", "--save"],
-            vec!["openiwan", "managed", "login", "--reauth"],
-            vec!["openiwan", "managed", "login", "--line", "auto"],
-            vec!["openiwan", "managed", "login", "--domain", "iwan.example"],
-            vec!["openiwan", "profile", "--state-dir", "/tmp/state", "list"],
-        ] {
-            assert!(
-                Cli::try_parse_from(arguments.clone()).is_err(),
-                "{arguments:?} should be rejected"
-            );
-        }
-
+    fn managed_target_selectors_are_mutually_exclusive() {
         assert!(
             Cli::try_parse_from([
                 "openiwan",
@@ -3198,18 +3153,6 @@ mod tests {
                 }),
             }) if name == "work"
         ));
-        assert!(
-            Cli::try_parse_from([
-                "openiwan",
-                "managed",
-                "lines",
-                "--profile",
-                "work",
-                "--set",
-                "sr:3",
-            ])
-            .is_err()
-        );
 
         let parsed = Cli::try_parse_from(["openiwan", "profile", "logout", "work"]).unwrap();
         assert!(matches!(

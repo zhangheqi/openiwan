@@ -1,271 +1,210 @@
 # Architecture
 
-This document describes the component boundaries and runtime invariants of
-the current `main` branch. It is intended for contributors and library
-integrators; wire details belong in [Protocol Reference](PROTOCOL.md).
+This document explains OpeniWAN's component boundaries, data flow, and runtime
+invariants. It is intended for contributors and library integrators.
 
-## Design goals
+Wire formats belong in the [Protocol Reference](PROTOCOL.md), operator policy
+in [Configuration](CONFIGURATION.md), managed HTTP behavior in
+[Managed Connections](MANAGED_CONNECTIONS.md), and the attacker model in the
+[Security Policy](../SECURITY.md).
 
-OpeniWAN is organized around five goals:
+## Design principles
 
-1. keep wire-protocol code independent of the CLI and native TUN;
-2. validate untrusted bytes before allocation or state changes;
-3. keep deployment policy outside the stable protocol core;
-4. make route, DNS, interface, and worker cleanup transactional;
-5. keep credentials and controller-provided secrets out of persistent profile
-   state.
+- Keep packet encoding independent of the CLI and platform networking.
+- Validate external input before allocating resources or changing state.
+- Normalize deployment policy before it enters the session runtime.
+- Represent routes, DNS settings, interfaces, and workers with scoped owners.
+- Keep credentials and controller-provided secrets out of profile state.
 
-Non-goals include server implementation, vendor certification, TLS
-interception, and adding cryptographic guarantees absent from iWAN.
-
-## System map
+## Runtime overview
 
 ```text
-CLI or library caller
-        |
-        +--> direct ClientConfig -------------------+
-        |                                           |
-        +--> managed DomainClient                    |
-               |                                    |
-               +-- lookup/auth/config/posture       |
-               +-- line selection and credentials   |
-               +-- PreparedConnection --------------+
-                                                    |
-                                              Client::authenticate
-                                                    |
-                                             ConnectedSession
-                                                    |
-                              +---------------------+--------------------+
-                              |                                          |
-                        native TUN                                 forward stack
-                              |                                          |
-                       DnsPacketDevice                            channel PacketDevice
-                              |                                          |
-                     routes + DNS lease                         userspace TCP/IP
+direct ClientConfig + credentials ----+
+                                      +--> Client::authenticate
+managed DomainClient                  |            |
+    -> lookup and authentication      |      ConnectedSession
+    -> policy and line selection      |            |
+    -> PreparedConnection ------------+      PacketDevice
+                                                   |
+                               +-------------------+------------------+
+                               |                                      |
+                         DnsPacketDevice                        channel device
+                               |                                      |
+                            native TUN                       userspace TCP/IP
+                               |                                      |
+                         routes and DNS                     fixed-target forward
 ```
 
-The CLI in `src/bin/openiwan.rs` composes these layers. Library users can stop
-at any lower boundary.
+The CLI composes the complete graph. A library can provide its own
+`PacketDevice`, use `Client` without platform integration, or stop at a
+managed `PreparedConnection`.
 
-## Module boundaries
+## Component ownership
 
-| Module | Responsibility |
+| Component | Owns |
 |---|---|
-| `protocol` | Standard packet registry, eight-byte header, control signatures, TLVs, OPEN, heartbeat, ping, and close |
-| `crypto` | Java US-ASCII conversion, password wrapping, session keys, XOR, and AES-128-ECB |
-| `fragment` | Separate traditional and Segment Routing fragment parsing and bounded reassembly |
-| `sr` | Directional SR headers, outer AES, data planning, decoding, and monitor state |
-| `client` | UDP authentication, tuple validation, session workers, reconnect, and shutdown |
-| `managed` | Domain lookup, authentication, controller policy, posture, lines, credentials, and keepalive |
-| `dns` | Typed policy resolution, packet enforcement, physical relay, and platform DNS leases |
-| `tun` | Native packet device and transactional route integration |
-| `src/bin/openiwan/forward.rs` | Userspace TCP/IP and raw TCP forwarding |
-| `src/bin/openiwan/http_forward.rs` | Fixed-origin HTTP/1.1 proxy and upstream TLS |
-| `src/bin/openiwan/state.rs` | Versioned non-secret profile state |
+| `protocol` | Standard headers, packet classes, control signatures, TLVs, OPEN, heartbeat, ping, and close encoding |
+| `crypto` | iWAN-compatible text conversion, password wrapping, session ciphers, and key material |
+| `fragment` | Bounded traditional and Segment Routing reassembly |
+| `sr` | SR envelopes, outer encryption, packet planning, decoding, and monitor state |
+| `client` | UDP authentication, session tuple checks, workers, reconnect, and shutdown |
+| `managed` | Domain lookup, controller authentication and policy, posture, line selection, and prepared credentials |
+| `dns` | Effective DNS policy, packet handling, physical relay, and platform DNS leases |
+| `tun` | Native packet I/O and transactional route changes |
+| `src/bin/openiwan/forward.rs` | Route-free userspace TCP/IP forwarding |
+| `src/bin/openiwan/http_forward.rs` | Fixed-origin HTTP proxying and upstream TLS |
+| `src/bin/openiwan/state.rs` | Versioned, non-secret profile state |
 | `src/bin/openiwan/credentials.rs` | Operating-system credential storage |
 
-Wire modules do not depend on the CLI. Managed controller payloads are
-normalized before entering the direct client runtime.
+The wire modules have no CLI dependency. The `client` layer depends on the
+wire modules and the `PacketDevice` trait, while managed controller data is
+validated and normalized before a direct `Client` is constructed. Platform
+commands and persistent state remain at the outer layers.
 
 ## Direct session lifecycle
 
-`ClientConfig` contains data-plane settings. Credentials are passed separately
-to `Client::new` and are zeroized with their owner.
+`ClientConfig` holds data-plane settings. `Client` owns credentials separately
+and zeroizes them when dropped.
 
-Authentication:
+Authentication proceeds as follows:
 
-1. resolve and connect one UDP socket to the configured peer;
-2. construct one OPEN packet with a random nonzero nonce;
-3. resend the byte-identical packet within the protocol retry window;
-4. validate OPEN_ACK or OPEN_REJECT framing, tuple, TLVs, and any returned
-   nonce;
-5. derive the session cipher and return `ConnectedSession`.
+1. Validate the configuration, resolve one peer, and connect a UDP socket.
+2. Build one OPEN with a random nonzero nonce and resend the same bytes within
+   the authentication budget.
+3. Accept a response only after validating framing, control signature, packet
+   class, TLVs, and the returned nonce when present.
+4. Adopt the returned session ID and token as the active tuple, derive the
+   session cipher, and return a `ConnectedSession` that owns that state.
 
-The connected UDP socket enforces the peer address. Session processing also
-validates packet type, encryption marker, session ID, token, inner IP length,
-and Segment Routing path where applicable.
+Authentication uses a three-second attempt window, a 13-second overall
+budget, and one-second retry spacing. A traditional session sends heartbeat
+requests every two seconds and ends after ten misses or 20 seconds without a
+valid response. When enabled, SR monitoring runs once per second and marks the
+peer down after five seconds. These fixed timers are owned by the protocol
+runtime.
 
-`ConnectedSession::run` calls `PacketDevice::activate_session`, starts the
-workers, runs the receiver, joins workers, and calls
-`PacketDevice::deactivate_session`. Device lifecycle hooks allow DNS and other
-decorators to update policy on every reconnect without coupling them to the
-client.
+`ConnectedSession::run` activates its `PacketDevice`, starts the sender and
+protocol workers, runs receive processing, joins every worker, and deactivates
+the device. Reconnection creates a new authenticated session and repeats the
+activation hooks, allowing DNS and other decorators to refresh per-session
+state.
 
-## Traditional data plane
+## Data-plane invariants
 
-The traditional session uses:
+### Traditional sessions
 
-1. a sender that validates complete IPv4 or IPv6 packets and encapsulates one
-   datagram;
-2. a receiver that validates standard data, fragments, heartbeat, and close;
-3. a 20-byte little-endian heartbeat worker.
+The sender validates inner IPv4 or IPv6 packets against the negotiated MTU.
+Malformed or oversized inputs are logged and dropped; valid input is emitted
+as one traditional datagram. The receiver validates data, fragments,
+heartbeat, and close packets against the active tuple before dispatch.
 
-Authentication attempts use a three-second attempt timeout and 13-second
-overall window. Heartbeats run every two seconds; ten misses or more than 20
-seconds without a valid response ends the session. These values are protocol
-behavior, not deployment settings.
+Traditional reassembly is deliberately small and short-lived: at most 256
+groups are retained for 100 milliseconds. Exact packet forms and reassembly
+semantics are specified in the [Protocol Reference](PROTOCOL.md).
 
-The traditional transmit path does not generate fragments. Packets larger than
-the negotiated MTU fail encapsulation instead of relying on unspecified
-fragment behavior.
+### Segment Routing sessions
 
-## Segment Routing data plane
+`SegmentRoutingConfig` adds the logical forward path, selected SR identifier,
+optional monitor, and outer cipher. The selected ingress remains the UDP peer;
+an entry's `ip` field is retained as controller metadata.
 
-`SegmentRoutingConfig` adds a logical forward path, selected SR ID, optional
-monitor, and outer-algorithm/key pair. OPEN carries the first logical link.
+The SR planner enforces valid nonzero link identifiers, the configured path
+direction, MTU accounting, and the supported combinations of inner and outer
+encryption. Its fragmentation path emits the defined two-fragment form and
+uses an offset-aware reassembler bounded to 16 groups and 262144 bytes for two
+seconds. Monitor traffic has independent state from traditional heartbeat
+tracking.
 
-Outbound serialization reverses the logical path. Returned data datagrams must
-use logical order, `next_id=0`, the active session tuple, and the configured
-outer algorithm. SR monitor requests and responses are the defined exception:
-their outer algorithm is always `none`. `SREntry.ip` is controller metadata and
-is not used as the ingress endpoint.
+## Managed boundary
 
-The planner enforces:
+The managed layer turns a customer domain and authentication result into a
+`PreparedConnection`. It owns lookup, controller requests, posture and device
+gates, ingress probing, controller credential decoding, and SR normalization.
+The result contains one selected ingress plus the normalized policy needed by
+the CLI and library caller.
 
-- one to six nonzero 24-bit links;
-- IPv6 without inner session encryption;
-- no inner AES expansion;
-- encrypted payloads fitting one MTU;
-- fragmentation only when inner and outer encryption are both off;
-- exactly two fragments with the SR-specific offset-aware reassembler.
+Each call to `PreparedConnection::client()` rechecks the device-binding gate
+and creates a fresh direct client. Credential login uses a temporary OPEN to
+verify the selected credentials, closes that probe, and leaves the persistent
+OPEN to the fresh client. OIDC login prepares credentials from controller
+configuration; its fresh client performs the connection's OPEN.
 
-The optional monitor runs every second and marks the peer down after five
-seconds. Monitor request and response state is separate from traditional
-heartbeat tracking.
+See [Managed Connections](MANAGED_CONNECTIONS.md) for the state machine and
+integration contract.
 
-## Managed connection boundary
+## Packet devices and host networking
 
-The `managed` feature performs:
+`PacketDevice` separates session processing from packet transport. Its
+`activate_session` and `deactivate_session` hooks bracket every authenticated
+session; `read_packet` and `write_packet` exchange complete IP packets.
 
-1. primary/fallback domain lookup with exact validation and a seven-day cache;
-2. signed controller authentication and credential/OIDC selection;
-3. controller configuration, posture, and device-binding evaluation;
-4. traditional server or SR-group normalization;
-5. bounded ingress probing and stable line selection;
-6. a temporary authentication OPEN and header-only CLOSE for credential mode;
-7. construction of a fresh direct `Client` for the persistent OPEN in both
-   modes.
+`TunDevice` implements the trait with the `tun` crate. `RouteGuard` applies a
+canonical route plan and records enough prior state to reverse its own work.
+Full-tunnel plans subtract the active peer, known managed ingresses, loopback,
+multicast, and link-local destinations so the UDP transport stays outside the
+TUN. Platform-specific route behavior is documented in
+[Configuration](CONFIGURATION.md#routing).
 
-The credential-mode temporary OPEN proves the selected credentials and ends
-with a header-only close, so its persistent tunnel uses a second OPEN. OIDC
-mode performs no temporary OPEN; its persistent connection performs the first.
-
-Controller responses remain untrusted. Stable outer fields are typed; unknown
-deployment-specific nested policy remains available as JSON. Traditional
-`serverlist` and SR `sites` payloads are mutually exclusive.
-
-See [Managed Connections](MANAGED_CONNECTIONS.md) for request and policy
-contracts.
-
-## Routing and TUN
-
-`TunDevice` implements `PacketDevice` through the `tun` crate. `RouteGuard`
-applies canonical route changes and owns enough prior state to restore them in
-reverse order. Linux snapshots any route that `ip route replace` will overwrite;
-Windows retains the replaced IP Helper row; macOS only deletes routes it added.
-
-Managed `all`, `ipfilter`, and `custom` policy becomes a list of CIDR
-differences. The active peer, known ingresses, loopback, multicast, and
-link-local addresses stay outside TUN, preventing the transport socket from
-routing into itself.
-
-Because the NETMASK TLV is not applied to the active session, host integration
-uses host prefixes (`/32` for IPv4 and `/128` for IPv6).
-
-## DNS subsystem
-
-`dns::policy` converts controller, profile, CLI, and OPEN_ACK inputs into one
-immutable `EffectiveDnsPolicy`:
+`DnsPacketDevice` decorates another device. Activation combines controller,
+profile, command-line, and OPEN_ACK inputs into an immutable
+`EffectiveDnsPolicy`; deactivation stops packet processing and restores the
+platform DNS lease.
 
 ```text
-controller and service defaults <- profile <- one-shot CLI
-                     + OPEN_ACK DNS
-                            |
-                   EffectiveDnsPolicy
-             +--------------+---------------+
-             |              |               |
-      platform DNS lease  packet engine  userspace resolver
-                            |
-                    physical DNS relay
+policy sources + OPEN_ACK -> EffectiveDnsPolicy
+                              +-> platform lease
+                              +-> packet engine -> physical DNS relay
 ```
 
-`DnsPacketDevice` decorates another packet device. Activation recomputes the
-effective policy from the new session; deactivation stops the engine and
-restores the platform lease.
-
-The packet engine handles visible unfragmented IPv4 UDP/53 queries plus
-TCP/UDP 853 blocking. UDP/53 queries pass to the tunnel, receive a synthetic
-response, or relay through sockets bound outside TUN. The relay bounds
-concurrency, rewrites transaction IDs, validates responses, retries servers,
-and retries truncated UDP over TCP. A session generation invalidates obsolete
-replies.
-
-Platform leases use systemd-resolved with a `resolvconf` fallback on Linux, a
-scoped SystemConfiguration entry on macOS, and IP Helper APIs on Windows.
-Physical resolvers are captured before changing link DNS.
+The packet engine and relay validate requests and replies, bound concurrency,
+and tag work with a session generation so replies from an old session cannot
+enter a new one. Detailed selection and split-DNS rules live in
+[Configuration](CONFIGURATION.md#dns-policy).
 
 ## Route-free forwarding
 
-The optional `forward` feature implements `PacketDevice` with bounded
-in-memory channels connected to a userspace TCP/IP stack.
+With the `forward` feature, bounded channels implement `PacketDevice` for a
+userspace TCP/IP stack. Raw TCP and HTTP(S) forwarding share that stack and
+connect to one fixed target. This path reuses direct or managed authentication
+without acquiring a TUN, routes, or a platform DNS lease.
 
-Raw TCP copies bytes between a loopback socket and one fixed userspace TCP
-target. HTTP(S) uses the same connector beneath an HTTP/1.1 fixed-origin proxy.
-Target parsing, DNS policy, connection capacity, timeouts, HTTP header
-rewriting, and upstream TLS remain outside the core session runtime.
+## State and secret ownership
 
-Direct and managed authentication therefore share one forwarding data plane.
-No platform route or DNS lease is installed.
+| Storage | Contents |
+|---|---|
+| `profiles.toml` | Device ID, profile metadata, stable line preference, local policy overrides, and opaque credential references |
+| OS credential service | Saved passwords and OIDC refresh tokens |
+| lookup cache | Time-bounded lookup responses used after a live lookup failure |
+| process memory | Access tokens, controller configuration, generated ingress credentials, and SR keys |
 
-## Persistent state boundaries
-
-Profile state and controller state are deliberately separate.
-
-`profiles.toml` contains the installation Device ID, profile metadata, stable
-line preference, DNS overrides, and opaque credential references. It uses an
-inter-process lock and atomic replacement. It never stores controller payloads,
-generated ingress passwords, access/refresh tokens, or SR keys.
-
-Saved passwords and refresh tokens live in the operating-system credential
-service. Profile changes to domain, Device ID, or username invalidate the
-associated credential reference.
-
-Lookup cache entries contain discovery metadata only and expire after seven
-days. Controller configurations and decrypted runtime credentials remain in
-memory.
+Profile updates use an inter-process lock and atomic replacement. Changes to
+the domain, Device ID, or username invalidate the associated credential
+reference. Permissions and platform storage locations are specified in
+[Configuration](CONFIGURATION.md#profiles-and-local-state).
 
 ## Concurrency and cleanup
 
-Session workers communicate failures through bounded ownership and a channel;
-an atomic flag coordinates shutdown. Every spawned worker is joined before
-the session returns.
+Session workers report failure through a channel and share an atomic shutdown
+flag. Every spawned worker is joined before the session returns. Line probes,
+DNS relay work, fragment state, forwarding connections, retries, and queues
+all have explicit bounds.
 
-Line probing has a fixed worker bound. DNS relay concurrency, fragment groups,
-fragment bytes, CNAME depth, forwarding connections, retries, and timeouts are
-all bounded.
-
-Host state is acquired in an order that permits reverse cleanup:
-
-```text
-TUN -> routes -> DNS runtime/lease -> session workers
-```
-
-Setup failure drops already-acquired guards. Normal shutdown stops workers and
-packet processing before restoring DNS and routes.
+Host resources are acquired through guards in the order TUN, routes, DNS
+runtime and lease, then session workers. A setup failure drops resources
+already acquired. Normal shutdown first stops session and packet workers,
+then restores DNS and routes. Process termination and operating-system
+failures remain recovery cases covered by the
+[Security Policy](../SECURITY.md#host-networking).
 
 ## Trust boundaries
 
-- Network datagrams, controller JSON, OIDC callbacks, DNS replies, config
-  files, profile files, and password files are untrusted input.
-- Packet lengths are checked before field access.
-- Cryptographic algorithm, tuple, path, and ID selections are checked against
-  active state.
-- Traditional fragments retain at most 256 groups for 100 ms.
-- SR fragments retain at most 16 groups and 262144 bytes for two seconds.
-- Debug output redacts credential and key owners.
-- Platform commands receive separate arguments rather than interpolated shell
-  strings.
+Network datagrams, controller JSON, OIDC callbacks, DNS replies, configuration
+files, profile files, and cached lookup responses are treated as untrusted.
+Lengths and types are checked before field access; algorithms, tuples, paths,
+and identifiers are checked against active state before dispatch or mutation.
 
-These invariants limit implementation risk. They do not add confidentiality,
-integrity, replay protection, or identity guarantees missing from the
-underlying protocol. See [Security Policy](../SECURITY.md).
+Resource limits constrain fragments, workers, relay requests, DNS traversal,
+and forwarding connections. Secret-owning types redact debug output, and
+platform commands receive separate arguments. These controls protect the
+implementation while the protocol's cryptographic guarantees remain those
+described in the [Security Policy](../SECURITY.md#security-model).

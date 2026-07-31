@@ -1,80 +1,58 @@
-# Command-Line Guide
+# Command-line guide
 
-This guide describes the unreleased command-line interface on `main`. The
-built-in help is the final authority for the installed binary:
+The built-in help is the authoritative command reference for the installed
+binary:
 
 ```console
 openiwan --help
 openiwan <command> --help
 ```
 
-## Conventions
+Durations use an integer followed by `ms`, `s`, or `m`, such as `500ms`, `3s`,
+or `1m`. Repeatable route options also accept comma-separated values. Use `-v`
+for debug logs and `-vv` for trace logs; `RUST_LOG` overrides the default
+filter.
 
-- `HOST:PORT` is an iWAN UDP endpoint.
-- `DURATION` requires an integer and an `ms`, `s`, or `m` suffix, such as
-  `500ms`, `3s`, or `1m`.
-- Options described as repeatable may be passed more than once. Route options
-  also accept comma-separated values.
-- `-v` enables debug logs and `-vv` enables trace logs. `RUST_LOG` overrides
-  this default filter.
-- Examples use documentation-only addresses and domains.
+## Commands
 
-## Command overview
-
-| Command | Purpose | Elevated privileges |
+| Command | Purpose | Elevation |
 |---|---|:---:|
 | `ping` | Probe an iWAN UDP endpoint | No |
-| `auth` | Perform authentication without opening TUN | No |
-| `connect` | Authenticate and open a native TUN tunnel | Yes |
-| `forward` | Forward one TCP or HTTP(S) target without TUN | No |
-| `decode` | Decode a hexadecimal iWAN datagram offline | No |
-| `managed discover` | Inspect domain discovery and authentication type | No |
-| `managed login` | Authenticate, test a line, and save authentication | No |
-| `managed connect` | Open a controller-managed TUN tunnel | Yes |
-| `managed forward` | Forward one target through a managed connection | No |
-| `managed lines` | Probe and list controller lines | No |
-| `profile` | Manage non-secret connection profiles | No |
+| `auth` | Authenticate and close the session | No |
+| `connect` | Open a native TUN tunnel | Yes |
+| `forward` | Forward one fixed target without TUN | No |
+| `decode` | Decode a hexadecimal datagram | No |
+| `managed discover` | Inspect domain discovery | No |
+| `managed login` | Authenticate a profile and save credentials | No |
+| `managed connect` | Open a controller-managed tunnel | Yes |
+| `managed forward` | Forward through a managed connection | No |
+| `managed lines` | Probe available controller lines | No |
+| `profile` | Manage connection profiles | No |
 
-On Linux and macOS, TUN and route changes normally require `sudo` or
-equivalent network capabilities. On Windows, run tunnel commands from an
-elevated terminal. Installation, authentication, discovery, profile changes,
-packet decoding, and route-free forwarding do not require elevation.
+On Linux and macOS, TUN and route changes require root or equivalent network
+capabilities. On Windows, run tunnel commands from an elevated terminal.
+
+Profiles and saved credentials belong to the operating-system account that
+created them. For a managed TUN on Unix, the simplest reliable workflow is to
+run profile setup, login, and connect in the same elevated shell.
 
 ## Credentials
 
-Direct credential commands resolve passwords in this order:
+Direct commands read a password from the first available source:
 
 1. the first line of `--password-file FILE`;
-2. the environment variable named by `--password-env` (default:
-   `OPENIWAN_PASSWORD`);
+2. the variable named by `--password-env` (default `OPENIWAN_PASSWORD`);
 3. a no-echo interactive prompt.
 
-Password files must not be group- or world-accessible on Unix. Passwords are
-not accepted as argument values because process listings and shell history
-are not secret stores.
+Managed commands use `--password-file`, `OPENIWAN_PASSWORD`, authentication
+saved for the selected profile, or an interactive flow. `managed login`
+performs fresh authentication and saves the verified password or OIDC refresh
+token. Use `--non-interactive` for services and scripts.
 
-Managed credential commands use the first available source:
+On Unix, password files must not be group- or world-readable. Avoid passing
+secrets through process arguments, logs, or shell history.
 
-- the first line of `--password-file FILE`;
-- `OPENIWAN_PASSWORD`;
-- authentication saved for the selected profile;
-- a no-echo interactive prompt.
-
-`managed login` deliberately skips saved authentication, performs a fresh
-login, and stores the verified password or OIDC refresh token for its profile.
-Other managed commands never save an interactive fallback:
-
-- `--non-interactive` fails instead of prompting or starting an interactive
-  OIDC flow.
-- `profile logout [NAME]` deletes saved authentication without removing the
-  profile.
-
-The profile and saved authentication must be accessed by the same operating
-system account. Preserving `OPENIWAN_STATE_DIR` through `sudo` can preserve
-the profile path, but it cannot cross the system credential-store account
-boundary.
-
-## Direct endpoint commands
+## Direct connections
 
 Probe an endpoint:
 
@@ -82,7 +60,7 @@ Probe an endpoint:
 openiwan ping 192.0.2.10:6001 --timeout 3s
 ```
 
-Authenticate and immediately close the session:
+Authenticate and close:
 
 ```console
 openiwan auth --server 192.0.2.10:6001 --username alice --encryption xor
@@ -94,120 +72,112 @@ Open a tunnel with explicit routes:
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --encryption xor --route 10.0.0.0/8 --route 2001:db8::/32
 ```
 
-Open an all-IPv4 tunnel and block IPv6 bypass while it is active:
+Open an all-IPv4 tunnel and block ordinary IPv6 bypass while it is active:
 
 ```console
 sudo openiwan connect --server 192.0.2.10:6001 --username alice --routing-mode all --block-ipv6
 ```
 
-`--server` may be replaced by `--config FILE`. Command-line connection
-options override values loaded from TOML where both are supported.
+Use `--config FILE` in place of `--server` to load direct-client TOML.
+Command-line connection settings take precedence over the file.
 
-The route options are:
+Route options:
 
-| Option | Behavior |
+| Option | Effect |
 |---|---|
 | `--route CIDR` | Add a network prefix |
 | `--route-ip IP` | Add a host route |
-| `--route-domain DOMAIN` | Resolve once, then add host routes for the result |
-| `--routing-mode all|custom` | Select all-IPv4 or custom routing |
+| `--route-domain DOMAIN` | Resolve once and add host routes |
+| `--routing-mode all\|custom` | Select all-IPv4 or custom routing |
 | `--block-ipv6` | Capture and drop IPv6 for this connection |
-| `--allow-ipv6` | Override a saved IPv6 block |
 
-Connection routes are canonicalized and reduced by the required safety
-exclusions. A same-family default route or a prefix containing the active iWAN
-endpoint is therefore installed as safe CIDR differences; a route that becomes
-empty contributes nothing. Profile storage remains stricter and rejects a
-literal default route. See [Configuration](CONFIGURATION.md) for route and DNS
-policy details.
+Routes are reduced by safety exclusions for the transport peer, loopback,
+multicast, and link-local networks. See [Configuration](CONFIGURATION.md) for
+routing precedence and DNS policy.
 
 ## Route-free forwarding
 
-`forward` authenticates to iWAN and runs a userspace IP stack. It creates no
-TUN interface and does not modify host routes:
+`forward` authenticates to iWAN and connects a loopback listener to one fixed
+target through a userspace network stack:
 
 ```console
 openiwan forward --server 192.0.2.10:6001 --username alice --target tcp://db.internal.example:5432 --listen 127.0.0.1:15432
 ```
 
-Target schemes:
-
-| Scheme | Behavior |
+| Target | Behavior |
 |---|---|
 | `tcp://HOST:PORT` | Bidirectional byte forwarding |
-| `http://HOST[:PORT]` | HTTP/1.1 reverse proxy to one fixed origin |
-| `https://HOST[:PORT]` | HTTP/1.1 reverse proxy with upstream TLS verification |
+| `http://HOST[:PORT]` | HTTP/1.1 proxy to a fixed origin |
+| `https://HOST[:PORT]` | HTTP/1.1 proxy with upstream TLS verification |
 
-The listener must be loopback. For HTTPS, system roots are always loaded;
-repeat `--ca-cert FILE` to add private trust anchors. Certificate verification
-cannot be disabled.
+The listener must use loopback. HTTPS always loads system trust roots; repeat
+`--ca-cert FILE` to add private roots.
 
-Target resolution uses `--resolve MODE`:
-
-| Mode | Behavior |
-|---|---|
-| `auto` | Direct mode uses tunnel DNS when available; managed mode follows split-DNS policy for the target name |
-| `tunnel` | Require DNS through iWAN |
-| `system` | Use the host resolver |
-
-In managed `auto` mode, a name excluded from the tunnel DNS policy uses the
-host resolver even when tunnel resolvers are configured. Select `tunnel`
-explicitly to override that choice.
-
-Repeat `--dns-server IP[:PORT]` to provide numeric resolvers reached through iWAN.
-`--dns-timeout` bounds each resolver attempt and `--connect-timeout` bounds
+Target lookup is selected with `--resolve auto|tunnel|system`. `auto` uses
+tunnel DNS when appropriate for the active direct or managed DNS policy.
+Repeat `--dns-server IP[:PORT]` to provide resolvers reachable through iWAN.
+`--dns-timeout` bounds each resolver attempt, while `--connect-timeout` covers
 DNS, TCP, and TLS setup.
 
-## Managed lifecycle
+## Managed connections
 
-Managed selectors belong to each subcommand. Use `--profile NAME` or
-`--domain DOMAIN`; they are mutually exclusive, and the default profile is
-used when neither is passed. `--domain` is for one-shot operations and is not
-accepted by `managed login`.
+A managed command selects either a saved profile or a customer domain:
 
-Inspect discovery:
+- `--profile NAME` uses a saved profile; omitting it uses the default profile.
+- `--domain DOMAIN` performs a one-shot `discover`, `connect`, `forward`, or
+  `lines` operation.
+- `managed login` is profile-based so saved authentication has a stable owner.
+
+Create a profile and authenticate it:
+
+```console
+openiwan profile set work --domain iwan.example --username alice
+openiwan managed discover --profile work
+openiwan managed login --profile work
+```
+
+OIDC login prints an authorization URL and prompts for the complete callback
+URL. `--posture-results FILE` supplies an already evaluated JSON array when a
+controller requires local posture checks.
+
+Connect or forward:
+
+```console
+sudo openiwan managed connect --profile work
+openiwan managed forward --profile work --target https://api.internal.example --listen 127.0.0.1:8080
+```
+
+For one-shot use:
 
 ```console
 openiwan managed discover --domain iwan.example
-```
-
-Authenticate, test the profile's selected line, and save authentication:
-
-```console
-openiwan managed login --profile work --username alice
-```
-
-Open a managed tunnel:
-
-```console
 sudo openiwan managed connect --domain iwan.example --username alice
 ```
 
-Forward one target through a managed connection:
+The first use generates an installation Device ID. A profile can retain a
+deployment's existing ID with `profile set --device-id ID`.
+
+### Line selection
+
+List and probe the available lines:
 
 ```console
-openiwan managed forward --domain iwan.example --username alice --target https://api.internal.example --listen 127.0.0.1:8080
+openiwan managed lines --profile work
+openiwan managed lines --profile work --json
 ```
 
-The first use generates an installation-wide Device ID. One-shot domain
-operations use that ID; a deployment that must preserve an existing
-enrollment can set a profile's ID with `profile set --device-id ID`. The
-seven-day domain lookup cache always lives in the state directory's `cache`
-child.
+Line preferences use stable controller identifiers:
 
-OIDC domains print the authorization URL and accept the complete callback URL
-at the prompt. The CLI uses its compatible redirect URI and reads the posture
-version from the controller. `--posture-results FILE` supplies externally
-evaluated local posture results as described in
-[Managed Connections](MANAGED_CONNECTIONS.md).
+- `auto` chooses the reachable line with the lowest measured latency;
+- `iwan:ID` selects a traditional server;
+- `sr:ID` selects a Segment Routing group.
 
-Line probes use a fixed two-second timeout. `--line LINE` is a one-shot
-override on `connect` and `forward`; `login` uses the profile preference and
-`lines` always probes every current line.
+Save a preference with `profile set --line`, or pass `--line` to
+`managed connect` or `managed forward` for one operation.
 
 ## Profiles
 
-Profiles store non-secret connection preferences:
+Profiles contain non-secret managed-connection preferences:
 
 ```console
 openiwan profile set work --domain iwan.example --username alice
@@ -216,44 +186,24 @@ openiwan profile show work
 openiwan profile use work
 ```
 
-The first profile becomes the default. `profile use NAME` changes the default.
-`profile remove NAME` deletes the profile and its saved authentication.
-`profile logout [NAME]` deletes only saved authentication.
-
-Profile updates are partial:
+The first profile becomes the default. Updates are partial, so a later
+`profile set` changes only the supplied values:
 
 ```console
 openiwan profile set work --line sr:3
-openiwan profile set work --unset-username
-openiwan profile set work --reset-dns
 openiwan profile set work --routing-mode custom --route 10.0.0.0/8 --block-ipv6
+openiwan profile set work --reset-dns
 ```
 
-Profile `--route` values replace the saved CIDR list. Use
-`--unset-routing-mode`, `--unset-routes`, or `--allow-ipv6` to clear the
-corresponding saved behavior. A connect-time routing mode or IPv6 flag wins
-over the profile; one-shot route targets remain additive.
+Use `profile logout [NAME]` to delete saved authentication while keeping the
+profile. `profile remove NAME` deletes both.
 
-Line preferences use stable controller identifiers:
-
-- `auto`: choose the reachable line with the lowest measured latency;
-- `iwan:ID`: choose one traditional server;
-- `sr:ID`: choose one Segment Routing group.
-
-List and probe all lines:
-
-```console
-openiwan managed lines
-openiwan managed lines --json
-openiwan profile set work --line iwan:7
-```
-
-Use the ID printed by `managed lines` with `profile set --line`. `--line LINE`
-is a one-shot override for `managed connect` or `managed forward`.
+See [Configuration](CONFIGURATION.md) for state locations, permissions,
+credential stores, and the full set of clear/reset operations.
 
 ## Automation
 
-Stable JSON is available from:
+Stable JSON output is available from:
 
 ```console
 openiwan profile list --json
@@ -261,22 +211,12 @@ openiwan profile show work --json
 openiwan managed lines --json
 ```
 
-Human-readable output may evolve between releases. Scripts should use JSON
-where available and must not parse log output.
+Scripts should use JSON where available and should not parse log output. Exit
+status is zero on success; runtime, configuration, and command-line errors use
+a nonzero status.
 
-Exit status is `0` on success. Runtime and configuration failures exit `1`;
-command-line usage errors are emitted by `clap` and use its nonzero usage
-status.
-
-## Environment
-
-| Variable | Purpose |
+| Environment variable | Purpose |
 |---|---|
 | `OPENIWAN_PASSWORD` | Default password source |
-| `OPENIWAN_STATE_DIR` | Override profile and cache state location |
+| `OPENIWAN_STATE_DIR` | Override profile and lookup-cache state location |
 | `RUST_LOG` | Override the tracing filter |
-
-Direct commands can change the password variable name with `--password-env
-ENV`; managed commands always use `OPENIWAN_PASSWORD`. See
-[Configuration](CONFIGURATION.md) for platform state locations and
-credential-storage boundaries.

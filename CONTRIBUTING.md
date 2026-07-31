@@ -1,177 +1,132 @@
 # Contributing to OpeniWAN
 
-Thank you for contributing to OpeniWAN. Bug fixes, portability improvements,
+Thank you for contributing. Bug fixes, portability improvements,
 documentation, tests, and reproducible interoperability evidence are welcome.
-
-By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+By participating, you agree to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you start
 
-- Read [SUPPORT.md](SUPPORT.md) and use the matching issue template.
-- Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
 - Search existing issues and pull requests.
-- Use only systems and networks you are authorized to test.
+- Use the appropriate channel in [SUPPORT.md](SUPPORT.md).
+- Report vulnerabilities privately as described in
+  [SECURITY.md](SECURITY.md).
+- Test only systems and networks you are authorized to use.
 - Keep credentials, tokens, private controller responses, proprietary iWAN
   binaries, and unredacted captures out of the repository.
 
-Open an issue before implementing a substantial protocol, public API,
-architecture, dependency, or cross-platform networking change. Small bug
-fixes, tests, and documentation corrections can go directly to a focused pull
-request.
-
-## Project language and naming
-
-English is canonical for source comments, Rust API documentation, technical
-guides, community policy, issues, and pull requests. Translated root READMEs
-are welcome.
-
-Use **OpeniWAN** for the project name in prose and headings. Use `openiwan`
-for the crate, executable, commands, paths, configuration keys, and URLs.
+Open an issue before starting a substantial protocol, public API,
+architecture, dependency, or cross-platform networking change. Small,
+well-scoped fixes can go directly to a pull request.
 
 ## Development setup
 
-The minimum supported Rust version is 1.91. Stable Rust is recommended for
-development.
-
-Clone and run the primary checks:
+Install Rust with Cargo. The minimum supported Rust version is defined by
+`package.rust-version` in [`Cargo.toml`](Cargo.toml); stable Rust is
+recommended for development.
 
 ```console
 git clone https://github.com/zhangheqi/openiwan.git
 cd openiwan
 cargo test --all-targets --all-features --locked
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --doc --all-features --locked
 ```
 
-Build documentation and the publishable package:
+Do not update `Cargo.lock` unless the dependency graph or package version is
+changing intentionally.
+
+## Checks
+
+Run the checks relevant to your change. Before submitting a pull request,
+run the full local set when your platform supports it:
 
 ```console
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --all-features --locked
+cargo test --doc --all-features --locked
+cargo doc --all-features --no-deps --locked
 cargo package --locked
 ```
 
-PowerShell:
+CI runs the test suite with the declared minimum Rust version and stable Rust
+on Linux, macOS, and Windows. It also checks the Windows ARM64 target,
+documentation, formatting, Clippy, and the packaged crate.
 
-```powershell
-$env:RUSTDOCFLAGS = "-D warnings"; cargo doc --no-deps --all-features --locked; Remove-Item Env:RUSTDOCFLAGS
-```
+## Tests
 
-Do not update `Cargo.lock` unless the dependency graph or package version
-intentionally changes.
+Add tests at the lowest useful layer and assert the supported contract. The
+current suite covers:
 
-## Test expectations
+- wire framing, cryptography, signatures, parsing bounds, and fragment
+  reassembly with exact or synthetic vectors;
+- managed lookup, authentication, controller configuration, posture, and
+  keepalive state transitions with synthetic endpoints;
+- CLI parsing, profiles, saved state, and credential handling;
+- TUN, route, DNS, worker, and rollback behavior where platform APIs permit;
+- TCP and HTTP forwarding, tunnel-side resolution, limits, and cleanup.
 
-Every behavior change needs tests at the lowest useful layer:
+Behavior changes should cover success, rejection, boundary, and cleanup paths
+where applicable. Networking changes must consider Linux, macOS, Windows
+x86_64, and Windows ARM64. Privileged smoke tests must use authorized,
+non-production systems and verify restoration of every route, DNS, and
+interface change.
 
-- exact byte vectors for framing, crypto, signatures, and canonical requests;
-- parser tests for valid, invalid, truncated, oversized, and unknown input;
-- synthetic transports and endpoints for authentication and controller flows;
-- lifecycle tests for reconnect, shutdown, rollback, and stale state;
-- CLI parsing tests for command and option changes;
-- platform tests for TUN, route, DNS, and credential-store behavior where
-  practical.
+Wire-level changes require reproducible evidence. Follow
+[Protocol Provenance](docs/PROTOCOL_PROVENANCE.md) and include the affected
+surface, evidence level, smallest reproducible input, expected bytes or state
+transition, and remaining uncertainty. Prefer synthetic fixtures and redact
+all real deployment data.
 
-Networking changes must consider Linux, macOS, Windows x86_64, and Windows
-ARM64. CI tests Rust 1.91 and stable on Linux, macOS, and Windows, compiles
-Windows ARM64, installs the Windows package, and runs formatting, Clippy,
-rustdoc, and package checks.
+## Implementation guidelines
 
-Privileged smoke tests should verify prompt shutdown and restoration of every
-route, DNS, and interface change. Do not run them against production networks
-without explicit authorization.
-
-## Protocol evidence
-
-Wire-level changes require evidence, not a plausible field name or inferred
-schema. Read [Protocol Provenance](docs/PROTOCOL_PROVENANCE.md) before changing
-packet bytes, controller signing, cryptography, timing, or state transitions.
-
-A protocol contribution should identify:
-
-1. the exact protocol surface;
-2. the evidence level;
-3. the Panabit iWAN client, server, or controller version, or `Unknown`;
-4. the smallest reproducible input;
-5. expected bytes or state transition;
-6. remaining uncertainty and deployment assumptions.
-
-Acceptable evidence includes independent protocol analysis, cross-checks
-against multiple implementations, synthetic local endpoints, and authorized
-real-endpoint observations. Redact real data and prefer synthetic vectors in
-the repository.
-
-## Code guidelines
-
-- Keep parsing strict and resource use bounded.
+- Keep parsers strict and resource use bounded.
 - Use explicit types at protocol and trust boundaries.
-- Preserve the distinction between traditional and Segment Routing framing.
+- Preserve cleanup on every route, DNS, interface, credential, and worker
+  return path.
 - Never log credentials, tokens, session keys, controller secrets, or packet
   contents by default.
 - Use zeroizing owners for secret material.
-- Preserve route, DNS, interface, credential, and worker cleanup on every
-  return path.
-- Avoid shell interpolation for platform commands; pass arguments separately.
+- Pass platform-command arguments directly instead of using shell
+  interpolation.
 - Document the invariant of every `unsafe` block.
-- Add `Errors`, `Panics`, and `Safety` sections to public API docs where
-  applicable.
-- Prefer a focused change over unrelated refactoring or formatting.
+- Keep changes focused and avoid unrelated refactoring.
 
-Public API compatibility matters even before `1.0`. If a break is necessary,
-explain the user impact and record it in the changelog.
+Treat the public API as compatibility-sensitive. Explain necessary breaking
+changes and their user impact.
 
-## Documentation
+## Documentation and changelog
 
-The [documentation index](docs/README.md) defines each document's purpose and
-authority. User-visible behavior changes must update:
+Update user-facing documentation, CLI help, Rust API docs, protocol reference,
+or security policy when the corresponding contract changes. English
+documentation is canonical; translated root READMEs should follow
+project-level changes.
 
-- built-in CLI help when commands or options change;
-- the relevant user guide or reference;
-- English README and translated README when project-level guidance changes;
-- protocol reference and provenance for wire changes;
-- security policy when assumptions or secret handling change;
-- changelog when users need to act or can observe a difference.
+Changelog entries must describe user-visible differences from the previous
+release, not intermediate commits. Verify each entry against the previous
+release tag and follow [Release Process](docs/RELEASES.md). Formatting,
+test-only refactors, and changes absent from both release endpoints do not
+need entries.
 
-Examples must use reserved IP ranges and placeholder domains. Keep commands
-single-line when they are intended to work unchanged in POSIX shells and
-PowerShell.
-
-## Changelog policy
-
-Changelog entries describe differences from the latest release tag, not the
-work performed in an individual commit. Use the categories and verification
-procedure in [Release Process](docs/RELEASES.md).
-
-Do not add lint-only cleanup, formatting, test refactors, or intermediate work
-that is absent from both release endpoints. Explicitly call out removed or
-renamed CLI options, Cargo features, serialized fields, public APIs, and
-security assumptions.
+Use reserved IP ranges, placeholder domains, and neutral identifiers in
+examples.
 
 ## Pull requests
 
-A pull request should contain:
+A pull request should include:
 
-1. a concise problem statement and rationale;
+1. the problem and rationale;
 2. the affected protocol surface and platforms;
 3. tests for changed behavior;
-4. documentation and changelog updates where required;
-5. security, resource, and cleanup considerations;
-6. commands used for validation.
+4. documentation and changelog updates when needed;
+5. security, resource-limit, and cleanup considerations;
+6. the commands used for validation.
 
 Keep commits reviewable and avoid mixing unrelated changes. Maintainers may
-request changes when evidence, tests, portability, or documentation are
-insufficient.
+ask for more evidence, tests, portability work, or documentation before
+merging.
 
-## Deployment-specific material
-
-General code, tests, examples, and documentation must remain independent of a
-particular deployment. Use neutral identifiers, reserved example addresses,
-and placeholder domains.
-
-Organization domains, private resolver addresses, branded operating
-instructions, and deployment-only mappings belong in external documentation
-or a precise provenance record. Necessary iWAN protocol attribution is not
-deployment-specific.
+Use **OpeniWAN** for the project name in prose. Use `openiwan` for the crate,
+executable, commands, paths, configuration keys, and URLs.
 
 ## License
 

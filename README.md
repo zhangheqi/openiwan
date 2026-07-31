@@ -101,25 +101,25 @@ as command-line values.
 
 ### Managed connection
 
-Create a reusable, non-secret profile:
+Creating TUN and changing routes normally requires elevation. On Unix, keep
+profile state, saved authentication, and the connection under the same
+operating-system account by using one elevated shell:
 
 ```console
+sudo -H -s
 openiwan profile set work --domain iwan.example --username alice --routing-mode all --block-ipv6
-```
-
-Inspect discovery, save verified authentication to the operating-system
-credential store, and connect:
-
-```console
 openiwan managed discover
 openiwan managed login
-sudo openiwan managed connect
+openiwan managed connect
+exit
 ```
 
-The first profile becomes the default. `managed login` always performs fresh
-authentication and saves it for that profile. OIDC domains print an
-authorization URL and ask for the complete callback URL; credential domains
-read the password from the configured protected source.
+The first profile becomes the default. All commands that use a profile and its
+saved authentication must run as the same operating-system account.
+`managed login` always performs fresh authentication and saves it for that
+profile. OIDC domains print an authorization URL and ask for the complete
+callback URL; credential domains read the password from the configured
+protected source.
 
 ### Route-free forwarding
 

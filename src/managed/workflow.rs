@@ -141,6 +141,8 @@ impl LineProbe {
 #[derive(Debug, Clone, Copy)]
 pub struct OidcLoginOptions<'a> {
     pub posture_check_results: &'a [Value],
+    /// Cached posture version. `0` is normalized to `None` and disables
+    /// evaluation when the controller returns no posture configuration.
     pub posture_version: Option<i64>,
     pub ping_timeout: Duration,
     pub line: &'a LinePreference,
@@ -443,16 +445,17 @@ impl<T: HttpTransport> DomainClient<T> {
                 "this domain uses credential authentication".into(),
             ));
         }
+        let cached_posture_version = enabled_posture_version(options.posture_version);
         let configuration = self.fetch_configuration(
             domain,
             device_id,
             Some(identity.access_token.as_str()),
             Some(&identity.username),
-            options.posture_version,
+            cached_posture_version,
         )?;
         let posture_version = match configuration.posture() {
             Some(posture_config) => posture::posture_gate_version(posture_config)?,
-            None => options.posture_version,
+            None => cached_posture_version,
         };
         if let Some(version) = posture_version {
             let evaluation = posture::evaluate(
@@ -517,6 +520,10 @@ impl<T: HttpTransport> DomainClient<T> {
         configuration.enforce_device_binding()?;
         Ok(configuration)
     }
+}
+
+fn enabled_posture_version(version: Option<i64>) -> Option<i64> {
+    version.filter(|version| *version != 0)
 }
 
 fn fetch_serverlist<T: HttpTransport>(
@@ -1493,5 +1500,12 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn zero_cached_posture_version_is_disabled() {
+        assert_eq!(enabled_posture_version(None), None);
+        assert_eq!(enabled_posture_version(Some(0)), None);
+        assert_eq!(enabled_posture_version(Some(7)), Some(7));
     }
 }

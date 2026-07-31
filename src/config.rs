@@ -14,6 +14,7 @@ fn default_receive_poll_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReconnectPolicy {
     #[serde(default = "ReconnectPolicy::default_attempts")]
     pub attempts: u32,
@@ -192,6 +193,20 @@ mod tests {
         assert_eq!(config.mtu, 1400);
         assert_eq!(config.encryption, EncryptionMethod::Xor);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn reconnect_policy_rejects_unknown_fields() {
+        let error = toml::from_str::<ClientConfig>(
+            r#"
+server = "127.0.0.1:6001"
+
+[reconnect]
+atempts = 3
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `atempts`"));
     }
 
     #[test]

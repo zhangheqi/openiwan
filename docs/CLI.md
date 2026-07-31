@@ -114,8 +114,12 @@ The route options are:
 | `--block-ipv6` | Capture and drop IPv6 for this connection |
 | `--allow-ipv6` | Override a saved IPv6 block |
 
-Default routes and routes containing the active iWAN endpoint are rejected.
-See [Configuration](CONFIGURATION.md) for route and DNS policy details.
+Connection routes are canonicalized and reduced by the required safety
+exclusions. A same-family default route or a prefix containing the active iWAN
+endpoint is therefore installed as safe CIDR differences; a route that becomes
+empty contributes nothing. Profile storage remains stricter and rejects a
+literal default route. See [Configuration](CONFIGURATION.md) for route and DNS
+policy details.
 
 ## Route-free forwarding
 
@@ -142,11 +146,15 @@ Target resolution uses `--resolve MODE`:
 
 | Mode | Behavior |
 |---|---|
-| `auto` | Use tunnel DNS when configured, otherwise system DNS |
+| `auto` | Direct mode uses tunnel DNS when available; managed mode follows split-DNS policy for the target name |
 | `tunnel` | Require DNS through iWAN |
 | `system` | Use the host resolver |
 
-Repeat `--dns-server HOST[:PORT]` to provide resolvers reached through iWAN.
+In managed `auto` mode, a name excluded from the tunnel DNS policy uses the
+host resolver even when tunnel resolvers are configured. Select `tunnel`
+explicitly to override that choice.
+
+Repeat `--dns-server IP[:PORT]` to provide numeric resolvers reached through iWAN.
 `--dns-timeout` bounds each resolver attempt and `--connect-timeout` bounds
 DNS, TCP, and TLS setup.
 

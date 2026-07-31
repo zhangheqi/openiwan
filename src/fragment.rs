@@ -130,7 +130,7 @@ struct TraditionalPending {
 /// matching window.
 #[derive(Debug, Default)]
 pub struct TraditionalFragmentReassembler {
-    groups: HashMap<u32, TraditionalPending>,
+    groups: HashMap<(u8, u32), TraditionalPending>,
 }
 
 impl TraditionalFragmentReassembler {
@@ -150,15 +150,25 @@ impl TraditionalFragmentReassembler {
     }
 
     pub fn insert(&mut self, fragment: Fragment, now: Instant) -> Result<Option<Vec<u8>>> {
+        self.insert_in_context(0, fragment, now)
+    }
+
+    pub(crate) fn insert_in_context(
+        &mut self,
+        context: u8,
+        fragment: Fragment,
+        now: Instant,
+    ) -> Result<Option<Vec<u8>>> {
         self.purge_expired(now);
         if fragment.data.len() > MAX_REASSEMBLED_PACKET {
             return Err(Error::FragmentTooLarge);
         }
 
-        if let Some(first) = self.groups.remove(&fragment.id) {
+        let key = (context, fragment.id);
+        if let Some(first) = self.groups.remove(&key) {
             if first.fragment.end_of_packet == fragment.end_of_packet {
                 self.groups.insert(
-                    fragment.id,
+                    key,
                     TraditionalPending {
                         created: now,
                         fragment,
@@ -190,12 +200,12 @@ impl TraditionalFragmentReassembler {
                 .groups
                 .iter()
                 .min_by_key(|(_, pending)| pending.created)
-                .map(|(id, _)| *id)
+                .map(|(key, _)| *key)
         {
             self.groups.remove(&oldest);
         }
         self.groups.insert(
-            fragment.id,
+            key,
             TraditionalPending {
                 created: now,
                 fragment,
@@ -376,7 +386,17 @@ pub fn trim_ip_packet(packet: &[u8]) -> Result<&[u8]> {
             if packet.len() < 20 {
                 return Err(Error::InvalidFragment("truncated IPv4 header"));
             }
-            usize::from(u16::from_be_bytes([packet[2], packet[3]]))
+            let header_length = usize::from(packet[0] & 0x0f) * 4;
+            if header_length < 20 {
+                return Err(Error::InvalidFragment("invalid IPv4 header length"));
+            }
+            let total_length = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+            if total_length < header_length {
+                return Err(Error::InvalidFragment(
+                    "IPv4 total length is shorter than its header",
+                ));
+            }
+            total_length
         }
         6 => {
             if packet.len() < 40 {
@@ -453,6 +473,21 @@ mod tests {
     }
 
     #[test]
+    fn traditional_group_limit_is_shared_across_contexts() {
+        let now = Instant::now();
+        let mut queue = TraditionalFragmentReassembler::default();
+        for id in 0..TRADITIONAL_MAX_GROUPS as u32 {
+            queue
+                .insert_in_context((id % 2) as u8, fragment(id, 0, false, b"x"), now)
+                .unwrap();
+        }
+        queue
+            .insert_in_context(2, fragment(u32::MAX, 0, false, b"x"), now)
+            .unwrap();
+        assert_eq!(queue.pending_groups(), TRADITIONAL_MAX_GROUPS);
+    }
+
+    #[test]
     fn sr_reassembly_is_offset_aware_and_out_of_order() {
         let now = Instant::now();
         let mut queue = SrFragmentReassembler::default();
@@ -475,5 +510,25 @@ mod tests {
         assert_eq!(fragments[1].offset, 1400);
         assert_eq!(fragments[1].data.len(), 600);
         assert!(fragments[1].end_of_packet);
+    }
+
+    #[test]
+    fn trim_ip_packet_rejects_short_ipv4_total_length_and_ihl() {
+        let mut packet = vec![0_u8; 20];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(matches!(
+            trim_ip_packet(&packet),
+            Err(Error::InvalidFragment(
+                "IPv4 total length is shorter than its header"
+            ))
+        ));
+
+        packet[0] = 0x44;
+        packet[2..4].copy_from_slice(&20_u16.to_be_bytes());
+        assert!(matches!(
+            trim_ip_packet(&packet),
+            Err(Error::InvalidFragment("invalid IPv4 header length"))
+        ));
     }
 }

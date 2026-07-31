@@ -94,22 +94,21 @@ Windows 用户应在管理员终端中执行隧道命令，不使用 `sudo`。�
 
 ### 托管连接
 
-创建可复用且不含秘密信息的 profile：
+创建 TUN 和修改路由通常需要提权。在 Unix 上，请在同一个提权 shell 中创建
+profile、保存认证并连接，确保这些操作属于同一个系统账户：
 
 ```console
+sudo -H -s
 openiwan profile set work --domain iwan.example --username alice --routing-mode all --block-ipv6
-```
-
-查看发现结果，将验证后的认证信息保存到系统凭据库，然后连接：
-
-```console
 openiwan managed discover
 openiwan managed login
-sudo openiwan managed connect
+openiwan managed connect
+exit
 ```
 
-首个 profile 会自动成为默认项。`managed login` 总是执行新认证并保存到该 profile。
-OIDC 域会输出授权 URL 并要求粘贴完整回调 URL；密码域从配置的受保护来源读取密码。
+首个 profile 会自动成为默认项。使用该 profile 及其已保存认证的命令必须由同一个
+系统账户运行。`managed login` 总是执行新认证并保存到该 profile。OIDC 域会输出
+授权 URL 并要求粘贴完整回调 URL；密码域从配置的受保护来源读取密码。
 
 ### 不改路由的转发
 

@@ -149,10 +149,10 @@ struct ForwardOptions {
     /// Resolve the target with MODE.
     #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
     resolve: ResolveViaArg,
-    /// Query HOST[:PORT] through iWAN. May be repeated.
+    /// Query IP[:PORT] through iWAN. May be repeated.
     #[arg(
         long = "dns-server",
-        value_name = "HOST[:PORT]",
+        value_name = "IP[:PORT]",
         value_parser = parse_resolver
     )]
     dns_servers: Vec<SocketAddr>,
@@ -2520,7 +2520,6 @@ fn print_session(session: &openiwan::SessionInfo) {
     tracing::debug!(
         peer = %session.peer,
         session_id = session.session_id,
-        token = session.token,
         encryption = %session.encryption,
         mtu = session.mtu,
         segment_routing = session.segment_routing,
@@ -3531,6 +3530,21 @@ mod tests {
                 "alice",
                 "--target",
                 "db.example.test:5432",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "openiwan",
+                "forward",
+                "--server",
+                "192.0.2.10:6001",
+                "--username",
+                "alice",
+                "--target",
+                "tcp://db.example.test:5432",
+                "--dns-server",
+                "dns.example.test:53",
             ])
             .is_err()
         );

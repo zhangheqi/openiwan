@@ -31,10 +31,10 @@ max_delay_ms = 30000
 | `server` | Required | iWAN UDP endpoint in `HOST:PORT` form |
 | `mtu` | `1400` | Packet MTU; valid range `576..=9000` |
 | `encryption` | `xor` | `none`, `xor`, or `aes` |
-| `receive_poll_ms` | `250` | Session receive poll interval |
+| `receive_poll_ms` | `250` | Session receive poll interval; must be greater than zero |
 | `reconnect.attempts` | `10` | Maximum reconnection attempts |
-| `reconnect.initial_delay_ms` | `1000` | Initial reconnect backoff |
-| `reconnect.max_delay_ms` | `30000` | Maximum reconnect backoff |
+| `reconnect.initial_delay_ms` | `1000` | Initial reconnect backoff; must not exceed the maximum |
+| `reconnect.max_delay_ms` | `30000` | Maximum reconnect backoff; must be greater than zero |
 
 Unknown fields are rejected. Authentication and heartbeat timing are protocol
 constants and are not configuration knobs. Usernames and passwords are
@@ -80,7 +80,7 @@ Managed routing modes are:
 | Mode | Effective policy |
 |---|---|
 | `all` | All IPv4 destinations minus required exclusions |
-| `ipfilter` | Inclusive prefixes minus exclusive prefixes |
+| `ipfilter` | Inclusive prefixes minus exclusive prefixes; all IPv4 when both lists are empty |
 | `custom` | IP-filter base plus effective custom routes |
 
 The user-visible modes are `all` and `custom`. Controller `ipfilter` remains
@@ -97,7 +97,9 @@ privileged interface-bound sockets and pre-existing more-specific routes.
 Physical IPv6 DNS resolvers are not used while blocking is active.
 
 All route and interface changes use rollback guards. Dropping the session
-restores replaced state in reverse order.
+restores replaced state in reverse order. Linux snapshots routes before
+`ip route replace`, Windows retains replaced IP Helper rows, and macOS removes
+only routes successfully added by the session.
 
 ## DNS policy
 
@@ -148,17 +150,20 @@ inclusions with controller inclusions and retains controller exclusions.
 
 ### Encrypted DNS handling
 
-`--encrypted-dns` accepts `inherit`, `block`, or `allow`. When blocking is
-effective, the visible TUN packet path:
+`--encrypted-dns` accepts `inherit`, `block`, or `allow`. Blocking remains
+active even when tunnel DNS or split DNS is disabled. In the visible
+unfragmented IPv4 TUN packet path it:
 
 - drops TCP and UDP port 853;
 - returns NXDOMAIN for configured `--doh-host` names and
   `use-application-dns.net`;
 - does not intercept TLS or inspect general DoH/QUIC traffic.
 
-The packet engine handles IPv4 DNS traffic. Physical DNS relay sockets are
-bound outside the tunnel, validate replies, retry truncated UDP over TCP, and
-discard replies from obsolete session generations.
+When packet DNS routing is active, other IPv4 UDP/53 AAAA queries receive an
+empty NOERROR response. Split routing and synthetic DNS responses operate on
+unfragmented IPv4 UDP/53; TCP/53 is not intercepted. Physical DNS relay sockets
+are bound outside the tunnel, validate replies, retry truncated UDP over TCP,
+and discard replies from obsolete session generations.
 
 ### Saving profile DNS
 
@@ -197,7 +202,7 @@ Default state locations:
 
 | Platform | Directory |
 |---|---|
-| Windows | `%LOCALAPPDATA%\OpeniWAN` |
+| Windows | `%LOCALAPPDATA%\OpeniWAN`, falling back to `%APPDATA%\OpeniWAN` |
 | macOS | `~/Library/Application Support/openiwan` |
 | Other Unix | `$XDG_STATE_HOME/openiwan` or `~/.local/state/openiwan` |
 

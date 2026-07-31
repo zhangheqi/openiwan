@@ -136,16 +136,17 @@ still prevent cleanup; operators should know how to inspect and restore host
 networking.
 
 Full-tunnel policy excludes the active iWAN peer and known managed ingresses
-to avoid routing the UDP transport into its own TUN. Default routes supplied
-directly by users are rejected.
+to avoid routing the UDP transport into its own TUN. Connection-time default
+routes and prefixes containing the active peer are reduced to safe CIDR
+differences. Profile storage rejects literal default routes.
 
 Platform DNS is installed through a link-scoped lease. Physical resolvers are
 captured before the lease and used through protected relay sockets. Split-DNS
 and encrypted-DNS behavior applies only to traffic visible in the supported
 packet path:
 
-- visible TCP/UDP port 853 can be dropped;
-- configured DoH hostnames can receive NXDOMAIN over UDP/53;
+- visible unfragmented IPv4 TCP/UDP port 853 can be dropped;
+- configured DoH hostnames can receive NXDOMAIN over IPv4 UDP/53;
 - TLS is not intercepted;
 - general DoH, HTTP/3, QUIC, and IP-based blocking are not provided.
 

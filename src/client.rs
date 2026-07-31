@@ -141,9 +141,6 @@ impl Client {
         };
         let socket = UdpSocket::bind(bind_address)?;
         socket.connect(peer)?;
-        socket.set_read_timeout(Some(AUTH_ATTEMPT_TIMEOUT))?;
-        socket.set_write_timeout(Some(AUTH_ATTEMPT_TIMEOUT))?;
-
         let nonce = random_nonzero_u32()?;
         let first_hop = self
             .config
@@ -163,6 +160,13 @@ impl Client {
         let mut attempt = 0_u32;
         let mut receive_buffer = vec![0_u8; 65_535];
         loop {
+            let Some(attempt_timeout) =
+                authentication_attempt_timeout(started.elapsed(), overall_timeout)
+            else {
+                return Err(Error::Timeout("authentication"));
+            };
+            socket.set_read_timeout(Some(attempt_timeout))?;
+            socket.set_write_timeout(Some(attempt_timeout))?;
             attempt = attempt.saturating_add(1);
             debug!(attempt, peer = %peer, "sending OPEN");
             socket.send(&open)?;
@@ -218,9 +222,7 @@ impl Client {
                 Err(error) => return Err(Error::Io(error)),
             }
 
-            if overall_timeout <= AUTH_ATTEMPT_TIMEOUT
-                || started.elapsed().saturating_add(AUTH_RETRY_DELAY) >= overall_timeout
-            {
+            if started.elapsed().saturating_add(AUTH_RETRY_DELAY) >= overall_timeout {
                 return Err(Error::Timeout("authentication"));
             }
             thread::sleep(AUTH_RETRY_DELAY);
@@ -430,10 +432,10 @@ impl ConnectedSession {
             Arc::clone(&running),
             failure_tx.clone(),
         )?;
-        let heartbeat_worker =
+        let heartbeat_worker_result =
             if let (Some(runtime), Some(monitor)) = (self.sr.as_ref(), sr_monitor.as_ref()) {
                 if runtime.config.keepalive {
-                    Some(spawn_sr_monitor(
+                    spawn_sr_monitor(
                         Arc::clone(&self.socket),
                         self.info.clone(),
                         Arc::clone(runtime),
@@ -441,20 +443,30 @@ impl ConnectedSession {
                         Arc::clone(&running),
                         monotonic_origin,
                         failure_tx.clone(),
-                    )?)
+                    )
+                    .map(Some)
                 } else {
-                    None
+                    Ok(None)
                 }
             } else {
-                Some(spawn_traditional_heartbeat(
+                spawn_traditional_heartbeat(
                     Arc::clone(&self.socket),
                     self.info.clone(),
                     Arc::clone(&heartbeat),
                     Arc::clone(&running),
                     monotonic_origin,
                     failure_tx,
-                )?)
+                )
+                .map(Some)
             };
+        let heartbeat_worker = match heartbeat_worker_result {
+            Ok(worker) => worker,
+            Err(error) => {
+                running.store(false, Ordering::Release);
+                let _ = sender.join();
+                return Err(error);
+            }
+        };
 
         let outcome = self.receive_loop(
             device.as_ref(),
@@ -483,10 +495,7 @@ impl ConnectedSession {
         sr_monitor: Option<&Mutex<SrMonitor>>,
         monotonic_origin: Instant,
     ) -> SessionEnd {
-        let mut legacy_reassemblers = [
-            TraditionalFragmentReassembler::default(),
-            TraditionalFragmentReassembler::default(),
-        ];
+        let mut legacy_reassembler = TraditionalFragmentReassembler::default();
         let mut sr_reassembler = SrFragmentReassembler::default();
         let mut sr_responder = SrMonitorResponder::default();
         let mut buffer = vec![0_u8; 65_535];
@@ -539,7 +548,6 @@ impl ConnectedSession {
                 {
                     warn!(
                         session_id = decoded.header.session_id,
-                        token = decoded.header.token,
                         "dropping packet from a different session"
                     );
                     continue;
@@ -548,7 +556,7 @@ impl ConnectedSession {
                     &decoded,
                     device,
                     heartbeat,
-                    &mut legacy_reassemblers,
+                    &mut legacy_reassembler,
                     monotonic_origin,
                 )
             };
@@ -569,7 +577,7 @@ impl ConnectedSession {
         packet: &DecodedPacket,
         device: &dyn PacketDevice,
         heartbeat: &Mutex<HeartbeatTracker>,
-        reassemblers: &mut [TraditionalFragmentReassembler; 2],
+        reassembler: &mut TraditionalFragmentReassembler,
         monotonic_origin: Instant,
     ) -> Result<PacketAction> {
         match packet.header.packet_type {
@@ -589,12 +597,14 @@ impl ConnectedSession {
             packet_type @ (PacketType::IpFragment | PacketType::IpFragmentIpv6) => {
                 require_encryption(packet.header, EncryptionMethod::None)?;
                 let fragment = Fragment::parse_traditional(&packet.body)?;
-                let (reassembler, expected_version) = if packet_type == PacketType::IpFragment {
-                    (&mut reassemblers[0], 4)
+                let expected_version = if packet_type == PacketType::IpFragment {
+                    4
                 } else {
-                    (&mut reassemblers[1], 6)
+                    6
                 };
-                if let Some(inner) = reassembler.insert(fragment, Instant::now())? {
+                if let Some(inner) =
+                    reassembler.insert_in_context(expected_version, fragment, Instant::now())?
+                {
                     write_inner_packet(
                         device,
                         validate_inner_packet(&inner, Some(expected_version))?,
@@ -978,6 +988,14 @@ fn validate_inner_packet(packet: &[u8], expected_version: Option<u8>) -> Result<
     Ok(packet)
 }
 
+fn authentication_attempt_timeout(
+    elapsed: Duration,
+    overall_timeout: Duration,
+) -> Option<Duration> {
+    let remaining = overall_timeout.saturating_sub(elapsed);
+    (!remaining.is_zero()).then_some(remaining.min(AUTH_ATTEMPT_TIMEOUT))
+}
+
 fn require_encryption(header: PacketHeader, expected: EncryptionMethod) -> Result<()> {
     if header.encryption != expected {
         return Err(Error::InvalidConfig(format!(
@@ -1234,6 +1252,22 @@ mod tests {
         let info = parse_open_ack(&packet, "127.0.0.1:6001".parse().unwrap(), 7, 1400).unwrap();
         assert_eq!(info.mtu, 1400);
         assert_eq!(info.encryption, EncryptionMethod::None);
+    }
+
+    #[test]
+    fn authentication_attempt_timeout_respects_overall_budget() {
+        assert_eq!(
+            authentication_attempt_timeout(Duration::from_secs(2), Duration::from_secs(13)),
+            Some(AUTH_ATTEMPT_TIMEOUT)
+        );
+        assert_eq!(
+            authentication_attempt_timeout(Duration::from_secs(12), Duration::from_secs(13)),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            authentication_attempt_timeout(Duration::from_secs(13), Duration::from_secs(13)),
+            None
+        );
     }
 
     #[test]

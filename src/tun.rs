@@ -506,7 +506,7 @@ impl RouteGuard {
             .iter()
             .map(|route| Route::parse(route))
             .collect::<Result<Vec<_>>>()?;
-        #[cfg(windows)]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let platform = configure_routes(device, &routes)?;
             Ok(Self {
@@ -515,7 +515,7 @@ impl RouteGuard {
                 platform,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             configure_routes(device, &routes)?;
             Ok(Self {
@@ -742,7 +742,10 @@ fn push_route(routes: &mut Vec<Route>, route: Route, excluded_peer: Option<IpAdd
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
+type PlatformRoutes = LinuxRoutes;
+
+#[cfg(target_os = "macos")]
 type PlatformRoutes = ();
 
 #[cfg(windows)]
@@ -753,16 +756,23 @@ type PlatformRoutes = ();
 
 #[cfg(target_os = "linux")]
 fn configure_routes(device: &TunDevice, routes: &[Route]) -> Result<PlatformRoutes> {
-    let mut installed = Vec::new();
+    let mut platform = LinuxRoutes::default();
     for route in routes {
         let route = route.to_string();
+        let previous = match snapshot_linux_route(&route) {
+            Ok(previous) => previous,
+            Err(error) => {
+                platform.rollback(device.name());
+                return Err(error);
+            }
+        };
         if let Err(error) = run_command("ip", &["route", "replace", &route, "dev", device.name()]) {
-            cleanup_linux_routes(device.name(), &installed);
+            platform.rollback(device.name());
             return Err(error);
         }
-        installed.push(route);
+        platform.changes.push(LinuxRouteChange { route, previous });
     }
-    Ok(())
+    Ok(platform)
 }
 
 #[cfg(target_os = "macos")]
@@ -800,21 +810,69 @@ fn configure_routes(_device: &TunDevice, _routes: &[Route]) -> Result<PlatformRo
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_routes(device: &str, routes: &[Route], _platform: &mut PlatformRoutes) {
-    let routes = routes.iter().map(ToString::to_string).collect::<Vec<_>>();
-    cleanup_linux_routes(device, &routes);
+fn cleanup_routes(device: &str, _routes: &[Route], platform: &mut PlatformRoutes) {
+    platform.rollback(device);
     let _ = Command::new("ip")
         .args(["link", "set", "dev", device, "down"])
         .output();
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_linux_routes(device: &str, routes: &[String]) {
-    for route in routes.iter().rev() {
-        let _ = Command::new("ip")
-            .args(["route", "del", route, "dev", device])
-            .output();
+#[derive(Debug, Default)]
+struct LinuxRoutes {
+    changes: Vec<LinuxRouteChange>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxRoutes {
+    fn rollback(&mut self, device: &str) {
+        while let Some(change) = self.changes.pop() {
+            let _ = Command::new("ip")
+                .args(["route", "del", &change.route, "dev", device])
+                .output();
+            for previous in change.previous {
+                let _ = Command::new("ip")
+                    .args(["route", "replace"])
+                    .args(previous)
+                    .output();
+            }
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct LinuxRouteChange {
+    route: String,
+    previous: Vec<Vec<String>>,
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_linux_route(route: &str) -> Result<Vec<Vec<String>>> {
+    let Output {
+        status,
+        stdout,
+        stderr,
+    } = Command::new("ip")
+        .args(["-o", "route", "show", "exact", route])
+        .output()?;
+    if !status.success() {
+        return Err(Error::CommandFailed {
+            program: "ip".into(),
+            message: String::from_utf8_lossy(&stderr).trim().into(),
+        });
+    }
+    Ok(parse_linux_route_snapshot(&stdout))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_route_snapshot(output: &[u8]) -> Vec<Vec<String>> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::split_whitespace)
+        .map(|arguments| arguments.map(str::to_owned).collect::<Vec<_>>())
+        .filter(|arguments| !arguments.is_empty())
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -1194,6 +1252,30 @@ mod tests {
         let mut session = session(Some(address.parse().unwrap()));
         session.gateway = Some(gateway.parse().unwrap());
         session
+    }
+
+    #[test]
+    fn parses_linux_route_snapshots_as_restore_arguments() {
+        assert_eq!(
+            parse_linux_route_snapshot(
+                b"10.0.0.0/8 via 192.0.2.1 dev eth0 proto static metric 42\n\
+                  blackhole 198.51.100.0/24 metric 100\n",
+            ),
+            [
+                vec![
+                    "10.0.0.0/8",
+                    "via",
+                    "192.0.2.1",
+                    "dev",
+                    "eth0",
+                    "proto",
+                    "static",
+                    "metric",
+                    "42",
+                ],
+                vec!["blackhole", "198.51.100.0/24", "metric", "100"],
+            ]
+        );
     }
 
     #[test]

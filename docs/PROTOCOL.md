@@ -158,8 +158,10 @@ The `/config` request is:
 }
 ```
 
-The `type` member is the runtime platform (`android`, `ios`, `macos`, or
-`windows`), not the lookup result's `controller` service type.
+The `type` member is the controller compatibility platform (`android`, `ios`,
+`macos`, or `windows`), not the lookup result's `controller` service type.
+Linux and other desktop Unix targets map to `android` because this controller
+schema has no Linux value.
 
 It uses `Content-Type: application/json`, `X-Mobile-Api-Version: 4`, the four
 mobile-API `X-Auth-*` headers over the final URL and exact body, and an
@@ -183,9 +185,10 @@ Password login probes ingress latency, selects the best responder, performs a
 one-shot OPEN, saves the selected server and credentials, and closes the UDP
 socket. Controller credential mode downloads its controller-provided
 serverlist endpoint; OIDC login obtains `/config`, uses `server_credentials`
-by `server_id`, and evaluates posture and device-binding gates when configured.
-The persistent VPN connection always performs another OPEN before creating
-TUN.
+by `server_id`, and evaluates posture and device-binding gates when configured;
+it does not perform the one-shot OPEN. Every persistent VPN connection performs
+an OPEN before creating TUN: this is a second OPEN for password login and the
+first OPEN for OIDC.
 
 Controller iWAN lines are nested under `serverlist.serverlist`; SR groups use
 the mutually exclusive top-level `sites` member. Each controller line can

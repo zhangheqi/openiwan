@@ -338,6 +338,10 @@ impl EffectiveDnsPolicy {
     }
 
     pub const fn engine_enabled(&self) -> bool {
+        self.block_encrypted_dns || self.dns_routing_enabled()
+    }
+
+    pub const fn dns_routing_enabled(&self) -> bool {
         !matches!(self.server_mode, DnsServerMode::Disabled)
             && !self.servers.is_empty()
             && !matches!(self.split_mode, SplitDnsMode::Off)
@@ -635,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_serverlist_disables_the_runtime_engine() {
+    fn disabled_serverlist_disables_dns_routing_but_not_encrypted_dns_blocking() {
         let defaults = DnsDefaults {
             server_mode: ServerListDnsMode::Disabled,
             split_mode: SplitDnsMode::TunnelAll,
@@ -644,5 +648,17 @@ mod tests {
         let policy = DnsPolicyResolver::resolve(&defaults, &DnsOverrides::default(), &[]).unwrap();
         assert_eq!(policy.server_mode, DnsServerMode::Disabled);
         assert!(!policy.engine_enabled());
+
+        let policy = DnsPolicyResolver::resolve(
+            &defaults,
+            &DnsOverrides {
+                encrypted_dns: Some(EncryptedDnsMode::Block),
+                ..DnsOverrides::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert!(policy.engine_enabled());
+        assert!(!policy.dns_routing_enabled());
     }
 }

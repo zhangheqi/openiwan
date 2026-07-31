@@ -109,10 +109,10 @@ impl DnsPacketEngine {
         let query = &request.queries[0];
         let name = query.name().to_utf8();
 
-        let synthetic = if query.query_type() == RecordType::AAAA {
-            Some(ResponseCode::NoError)
-        } else if self.policy.blocks_doh_host(&name) {
+        let synthetic = if self.policy.blocks_doh_host(&name) {
             Some(ResponseCode::NXDomain)
+        } else if self.policy.dns_routing_enabled() && query.query_type() == RecordType::AAAA {
+            Some(ResponseCode::NoError)
         } else {
             None
         };
@@ -129,6 +129,9 @@ impl DnsPacketEngine {
                 &dns,
             )
             .map_or(DnsPacketAction::Pass, DnsPacketAction::Inject);
+        }
+        if !self.policy.dns_routing_enabled() {
+            return DnsPacketAction::Pass;
         }
         if self.policy.routes_through_tunnel(&name) {
             DnsPacketAction::Pass
@@ -356,6 +359,18 @@ mod tests {
             Message::from_vec(udp.payload).unwrap().response_code,
             ResponseCode::NXDomain
         );
+
+        let DnsPacketAction::Inject(packet) =
+            engine().process(&query(RecordType::AAAA, "dns.example.test", 17, 53))
+        else {
+            panic!("expected injection");
+        };
+        let ipv4 = Ipv4Packet::parse(&packet).unwrap();
+        let udp = UdpPacket::parse(ipv4.payload).unwrap();
+        assert_eq!(
+            Message::from_vec(udp.payload).unwrap().response_code,
+            ResponseCode::NXDomain
+        );
     }
 
     #[test]
@@ -369,6 +384,40 @@ mod tests {
             DnsPacketAction::Drop
         );
         assert_eq!(engine().process(&[0, 1, 2]), DnsPacketAction::Pass);
+    }
+
+    #[test]
+    fn encrypted_dns_blocking_works_without_dns_routing() {
+        let mut policy = engine().policy().clone();
+        policy.server_mode = DnsServerMode::Disabled;
+        policy.servers.clear();
+        policy.split_mode = SplitDnsMode::Off;
+        let engine = DnsPacketEngine::new(policy);
+
+        assert_eq!(
+            engine.process(&query(RecordType::A, "example.test", 17, 853)),
+            DnsPacketAction::Drop
+        );
+        assert_eq!(
+            engine.process(&query(RecordType::A, "example.test", 6, 853)),
+            DnsPacketAction::Drop
+        );
+        assert_eq!(
+            engine.process(&query(RecordType::AAAA, "example.test", 17, 53)),
+            DnsPacketAction::Pass
+        );
+
+        let DnsPacketAction::Inject(packet) =
+            engine.process(&query(RecordType::AAAA, "dns.example.test", 17, 53))
+        else {
+            panic!("expected injection");
+        };
+        let ipv4 = Ipv4Packet::parse(&packet).unwrap();
+        let udp = UdpPacket::parse(ipv4.payload).unwrap();
+        assert_eq!(
+            Message::from_vec(udp.payload).unwrap().response_code,
+            ResponseCode::NXDomain
+        );
     }
 
     #[test]

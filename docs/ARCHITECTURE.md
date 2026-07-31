@@ -77,7 +77,8 @@ Authentication:
 1. resolve and connect one UDP socket to the configured peer;
 2. construct one OPEN packet with a random nonzero nonce;
 3. resend the byte-identical packet within the protocol retry window;
-4. validate OPEN_ACK or OPEN_REJECT framing, tuple, TLVs, and nonce;
+4. validate OPEN_ACK or OPEN_REJECT framing, tuple, TLVs, and any returned
+   nonce;
 5. derive the session cipher and return `ConnectedSession`.
 
 The connected UDP socket enforces the peer address. Session processing also
@@ -113,10 +114,11 @@ fragment behavior.
 `SegmentRoutingConfig` adds a logical forward path, selected SR ID, optional
 monitor, and outer-algorithm/key pair. OPEN carries the first logical link.
 
-Outbound serialization reverses the logical path. Returned datagrams must use
-logical order, `next_id=0`, the active session tuple, and the configured outer
-algorithm. `SREntry.ip` is controller metadata and is not used as the ingress
-endpoint.
+Outbound serialization reverses the logical path. Returned data datagrams must
+use logical order, `next_id=0`, the active session tuple, and the configured
+outer algorithm. SR monitor requests and responses are the defined exception:
+their outer algorithm is always `none`. `SREntry.ip` is controller metadata and
+is not used as the ingress endpoint.
 
 The planner enforces:
 
@@ -140,12 +142,13 @@ The `managed` feature performs:
 3. controller configuration, posture, and device-binding evaluation;
 4. traditional server or SR-group normalization;
 5. bounded ingress probing and stable line selection;
-6. one temporary authentication OPEN;
-7. construction of a fresh direct `Client` for the persistent OPEN.
+6. a temporary authentication OPEN and header-only CLOSE for credential mode;
+7. construction of a fresh direct `Client` for the persistent OPEN in both
+   modes.
 
-The temporary OPEN proves the selected credentials and ends with a
-header-only close. The persistent tunnel always uses a second OPEN on a new
-client.
+The credential-mode temporary OPEN proves the selected credentials and ends
+with a header-only close, so its persistent tunnel uses a second OPEN. OIDC
+mode performs no temporary OPEN; its persistent connection performs the first.
 
 Controller responses remain untrusted. Stable outer fields are typed; unknown
 deployment-specific nested policy remains available as JSON. Traditional
@@ -158,7 +161,8 @@ contracts.
 
 `TunDevice` implements `PacketDevice` through the `tun` crate. `RouteGuard`
 applies canonical route changes and owns enough prior state to restore them in
-reverse order.
+reverse order. Linux snapshots any route that `ip route replace` will overwrite;
+Windows retains the replaced IP Helper row; macOS only deletes routes it added.
 
 Managed `all`, `ipfilter`, and `custom` policy becomes a list of CIDR
 differences. The active peer, known ingresses, loopback, multicast, and
@@ -189,11 +193,12 @@ controller and service defaults <- profile <- one-shot CLI
 effective policy from the new session; deactivation stops the engine and
 restores the platform lease.
 
-The packet engine handles visible unfragmented IPv4 DNS traffic. Queries pass
-to the tunnel, receive a synthetic response, or relay through sockets bound
-outside TUN. The relay bounds concurrency, rewrites transaction IDs, validates
-responses, retries servers, and retries truncated UDP over TCP. A session
-generation invalidates obsolete replies.
+The packet engine handles visible unfragmented IPv4 UDP/53 queries plus
+TCP/UDP 853 blocking. UDP/53 queries pass to the tunnel, receive a synthetic
+response, or relay through sockets bound outside TUN. The relay bounds
+concurrency, rewrites transaction IDs, validates responses, retries servers,
+and retries truncated UDP over TCP. A session generation invalidates obsolete
+replies.
 
 Platform leases use systemd-resolved with a `resolvconf` fallback on Linux, a
 scoped SystemConfiguration entry on macOS, and IP Helper APIs on Windows.

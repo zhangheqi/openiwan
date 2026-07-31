@@ -15,7 +15,8 @@ customer domain
     -> controller/server-list configuration
     -> posture and device-binding gates
     -> ingress probing and stable line selection
-    -> temporary authentication OPEN
+    -> credential mode: temporary authentication OPEN and header-only CLOSE
+       OIDC mode: no temporary OPEN
     -> persistent connection OPEN
 ```
 
@@ -88,9 +89,10 @@ two defined SaaS IDs use the fallback entry, IDs containing `panabit` use the
 Panabit entry, and all other IDs derive a 24-character secret from
 HMAC-SHA256 of the `app_id` using the SaaS salt.
 
-The request has one initial attempt and two retries. Only `credential` and
-`oidc` are accepted. `oidc` requires a valid `oidc` object containing at
-least:
+The request has one initial attempt and up to two retries. HTTP 4xx responses
+are terminal; transport failures, HTTP 5xx responses, and invalid response
+bodies remain retryable. Only `credential` and `oidc` are accepted. `oidc`
+requires a valid `oidc` object containing at least:
 
 - `authorization_endpoint`;
 - `token_endpoint`;
@@ -175,8 +177,10 @@ The request body contains:
 }
 ```
 
-`type` is the runtime platform (`android`, `ios`, `macos`, or `windows`), not
-the lookup service type.
+`type` is the controller compatibility platform, not the lookup service type.
+Android, iOS, macOS, and Windows use their corresponding values. Linux and
+other desktop Unix targets use `android` because the controller schema has no
+Linux value.
 
 The controller wraps traditional entries as `serverlist.serverlist`;
 lookup-backed lists are normalized to the same internal model. Each controller
@@ -271,9 +275,11 @@ retains managed exclusions; exclusions always win. Names are normalized and
 deduplicated, controller lists are capped at 100,000 entries, and `*`, `@`,
 `^`, and unprefixed rules retain official matching semantics.
 
-When encrypted DNS blocking is effective, visible TCP/UDP 853 is dropped and
-UDP/53 lookups for configured DoH hosts or `use-application-dns.net` receive
-NXDOMAIN. AAAA receives an empty NOERROR response. This is packet-level
+When encrypted DNS blocking is effective, visible unfragmented IPv4 TCP/UDP
+853 is dropped and IPv4 UDP/53 lookups for configured DoH hosts or
+`use-application-dns.net` receive NXDOMAIN. These checks remain active even
+when split DNS or tunnel DNS routing is off. When packet DNS routing is active,
+other AAAA queries receive an empty NOERROR response. This is packet-level
 compatibility behavior, not TLS interception or general DoH/QUIC inspection.
 
 Profile and one-shot overrides layer above controller settings. The active
